@@ -16,7 +16,6 @@ CORS(application)
 @application.route('/api/breadth')
 def get_breadth():
     try:
-        # Fetch real NIFTY data from Yahoo Finance
         nifty = yf.Ticker("^NSEI")
         data = nifty.history(period="1d")
         
@@ -26,7 +25,6 @@ def get_breadth():
             change = round(current_price - open_price, 2)
             change_percent = round((change / open_price) * 100, 2)
             
-            # Estimate Advance/Decline based on market movement
             if change > 0:
                 advances = 28
                 declines = 22
@@ -52,7 +50,6 @@ def get_breadth():
         else:
             return jsonify({'error': 'No data available'}), 500
     except Exception as e:
-        # Ultimate fallback - static data
         return jsonify({
             'advances': 21,
             'declines': 29,
@@ -172,33 +169,108 @@ def get_movers():
         return jsonify({'error': str(e)}), 500
 
 # ============================================
-# REAL OPTIONS CHAIN & PCR (NSE API)
+# HELPER FUNCTION FOR NSE API
+# ============================================
+
+def fetch_nse_data(url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.nseindia.com/',
+        'Origin': 'https://www.nseindia.com',
+        'Connection': 'keep-alive',
+    }
+    
+    session = requests.Session()
+    session.headers.update(headers)
+    session.get('https://www.nseindia.com', headers=headers, timeout=10)
+    response = session.get(url, headers=headers, timeout=10)
+    return response
+
+# ============================================
+# PCR STANDALONE ENDPOINT
+# ============================================
+
+@application.route('/api/pcr')
+def get_pcr():
+    try:
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        response = fetch_nse_data(url)
+        
+        if response.status_code != 200:
+            return jsonify({
+                'put_oi': 45200000,
+                'call_oi': 36800000,
+                'pcr': 1.23,
+                'sentiment': 'Neutral',
+                'signal': 'HOLD',
+                'pcr_change': 0,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'note': 'Using fallback data'
+            })
+        
+        data = response.json()
+        total_ce_oi = 0
+        total_pe_oi = 0
+        
+        for item in data['records']['data']:
+            if 'CE' in item:
+                total_ce_oi += item['CE']['openInterest']
+            if 'PE' in item:
+                total_pe_oi += item['PE']['openInterest']
+        
+        pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 1.0
+        
+        if pcr > 1.2:
+            sentiment = "Bullish"
+            signal = "BUY"
+        elif pcr < 0.7:
+            sentiment = "Bearish"
+            signal = "SELL"
+        else:
+            sentiment = "Neutral"
+            signal = "HOLD"
+        
+        return jsonify({
+            'put_oi': total_pe_oi,
+            'call_oi': total_ce_oi,
+            'pcr': pcr,
+            'sentiment': sentiment,
+            'signal': signal,
+            'pcr_change': 0,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        return jsonify({
+            'put_oi': 45200000,
+            'call_oi': 36800000,
+            'pcr': 1.23,
+            'sentiment': 'Neutral',
+            'signal': 'HOLD',
+            'pcr_change': 0,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error': str(e)
+        })
+
+# ============================================
+# OPTIONS CHAIN ENDPOINT
 # ============================================
 
 @application.route('/api/options-chain')
 def get_options_chain():
-    symbol = "NIFTY"
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-    }
-    
     try:
-        session = requests.Session()
-        session.headers.update(headers)
-        session.get("https://www.nseindia.com", headers=headers)
-        response = session.get(url, headers=headers)
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        response = fetch_nse_data(url)
         
         if response.status_code != 200:
-            return jsonify({"error": f"Failed to fetch data. Status: {response.status_code}"}), 500
+            return jsonify({"error": "Failed to fetch data from NSE", "fallback": True}), 500
         
         data = response.json()
         spot_price = data['records']['underlyingValue']
-        
         available_expiries = list(data['records']['expiryDates'])
+        
         if not available_expiries:
             return jsonify({"error": "No expiry dates found"}), 500
         current_expiry = available_expiries[0]
@@ -249,7 +321,7 @@ def get_options_chain():
             signal = "RANGE BOUND"
             
         return jsonify({
-            'symbol': symbol,
+            'symbol': 'NIFTY',
             'expiry': current_expiry,
             'spot_price': float(spot_price),
             'pcr': pcr,
@@ -263,170 +335,65 @@ def get_options_chain():
         return jsonify({'error': str(e)}), 500
 
 # ============================================
-# PCR STANDALONE ENDPOINT
-# ============================================
-
-@application.route('/api/pcr')
-def get_pcr():
-    try:
-        symbol = "NIFTY"
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"}
-        
-        session = requests.Session()
-        session.headers.update(headers)
-        session.get("https://www.nseindia.com", headers=headers)
-        response = session.get(url, headers=headers)
-        
-        if response.status_code != 200:
-            return jsonify({'error': 'Failed to fetch PCR data'}), 500
-        
-        data = response.json()
-        
-        total_ce_oi = 0
-        total_pe_oi = 0
-        
-        for item in data['records']['data']:
-            if 'CE' in item:
-                total_ce_oi += item['CE']['openInterest']
-            if 'PE' in item:
-                total_pe_oi += item['PE']['openInterest']
-        
-        pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
-        
-        if pcr > 1.2:
-            sentiment = "Bullish"
-            signal = "BUY"
-        elif pcr < 0.7:
-            sentiment = "Bearish"
-            signal = "SELL"
-        else:
-            sentiment = "Neutral"
-            signal = "HOLD"
-        
-        return jsonify({
-            'put_oi': total_pe_oi,
-            'call_oi': total_ce_oi,
-            'pcr': pcr,
-            'sentiment': sentiment,
-            'signal': signal,
-            'pcr_change': 0,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# ============================================
-# TRADING SIGNALS (Based on Real PCR)
+# TRADING SIGNALS (ONLY ONE - KEEP THIS)
 # ============================================
 
 @application.route('/api/trading-signals')
 def get_trading_signals():
-    # Get real PCR from the options chain
-    try:
-        symbol = "NIFTY"
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"}
-        
-        session = requests.Session()
-        session.headers.update(headers)
-        session.get("https://www.nseindia.com", headers=headers)
-        response = session.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            data = response.json()
-            total_ce_oi = 0
-            total_pe_oi = 0
-            
-            for item in data['records']['data']:
-                if 'CE' in item:
-                    total_ce_oi += item['CE']['openInterest']
-                if 'PE' in item:
-                    total_pe_oi += item['PE']['openInterest']
-            
-            pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 1.0
-            spot_price = data['records']['underlyingValue']
-        else:
-            nifty = yf.Ticker("^NSEI")
-            nifty_data = nifty.history(period="1d")
-            spot_price = round(nifty_data['Close'].iloc[-1], 2) if not nifty_data.empty else 8691.40
-            pcr = 1.0
-    except:
-        pcr = 1.0
-        spot_price = 8691.40
-    
-    # Get Advance/Decline from breadth endpoint logic
+    # Get NIFTY price from yfinance (reliable)
     try:
         nifty = yf.Ticker("^NSEI")
-        data = nifty.history(period="1d")
-        if not data.empty:
-            change = data['Close'].iloc[-1] - data['Open'].iloc[-1]
-            if change > 0:
-                ad_ratio = 1.27
-            elif change < 0:
-                ad_ratio = 0.79
-            else:
-                ad_ratio = 1.0
+        nifty_data = nifty.history(period="1d")
+        if not nifty_data.empty:
+            spot_price = round(nifty_data['Close'].iloc[-1], 2)
+            change = round(spot_price - nifty_data['Open'].iloc[-1], 2)
+            change_percent = round((change / nifty_data['Open'].iloc[-1]) * 100, 2)
         else:
-            ad_ratio = 0.72
+            spot_price = 8691.40
+            change = 45.20
+            change_percent = 0.52
     except:
-        ad_ratio = 0.72
+        spot_price = 8691.40
+        change = 45.20
+        change_percent = 0.52
     
-    # Generate overall signal based on PCR (Primary) and A/D Ratio (Secondary)
-    score = 0
-    signals = []
-    
-    # PCR Signal (60% weight)
-    if pcr > 1.2:
-        score += 2
-        signals.append({'indicator': 'PCR', 'signal': 'BULLISH', 'value': pcr})
-    elif pcr < 0.7:
-        score -= 2
-        signals.append({'indicator': 'PCR', 'signal': 'BEARISH', 'value': pcr})
-    else:
-        signals.append({'indicator': 'PCR', 'signal': 'NEUTRAL', 'value': pcr})
-    
-    # A/D Ratio Signal (40% weight)
-    if ad_ratio > 1:
-        score += 1
-        signals.append({'indicator': 'Advance/Decline', 'signal': 'BULLISH', 'value': ad_ratio})
-    elif ad_ratio < 0.7:
-        score -= 1
-        signals.append({'indicator': 'Advance/Decline', 'signal': 'BEARISH', 'value': ad_ratio})
-    else:
-        signals.append({'indicator': 'Advance/Decline', 'signal': 'NEUTRAL', 'value': ad_ratio})
-    
-    # Final Recommendation
-    if score >= 2:
+    # Determine signal based on price movement
+    if change_percent > 0.5:
         recommendation = 'STRONG BUY (Call Options)'
         action = 'BUY CE'
         confidence = 'High'
-    elif score >= 1:
+        overall_score = 3
+    elif change_percent > 0.1:
         recommendation = 'BUY (Call Options)'
         action = 'BUY CE'
         confidence = 'Medium'
-    elif score <= -2:
+        overall_score = 2
+    elif change_percent < -0.5:
         recommendation = 'STRONG SELL (Put Options)'
         action = 'BUY PE'
         confidence = 'High'
-    elif score <= -1:
+        overall_score = -3
+    elif change_percent < -0.1:
         recommendation = 'SELL (Put Options)'
         action = 'BUY PE'
         confidence = 'Medium'
+        overall_score = -2
     else:
         recommendation = 'HOLD / WAIT FOR CLEAR SIGNAL'
         action = 'HOLD'
         confidence = 'Low'
+        overall_score = 0
+    
+    signals = [{'indicator': 'Price Action', 'signal': 'Based on NIFTY movement', 'value': change_percent}]
     
     return jsonify({
-        'overall_score': score,
+        'overall_score': overall_score,
         'recommendation': recommendation,
         'action': action,
         'confidence': confidence,
         'signals': signals,
-        'pcr': pcr,
-        'spot_price': float(spot_price),
-        'ad_ratio': ad_ratio,
+        'spot_price': spot_price,
+        'change_percent': change_percent,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
