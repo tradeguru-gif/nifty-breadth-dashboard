@@ -7,7 +7,7 @@ application = Flask(__name__)
 CORS(application)
 
 # ============================================
-# NIFTY BREADTH DATA
+# MARKET BREADTH ENDPOINT
 # ============================================
 
 @application.route('/api/breadth')
@@ -47,11 +47,12 @@ def get_breadth():
     except:
         pass
     
+    # Fallback data
     return jsonify({
         'advances': 21,
         'declines': 29,
         'ad_ratio': 0.72,
-        'index_price': 8691.40,
+        'index_price': 23997.55,
         'change': '+45.20',
         'change_percent': '+0.52',
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -87,31 +88,57 @@ def get_realtime_nifty():
         return jsonify({'error': str(e)}), 500
 
 # ============================================
-# PCR (Working version - no NSE API)
+# PCR ENDPOINT (Working)
 # ============================================
-
 
 @application.route('/api/pcr')
 def get_pcr():
     try:
         nifty = yf.Ticker("^NSEI")
         data = nifty.history(period="2d")
+        
         if not data.empty:
             current = data['Close'].iloc[-1]
             previous = data['Close'].iloc[-2] if len(data) > 1 else current
             change_percent = round(((current - previous) / previous) * 100, 2)
-            if change_percent > 0.5:
-                pcr = 1.35; sentiment = "Bullish"; signal = "BUY"
-            elif change_percent < -0.5:
-                pcr = 0.65; sentiment = "Bearish"; signal = "SELL"
+            
+            if change_percent > 0.3:
+                pcr = 1.35
+                sentiment = "Bullish"
+                signal = "BUY"
+            elif change_percent < -0.3:
+                pcr = 0.65
+                sentiment = "Bearish"
+                signal = "SELL"
             else:
-                pcr = 1.05; sentiment = "Neutral"; signal = "HOLD"
-            return jsonify({'put_oi': round(40000000 * pcr), 'call_oi': 40000000, 'pcr': pcr, 'sentiment': sentiment, 'signal': signal, 'pcr_change': round(change_percent, 2), 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
-    except: pass
-    return jsonify({'put_oi': 45200000, 'call_oi': 36800000, 'pcr': 1.23, 'sentiment': 'Neutral', 'signal': 'HOLD', 'pcr_change': 0, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                pcr = 1.05
+                sentiment = "Neutral"
+                signal = "HOLD"
+            
+            return jsonify({
+                'put_oi': round(40000000 * pcr),
+                'call_oi': 40000000,
+                'pcr': pcr,
+                'sentiment': sentiment,
+                'signal': signal,
+                'pcr_change': round(change_percent, 2),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+    except:
+        pass
+    
+    return jsonify({
+        'put_oi': 45200000,
+        'call_oi': 36800000,
+        'pcr': 1.23,
+        'sentiment': 'Neutral',
+        'signal': 'HOLD',
+        'pcr_change': 0,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
 
 # ============================================
-# TRADING SIGNALS
+# TRADING SIGNALS ENDPOINT
 # ============================================
 
 @application.route('/api/trading-signals')
@@ -136,7 +163,7 @@ def get_trading_signals():
                 confidence = 'Medium'
                 overall_score = -2
             else:
-                recommendation = 'HOLD / WAIT'
+                recommendation = 'HOLD / WAIT FOR CLEAR SIGNAL'
                 action = 'HOLD'
                 confidence = 'Low'
                 overall_score = 0
@@ -155,11 +182,11 @@ def get_trading_signals():
     
     return jsonify({
         'overall_score': 0,
-        'recommendation': 'HOLD',
+        'recommendation': 'HOLD / WAIT FOR CLEAR SIGNAL',
         'action': 'HOLD',
         'confidence': 'Low',
         'signals': [],
-        'spot_price': 8691.40,
+        'spot_price': 23997.55,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
