@@ -138,58 +138,143 @@ def get_pcr():
     })
 
 # ============================================
-# TRADING SIGNALS ENDPOINT
+# TRADING SIGNALS ENDPOINT (ENHANCED)
 # ============================================
 
 @application.route('/api/trading-signals')
 def get_trading_signals():
     try:
+        # Fetch intraday data (1-minute intervals for accurate high/low)
         nifty = yf.Ticker("^NSEI")
-        data = nifty.history(period="1d")
+        data = nifty.history(period="1d", interval="1m")
+        
+        # Fallback to daily if intraday not available (after market hours)
+        if data.empty or len(data) < 5:
+            data = nifty.history(period="1d")
         
         if not data.empty:
-            spot_price = round(data['Close'].iloc[-1], 2)
-            open_price = round(data['Open'].iloc[-1], 2)
-            change_percent = round(((spot_price - open_price) / open_price) * 100, 2)
+            current_price = round(data['Close'].iloc[-1], 2)
+            day_high = round(data['High'].max(), 2)
+            day_low = round(data['Low'].min(), 2)
+            open_price = round(data['Open'].iloc[0], 2)
+            prev_close = round(data['Close'].iloc[-2] if len(data) > 1 else current_price, 2)
             
-            if change_percent > 0.3:
-                recommendation = 'BUY (Call Options)'
-                action = 'BUY CE'
-                confidence = 'Medium'
+            # Calculate intraday movement in points
+            intraday_high_move = day_high - open_price
+            intraday_low_move = open_price - day_low
+            intraday_range = day_high - day_low
+            
+            # Calculate open-to-current move
+            current_move = current_price - open_price
+            current_move_abs = abs(current_move)
+            
+            # ============================================
+            # SIGNAL GENERATION BASED ON 8+ POINTS MOVEMENT
+            # ============================================
+            
+            action = "HOLD"
+            recommendation = "HOLD / WAIT FOR CLEAR SIGNAL"
+            confidence = "Low"
+            overall_score = 0
+            trade_type = None
+            entry_price = None
+            stop_loss = None
+            take_profit = None
+            exit_rule = None
+            
+            # SIGNAL: BUY CE (Call Option) when:
+            # - Price moves UP more than 8 points from opening OR from day low
+            # - Current trend is bullish (price above open, or recovering from low)
+            if current_move > 8 or (day_high - day_low > 15 and current_price > open_price):
+                action = "BUY CE"
+                recommendation = "BUY CALL OPTION - Uptrend Detected"
+                confidence = "Medium"
                 overall_score = 2
-            elif change_percent < -0.3:
-                recommendation = 'SELL (Put Options)'
-                action = 'BUY PE'
-                confidence = 'Medium'
+                trade_type = "CALL"
+                entry_price = current_price
+                
+                # Stop Loss: 2% below entry or below day low
+                stop_loss = round(min(entry_price * 0.98, day_low - 5), 2)
+                # Take Profit: 1.5% above entry
+                take_profit = round(entry_price * 1.015, 2)
+                # Exit rule: 30% of profit retracement
+                exit_rule = f"EXIT if price falls {round(take_profit - entry_price, 2)} points from peak"
+                
+            # SIGNAL: BUY PE (Put Option) when:
+            # - Price moves DOWN more than 8 points from opening OR from day high
+            # - Current trend is bearish (price below open, or falling from high)
+            elif current_move < -8 or (day_high - day_low > 15 and current_price < open_price):
+                action = "BUY PE"
+                recommendation = "BUY PUT OPTION - Downtrend Detected"
+                confidence = "Medium"
                 overall_score = -2
-            else:
-                recommendation = 'HOLD / WAIT FOR CLEAR SIGNAL'
-                action = 'HOLD'
-                confidence = 'Low'
+                trade_type = "PUT"
+                entry_price = current_price
+                
+                # Stop Loss: 2% above entry or above day high
+                stop_loss = round(max(entry_price * 1.02, day_high + 5), 2)
+                # Take Profit: 1.5% below entry
+                take_profit = round(entry_price * 0.985, 2)
+                # Exit rule: 30% of profit retracement
+                exit_rule = f"EXIT if price rises {round(entry_price - take_profit, 2)} points from trough"
+            
+            # SIDEWAYS / HOLD condition (range less than 20 points)
+            elif intraday_range < 20:
+                action = "HOLD"
+                recommendation = "HOLD - Market Sideways. Wait for breakout above 20 points range"
+                confidence = "Low"
                 overall_score = 0
+                exit_rule = f"Range: {round(intraday_range, 2)} points. Trigger on 8+ point move"
+            
+            # Calculate profit exit at 30% of earned profits
+            profit_exit = None
+            if trade_type == "CALL" and take_profit:
+                target_gain = take_profit - entry_price
+                profit_exit = round(entry_price + (target_gain * 0.3), 2)
+                exit_rule += f" | BOOK 30% PROFIT at ₹{profit_exit}"
+            elif trade_type == "PUT" and take_profit:
+                target_gain = entry_price - take_profit
+                profit_exit = round(entry_price - (target_gain * 0.3), 2)
+                exit_rule += f" | BOOK 30% PROFIT at ₹{profit_exit}"
             
             return jsonify({
                 'overall_score': overall_score,
                 'recommendation': recommendation,
                 'action': action,
                 'confidence': confidence,
-                'signals': [{'indicator': 'NIFTY Movement', 'value': change_percent}],
-                'spot_price': spot_price,
+                'trade_type': trade_type,
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'profit_exit_30_percent': profit_exit,
+                'exit_rule': exit_rule,
+                'intraday_high': day_high,
+                'intraday_low': day_low,
+                'intraday_range': round(intraday_range, 2),
+                'current_move_points': round(current_move, 2),
+                'signals': [{'indicator': 'Intraday Movement', 'value': f'{current_move:+.2f} points'}],
+                'spot_price': current_price,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
-    except:
-        pass
     
+    except Exception as e:
+        print(f"Error in trading signals: {e}")
+    
+    # Fallback response
     return jsonify({
         'overall_score': 0,
         'recommendation': 'HOLD / WAIT FOR CLEAR SIGNAL',
         'action': 'HOLD',
         'confidence': 'Low',
-        'signals': [],
+        'trade_type': None,
+        'entry_price': None,
+        'stop_loss': None,
+        'take_profit': None,
+        'profit_exit_30_percent': None,
+        'exit_rule': 'Market data unavailable. Using fallback mode.',
         'spot_price': 23997.55,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
-
 # ============================================
 # HEALTH CHECK
 # ============================================
