@@ -12,48 +12,22 @@ import numpy as np
 # ==================================================
 # YOUR DHAN CREDENTIALS
 # ==================================================
-DHAN_CLIENT_ID = "1103060314"
-DHAN_API_KEY = "dd8ec18f"
-DHAN_API_SECRET = "426f1ee3-604e-4727-acc7-466f64a4da7b"
+import os
+DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
+DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
+if not DHAN_ACCESS_TOKEN:
+    raise ValueError("Missing DHAN_ACCESS_TOKEN")
 
 NIFTY_SECURITY_ID = None
 EXCHANGE_SEGMENT = "NSE"
-
 # --------------------------------------------------
-# Helper: Generate Dhan Access Token
+# Helper: Get NIFTY security ID (using static access token)
 # --------------------------------------------------
-def generate_access_token(client_id, api_key, api_secret):
-    url = "https://api.dhan.co/v2/token"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    payload = {
-        "client_id": client_id,
-        "api_key": api_key,
-        "api_secret": api_secret
-    }
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
-        if access_token:
-            print("✅ Access token obtained successfully")
-            return access_token
-        else:
-            print("❌ No access_token in response")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Token generation error: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"Response body: {e.response.text}")
-        return None
-
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
-    token = generate_access_token(DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET)
+    token = DHAN_ACCESS_TOKEN   # from environment variable
     if not token:
+        print("❌ No access token available")
         return None
     from dhanhq import dhanhq
     dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=token)
@@ -65,12 +39,12 @@ def get_nifty_security_id():
                 print(f"✅ Found NIFTY security_id = {NIFTY_SECURITY_ID}")
                 return NIFTY_SECURITY_ID
         NIFTY_SECURITY_ID = "116"
+        print("⚠️ Using fallback NIFTY security_id = 116")
         return NIFTY_SECURITY_ID
     except Exception as e:
         print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
         NIFTY_SECURITY_ID = "116"
         return NIFTY_SECURITY_ID
-
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
