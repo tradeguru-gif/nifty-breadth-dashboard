@@ -27,7 +27,7 @@ EXCHANGE_SEGMENT = "NSE"
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
     try:
-        dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+        dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
         instruments = dhan.get_instruments()
         for inst in instruments:
             if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
@@ -105,7 +105,7 @@ async def start_market_feed():
         get_nifty_security_id()
         await asyncio.sleep(2)
     
-    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+    dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
     dhan_context = dhan.get_dhan_context()
     mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
