@@ -2,41 +2,69 @@ import os
 import time
 import threading
 import asyncio
+import requests
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-from dhanhq import dhanhq, marketfeed
 
 # ==================================================
-# CREDENTIALS – READ FROM ENVIRONMENT
+# YOUR DHAN CREDENTIALS
 # ==================================================
-DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID", "1103060314")
-DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
-
-if not DHAN_ACCESS_TOKEN:
-    raise ValueError("❌ DHAN_ACCESS_TOKEN environment variable not set. Please add it in Render.")
+DHAN_CLIENT_ID = "1103060314"
+DHAN_API_KEY = "dd8ec18f"
+DHAN_API_SECRET = "426f1ee3-604e-4727-acc7-466f64a4da7b"
 
 NIFTY_SECURITY_ID = None
 EXCHANGE_SEGMENT = "NSE"
 
 # --------------------------------------------------
-# Fetch NIFTY security ID (runs once at startup)
+# Helper: Generate Dhan Access Token
 # --------------------------------------------------
+def generate_access_token(client_id, api_key, api_secret):
+    url = "https://api.dhan.co/v2/token"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "client_id": client_id,
+        "api_key": api_key,
+        "api_secret": api_secret
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        token_data = resp.json()
+        access_token = token_data.get("access_token")
+        if access_token:
+            print("✅ Access token obtained successfully")
+            return access_token
+        else:
+            print("❌ No access_token in response")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Token generation error: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response body: {e.response.text}")
+        return None
+
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
+    token = generate_access_token(DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET)
+    if not token:
+        return None
+    from dhanhq import dhanhq
+    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=token)
     try:
-        dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
         instruments = dhan.get_instruments()
         for inst in instruments:
             if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
                 NIFTY_SECURITY_ID = str(inst.get("security_id"))
                 print(f"✅ Found NIFTY security_id = {NIFTY_SECURITY_ID}")
                 return NIFTY_SECURITY_ID
-        # Fallback
         NIFTY_SECURITY_ID = "116"
-        print("⚠️ Using fallback NIFTY security_id = 116")
         return NIFTY_SECURITY_ID
     except Exception as e:
         print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
@@ -59,9 +87,6 @@ latest_market_data = {
     'last_update': None
 }
 
-# --------------------------------------------------
-# WebSocket callback: builds 1‑minute candles
-# --------------------------------------------------
 def on_ticks(ticks):
     global current_candle, minute_candles, latest_market_data
     now = datetime.now()
@@ -105,16 +130,17 @@ def on_ticks(ticks):
                 current_candle['close'] = float(price)
                 current_candle['volume'] += int(volume)
 
-# --------------------------------------------------
-# Market feed WebSocket connection
-# --------------------------------------------------
 async def start_market_feed():
     global NIFTY_SECURITY_ID
     while NIFTY_SECURITY_ID is None:
         get_nifty_security_id()
         await asyncio.sleep(2)
-    
-    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+    token = generate_access_token(DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET)
+    if not token:
+        print("❌ Cannot start WebSocket – no token")
+        return
+    from dhanhq import dhanhq, marketfeed
+    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=token)
     dhan_context = dhan.get_dhan_context()
     mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
@@ -277,12 +303,16 @@ application = Flask(__name__)
 CORS(application)
 
 def get_nifty_ohlc_daily():
+    token = generate_access_token(DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET)
+    if not token or NIFTY_SECURITY_ID is None:
+        return None
+    from dhanhq import dhanhq
+    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=token)
+    to_date = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
     try:
-        dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        from_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
         hist = dhan.get_historical_data(
-            security_id=NIFTY_SECURITY_ID or "116",
+            security_id=NIFTY_SECURITY_ID,
             exchange_segment=EXCHANGE_SEGMENT,
             from_date=from_date,
             to_date=to_date,
@@ -298,9 +328,6 @@ def get_nifty_ohlc_daily():
         pass
     return None
 
-# --------------------------------------------------
-# REST Endpoints
-# --------------------------------------------------
 @application.route('/api/trading-signals')
 def get_trading_signals():
     try:
@@ -402,8 +429,8 @@ def get_pcr():
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '6.1.0',
-        'features': 'Dynamic ATR threshold, EMA20 trend, VWAP, real‑time Dhan feed (access token)',
+        'version': '6.0.1',
+        'features': 'Dynamic ATR threshold, EMA20 trend, VWAP, real‑time Dhan feed',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
@@ -411,7 +438,7 @@ def health_check():
 @application.route('/')
 def home():
     return jsonify({
-        'message': 'Trade Guru NIFTY Trading API v6.1.0 (Dhan Access Token)',
+        'message': 'Trade Guru NIFTY Trading API v6.0.1 (Dhan + Dynamic Strategy)',
         'status': 'Running',
         'features': [
             '1.5×ATR momentum trigger',
@@ -427,6 +454,7 @@ def home():
 
 # --------------------------------------------------
 # START WEBSOCKET BACKGROUND THREAD (module level)
+# This runs when Gunicorn imports the application.
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
