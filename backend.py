@@ -27,7 +27,6 @@ EXCHANGE_SEGMENT = "NSE"
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
     try:
-        # ✅ Create the client with BOTH arguments (client ID and token)
         dhan_client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
         instruments = dhan_client.get_instruments()
         for inst in instruments:
@@ -44,7 +43,7 @@ def get_nifty_security_id():
         return NIFTY_SECURITY_ID
 
 # --------------------------------------------------
-# Real‑time data structures (same as before)
+# Real‑time data structures
 # --------------------------------------------------
 minute_candles = []
 current_candle = None
@@ -67,7 +66,7 @@ def on_ticks(ticks):
             price = float(tick.get('ltp', 0))
             volume = int(tick.get('volume', 0))
             tick_time = datetime.fromtimestamp(tick.get('exchange_time', time.time()))
-            
+
             latest_market_data['current_price'] = float(price)
             latest_market_data['last_update'] = now.isoformat()
             if latest_market_data['day_high'] is None or price > latest_market_data['day_high']:
@@ -99,22 +98,18 @@ def on_ticks(ticks):
                 current_candle['low'] = min(current_candle['low'], float(price))
                 current_candle['close'] = float(price)
                 current_candle['volume'] += int(volume)
-#---------------------------------------
-#start_market_feed
-#-------------------------------------
+
+# --------------------------------------------------
+# WebSocket connection handlers
+# --------------------------------------------------
 async def start_market_feed():
     global NIFTY_SECURITY_ID
     while NIFTY_SECURITY_ID is None:
         get_nifty_security_id()
         await asyncio.sleep(2)
 
-    # ✅ Change 1: Create the dhanhq client with BOTH arguments
     dhan_client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
-
-    # ✅ Change 2: Generate the DhanContext from your client
     dhan_context = dhan_client.get_dhan_context()
-
-    # ✅ Change 3: Pass the context to the MarketFeed constructor
     mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
     await mf.subscribe_instruments()
@@ -127,17 +122,153 @@ def run_websocket():
     loop.run_until_complete(start_market_feed())
 
 # --------------------------------------------------
-# (All your indicator functions – calculate_ema, get_next_expiry, suggest_strike, calculate_dynamic_signal, to_native – remain exactly as before)
+# Technical Indicators & Dynamic Logic
 # --------------------------------------------------
-# ... (paste your existing indicator functions here, unchanged)
+def to_native(obj):
+    """Convert numpy/pandas types to native Python types"""
+    if isinstance(obj, (np.integer, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, (list, tuple)):
+        return [to_native(x) for x in obj]
+    elif isinstance(obj, dict):
+        return {k: to_native(v) for k, v in obj.items()}
+    else:
+        return obj
+
+def calculate_ema(series, period=20):
+    return series.ewm(span=period, adjust=False).mean()
+
+def get_next_expiry():
+    today = datetime.now()
+    days_ahead = 3 - today.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    expiry_date = today + timedelta(days=days_ahead)
+    return expiry_date, (expiry_date - today).days
+
+def suggest_strike(current_price, action, days_to_expiry):
+    atm = round(current_price / 50) * 50
+    if action == "BUY CE":
+        strike = atm + 100
+    elif action == "BUY PE":
+        strike = atm - 100
+    else:
+        strike = atm
+    return {
+        'action': action,
+        'recommended_strike': int(strike),
+        'atm_strike': int(atm),
+        'call_strike_otm': int(atm + 100),
+        'put_strike_otm': int(atm - 100)
+    }
+
+def calculate_dynamic_signal(df):
+    if len(df) < 20:
+        return None
+
+    last_price = float(df['close'].iloc[-1])
+
+    # ATR (14)
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift())
+    low_close = abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = float(tr.rolling(14).mean().iloc[-1])
+    if pd.isna(atr) or atr == 0:
+        atr = 10.0
+
+    # 3‑minute momentum
+    if len(df) >= 4:
+        price_3min_ago = float(df['close'].iloc[-4])
+        momentum = last_price - price_3min_ago
+    else:
+        momentum = 0.0
+
+    # Volume ratio
+    current_vol = int(df['volume'].iloc[-1])
+    avg_vol = float(df['volume'].tail(20).mean())
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+
+    # RSI (14)
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    rsi_val = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50.0
+    rsi = float(rsi_val)
+
+    # EMA20
+    ema20 = float(calculate_ema(df['close'], 20).iloc[-1])
+
+    # VWAP from global state
+    vwap = latest_market_data.get('vwap')
+    if vwap is None:
+        vwap = last_price
+    else:
+        vwap = float(vwap)
+
+    # Signal generation
+    buy_signal = False
+    sell_signal = False
+    trigger_reason = "No trigger"
+    confidence = "Low"
+
+    if abs(momentum) > 1.5 * atr and vol_ratio > 1.5:
+        if momentum > 0 and last_price > ema20 and rsi > 50 and last_price > vwap:
+            buy_signal = True
+            confidence = "High" if vol_ratio > 2.0 else "Medium"
+            trigger_reason = f"Bullish momentum {momentum:.2f} > 1.5×ATR ({1.5*atr:.2f}) + above EMA20 & VWAP"
+        elif momentum < 0 and last_price < ema20 and rsi < 50 and last_price < vwap:
+            sell_signal = True
+            confidence = "High" if vol_ratio > 2.0 else "Medium"
+            trigger_reason = f"Bearish momentum {abs(momentum):.2f} > 1.5×ATR + below EMA20 & VWAP"
+
+    if buy_signal:
+        action = "BUY CE"
+        expiry_date, _ = get_next_expiry()
+        recommendation = f"📈 BUY CALL OPTION (Expiry: {expiry_date.strftime('%d-%b')})"
+    elif sell_signal:
+        action = "BUY PE"
+        expiry_date, _ = get_next_expiry()
+        recommendation = f"📉 BUY PUT OPTION (Expiry: {expiry_date.strftime('%d-%b')})"
+    else:
+        action = "HOLD"
+        recommendation = "HOLD – No strong signal"
+
+    expiry_date, days_left = get_next_expiry()
+    strike_info = suggest_strike(last_price, action, days_left)
+
+    result = {
+        'action': action,
+        'recommendation': recommendation,
+        'confidence': confidence,
+        'trigger_reason': trigger_reason,
+        'spot_price': round(last_price, 2),
+        'momentum_3min': round(momentum, 2),
+        'volume_ratio': round(vol_ratio, 2),
+        'rsi': round(rsi, 1),
+        'atr': round(atr, 2),
+        'vwap': round(vwap, 2),
+        'ema20': round(ema20, 2),
+        'expiry': expiry_date.strftime('%Y-%m-%d'),
+        'days_to_expiry': days_left,
+        'suggested_strike': strike_info,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    return to_native(result)
 
 # --------------------------------------------------
-# Flask app and endpoints (unchanged)
+# Flask app and endpoints
 # --------------------------------------------------
 application = Flask(__name__)
 CORS(application)
-# ========== PASTE YOUR ROUTE DEFINITIONS HERE ==========
-# ========== ROUTE DEFINITIONS ==========
+
 @application.route('/')
 def home():
     return jsonify({'message': 'Trade Guru NIFTY Trading API v6.1.0 (Dhan Access Token)'})
@@ -187,7 +318,7 @@ def get_realtime_nifty():
 @application.route('/api/pcr')
 def get_pcr():
     return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
-# Also paste your other routes: /api/trading-signals, /api/breadth, etc.
+
 # --------------------------------------------------
 # START WEBSOCKET THREAD (module level)
 # --------------------------------------------------
