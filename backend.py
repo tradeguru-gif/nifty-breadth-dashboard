@@ -448,4 +448,12 @@ if __name__ == '__main__':
     ws_thread.start()
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
+    if __name__ == '__main__':
+    get_nifty_security_id()
+    ws_thread = threading.Thread(target=run_websocket, daemon=True)
+    ws_thread.start()
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    time.sleep(5)
+    # CHANGE THE LINE BELOW:
+    # application.run(debug=False, host='0.0.0.0', port=5000) # <-- Old line
+    application.run(debug=False, host='0.0.0.0', port=5000) # <-- New line (must match Gunicorn)
