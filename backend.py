@@ -435,16 +435,18 @@ def home():
             'Weekly expiry handling'
         ],
         'endpoints': ['/api/health', '/api/trading-signals', '/api/breadth', '/api/realtime-nifty', '/api/pcr']
-    })
+    })-
 # --------------------------------------------------
 # START WEBSOCKET BACKGROUND THREAD (module level)
 # --------------------------------------------------
+# This must be the LAST thing in the file, after all definitions.
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
 ws_thread = threading.Thread(target=run_websocket, daemon=True)
 ws_thread.start()
 print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
 
+# This block is ONLY for local testing (not used on Render)
 if __name__ == '__main__':
     time.sleep(5)
     application.run(debug=False, host='0.0.0.0', port=5000)
