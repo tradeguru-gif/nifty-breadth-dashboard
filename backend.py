@@ -441,10 +441,9 @@ def home():
         ],
         'endpoints': ['/api/health', '/api/trading-signals', '/api/breadth', '/api/realtime-nifty', '/api/pcr']
     })
-
 # --------------------------------------------------
-# START WEBSOCKET BACKGROUND THREAD (for production)
-# This runs when Gunicorn imports the module (module level)
+# START WEBSOCKET BACKGROUND THREAD (module level)
+# This runs when Gunicorn imports the app
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
@@ -452,7 +451,7 @@ ws_thread = threading.Thread(target=run_websocket, daemon=True)
 ws_thread.start()
 print("🚀 Dhan WebSocket started. Waiting for ticks...")
 
-# This block is only for local testing with `python backend.py`
+# This block is ONLY for local testing with `python backend.py`
 if __name__ == '__main__':
     time.sleep(5)
     application.run(debug=False, host='0.0.0.0', port=5000)
