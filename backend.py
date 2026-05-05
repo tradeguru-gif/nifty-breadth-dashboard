@@ -27,8 +27,9 @@ EXCHANGE_SEGMENT = "NSE"
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
     try:
-        dhan = dhanhq(DHAN_ACCESS_TOKEN)
-        instruments = dhan.get_instruments()
+        # ✅ Create the client with BOTH arguments (client ID and token)
+        dhan_client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+        instruments = dhan_client.get_instruments()
         for inst in instruments:
             if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
                 NIFTY_SECURITY_ID = str(inst.get("security_id"))
@@ -98,15 +99,22 @@ def on_ticks(ticks):
                 current_candle['low'] = min(current_candle['low'], float(price))
                 current_candle['close'] = float(price)
                 current_candle['volume'] += int(volume)
-
+#---------------------------------------
+#start_market_feed
+#-------------------------------------
 async def start_market_feed():
     global NIFTY_SECURITY_ID
     while NIFTY_SECURITY_ID is None:
         get_nifty_security_id()
         await asyncio.sleep(2)
-    
-    dhan = dhanhq(DHAN_ACCESS_TOKEN)
-    dhan_context = dhan.get_dhan_context()
+
+    # ✅ Change 1: Create the dhanhq client with BOTH arguments
+    dhan_client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+
+    # ✅ Change 2: Generate the DhanContext from your client
+    dhan_context = dhan_client.get_dhan_context()
+
+    # ✅ Change 3: Pass the context to the MarketFeed constructor
     mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
     await mf.subscribe_instruments()
