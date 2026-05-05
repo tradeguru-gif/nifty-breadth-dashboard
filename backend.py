@@ -42,7 +42,6 @@ def get_nifty_security_id():
         print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
         NIFTY_SECURITY_ID = "116"
         return NIFTY_SECURITY_ID
-
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
@@ -123,27 +122,11 @@ async def start_market_feed():
         await asyncio.sleep(2)
 
     context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-    mf = marketfeed.MarketFeed(
-        context,
-        [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)],
-        on_ticks,
-        version="2.0"          # important: use the correct version string
-    )
+    mf = marketfeed.MarketFeed(context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
     await mf.subscribe_instruments()
     while True:
         await asyncio.sleep(1)
-    dhan_context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-    dhan = dhanhq(dhan_context)
-    mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
-    await mf.connect()
-    await mf.subscribe_instruments()
-    while True:
-        await asyncio.sleep(1)
-def run_websocket():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_market_feed())
 
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
