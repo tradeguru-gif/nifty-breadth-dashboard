@@ -10,7 +10,7 @@ import numpy as np
 from dhanhq import dhanhq, marketfeed
 
 # ==================================================
-# CREDENTIALS FROM ENVIRONMENT (no hardcoding)
+# CREDENTIALS FROM ENVIRONMENT
 # ==================================================
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
@@ -22,7 +22,7 @@ NIFTY_SECURITY_ID = None
 EXCHANGE_SEGMENT = "NSE"
 
 # --------------------------------------------------
-# Fetch NIFTY security ID (using static access token)
+# Fetch NIFTY security ID
 # --------------------------------------------------
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
@@ -56,6 +56,19 @@ latest_market_data = {
     'day_high': None,
     'day_low': None,
     'last_update': None
+}
+
+# Position tracking for exit signals (single worker)
+current_position = {
+    'active': False,
+    'type': None,          # 'LONG' or 'SHORT'
+    'entry_price': 0.0,
+    'stop_loss': 0.0,
+    'take_profit': 0.0,
+    'highest_price': 0.0,
+    'lowest_price': 0.0,
+    'trailing_stop': 0.0,
+    'entry_time': None
 }
 
 def on_ticks(ticks):
@@ -153,26 +166,51 @@ def get_next_expiry():
     return expiry_date, (expiry_date - today).days
 
 def suggest_strike(current_price, action, days_to_expiry):
+    """
+    Suggest strike price based on days to expiry:
+    - If expiry <= 1 day: ATM (nearest 50)
+    - Else: OTM by 100 points for CE or PE
+    """
     atm = round(current_price / 50) * 50
-    if action == "BUY CE":
-        strike = atm + 100
-    elif action == "BUY PE":
-        strike = atm - 100
-    else:
+    if days_to_expiry <= 1:
+        # Near expiry, use ATM
         strike = atm
+        strike_type = "ATM"
+    else:
+        if action == "BUY CE":
+            strike = atm + 100
+            strike_type = "OTM CE"
+        elif action == "BUY PE":
+            strike = atm - 100
+            strike_type = "OTM PE"
+        else:
+            strike = atm
+            strike_type = "ATM"
     return {
-        'action': action,
         'recommended_strike': int(strike),
+        'strike_type': strike_type,
         'atm_strike': int(atm),
-        'call_strike_otm': int(atm + 100),
-        'put_strike_otm': int(atm - 100)
+        'call_otm': int(atm + 100),
+        'put_otm': int(atm - 100),
+        'days_to_expiry': days_to_expiry
     }
 
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    """Return MACD line, signal line, histogram"""
+    exp1 = df['close'].ewm(span=fast, adjust=False).mean()
+    exp2 = df['close'].ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+
 def calculate_dynamic_signal(df):
+    global current_position
     if len(df) < 20:
         return None
 
     last_price = float(df['close'].iloc[-1])
+    current_time = datetime.now()
 
     # ATR (14)
     high_low = df['high'] - df['low']
@@ -206,37 +244,118 @@ def calculate_dynamic_signal(df):
     # EMA20
     ema20 = float(calculate_ema(df['close'], 20).iloc[-1])
 
-    # VWAP from global state
-    vwap = latest_market_data.get('vwap')
+    # VWAP
+    vwap = latest_market_data.get('vwap', last_price)
     if vwap is None:
         vwap = last_price
     else:
         vwap = float(vwap)
 
-    # Signal generation
+    # MACD
+    macd_line, signal_line, hist = calculate_macd(df)
+    macd_bullish = macd_line > signal_line and hist > 0
+
+    # --- EXIT CHECKS (if position active) ---
+    if current_position['active']:
+        exit_signal = None
+        # Update highest/lowest for trailing stop
+        if current_position['type'] == 'LONG':
+            if last_price > current_position['highest_price']:
+                current_position['highest_price'] = last_price
+                new_trail = last_price - 1.5 * atr
+                if new_trail > current_position['trailing_stop']:
+                    current_position['trailing_stop'] = new_trail
+        else:  # SHORT
+            if last_price < current_position['lowest_price']:
+                current_position['lowest_price'] = last_price
+                new_trail = last_price + 1.5 * atr
+                if new_trail < current_position['trailing_stop']:
+                    current_position['trailing_stop'] = new_trail
+
+        # Stop loss or trailing stop hit
+        if (current_position['type'] == 'LONG' and last_price <= current_position['trailing_stop']) or \
+           (current_position['type'] == 'SHORT' and last_price >= current_position['trailing_stop']):
+            exit_signal = 'EXIT'
+        # Take profit hit
+        elif (current_position['type'] == 'LONG' and last_price >= current_position['take_profit']) or \
+             (current_position['type'] == 'SHORT' and last_price <= current_position['take_profit']):
+            exit_signal = 'TAKE_PROFIT'
+        # MACD reversal
+        elif (current_position['type'] == 'LONG' and not macd_bullish) or \
+             (current_position['type'] == 'SHORT' and macd_bullish):
+            exit_signal = 'EXIT'
+
+        if exit_signal:
+            # Clear position and return exit signal
+            current_position['active'] = False
+            action = exit_signal
+            recommendation = f"{exit_signal} at ₹{last_price:.2f}"
+            confidence = "High"
+            trigger_reason = f"{'Stop loss' if exit_signal=='EXIT' else 'Take profit'} hit. Price: ₹{last_price:.2f}"
+            expiry_date, days_left = get_next_expiry()
+            return {
+                'action': action,
+                'recommendation': recommendation,
+                'confidence': confidence,
+                'trigger_reason': trigger_reason,
+                'spot_price': round(last_price, 2),
+                'momentum_3min': round(momentum, 2),
+                'volume_ratio': round(vol_ratio, 2),
+                'rsi': round(rsi, 1),
+                'atr': round(atr, 2),
+                'vwap': round(vwap, 2),
+                'ema20': round(ema20, 2),
+                'macd_hist': round(float(hist), 4),
+                'macd_bullish': macd_bullish,
+                'expiry': expiry_date.strftime('%Y-%m-%d'),
+                'days_to_expiry': days_left,
+                'suggested_strike': suggest_strike(last_price, action, days_left),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+    # --- NEW ENTRY SIGNALS (only if no active position) ---
     buy_signal = False
     sell_signal = False
     trigger_reason = "No trigger"
     confidence = "Low"
 
     if abs(momentum) > 1.5 * atr and vol_ratio > 1.5:
-        if momentum > 0 and last_price > ema20 and rsi > 50 and last_price > vwap:
+        # BUY CE (LONG)
+        if momentum > 0 and last_price > ema20 and last_price > vwap and rsi > 50 and macd_bullish:
             buy_signal = True
             confidence = "High" if vol_ratio > 2.0 else "Medium"
-            trigger_reason = f"Bullish momentum {momentum:.2f} > 1.5×ATR ({1.5*atr:.2f}) + above EMA20 & VWAP"
-        elif momentum < 0 and last_price < ema20 and rsi < 50 and last_price < vwap:
+            trigger_reason = f"Bullish momentum {momentum:.2f} > 1.5×ATR + MACD bullish + above EMA20/VWAP"
+        # BUY PE (SHORT)
+        elif momentum < 0 and last_price < ema20 and last_price < vwap and rsi < 50 and not macd_bullish:
             sell_signal = True
             confidence = "High" if vol_ratio > 2.0 else "Medium"
-            trigger_reason = f"Bearish momentum {abs(momentum):.2f} > 1.5×ATR + below EMA20 & VWAP"
+            trigger_reason = f"Bearish momentum {abs(momentum):.2f} > 1.5×ATR + MACD bearish + below EMA20/VWAP"
 
-    if buy_signal:
-        action = "BUY CE"
-        expiry_date, _ = get_next_expiry()
-        recommendation = f"📈 BUY CALL OPTION (Expiry: {expiry_date.strftime('%d-%b')})"
-    elif sell_signal:
-        action = "BUY PE"
-        expiry_date, _ = get_next_expiry()
-        recommendation = f"📉 BUY PUT OPTION (Expiry: {expiry_date.strftime('%d-%b')})"
+    if buy_signal or sell_signal:
+        entry_price = last_price
+        if buy_signal:
+            action = "BUY CE"
+            stop_loss = entry_price - 1.5 * atr
+            take_profit = entry_price + 2.5 * atr
+            trailing_stop = stop_loss
+            current_position['type'] = 'LONG'
+            current_position['highest_price'] = entry_price
+        else:
+            action = "BUY PE"
+            stop_loss = entry_price + 1.5 * atr
+            take_profit = entry_price - 2.5 * atr
+            trailing_stop = stop_loss
+            current_position['type'] = 'SHORT'
+            current_position['lowest_price'] = entry_price
+
+        current_position['active'] = True
+        current_position['entry_price'] = entry_price
+        current_position['stop_loss'] = stop_loss
+        current_position['take_profit'] = take_profit
+        current_position['trailing_stop'] = trailing_stop
+        current_position['entry_time'] = current_time
+
+        recommendation = f"{action} Entry ₹{entry_price:.2f} | Stop ₹{stop_loss:.2f} | Target ₹{take_profit:.2f}"
     else:
         action = "HOLD"
         recommendation = "HOLD – No strong signal"
@@ -256,6 +375,13 @@ def calculate_dynamic_signal(df):
         'atr': round(atr, 2),
         'vwap': round(vwap, 2),
         'ema20': round(ema20, 2),
+        'macd_hist': round(float(hist), 4),
+        'macd_bullish': macd_bullish,
+        'position_active': current_position['active'],
+        'entry_price': round(current_position['entry_price'], 2) if current_position['active'] else None,
+        'stop_loss': round(current_position['stop_loss'], 2) if current_position['active'] else None,
+        'take_profit': round(current_position['take_profit'], 2) if current_position['active'] else None,
+        'trailing_stop': round(current_position['trailing_stop'], 2) if current_position['active'] else None,
         'expiry': expiry_date.strftime('%Y-%m-%d'),
         'days_to_expiry': days_left,
         'suggested_strike': strike_info,
@@ -264,20 +390,37 @@ def calculate_dynamic_signal(df):
     return to_native(result)
 
 # --------------------------------------------------
-# Flask app and endpoints
+# Flask Application
 # --------------------------------------------------
 application = Flask(__name__)
 CORS(application)
 
+# --------------------------------------------------
+# REST Endpoints
+# --------------------------------------------------
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v6.1.0 (Dhan Access Token)'})
+    return jsonify({
+        'message': 'Trade Guru NIFTY Trading API v6.2 (MACD, ATR Stops, Trailing)',
+        'status': 'Running',
+        'features': [
+            '1.5×ATR momentum trigger',
+            'MACD confirmation',
+            'Volume >1.5x avg',
+            'RSI filter',
+            'EMA20 & VWAP trend filter',
+            'ATR-based stop loss (1.5×) and take profit (2.5×)',
+            'Trailing stop (1.5×ATR)',
+            'Exit signals (EXIT/TAKE_PROFIT)',
+            'Dynamic strike suggestions (ATM near expiry, OTM otherwise)'
+        ]
+    })
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '6.1.0',
+        'version': '6.2.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
@@ -306,18 +449,39 @@ def get_trading_signals():
 
 @application.route('/api/breadth')
 def get_breadth():
-    return jsonify({'advances': 25, 'declines': 25, 'ad_ratio': 1.0, 'index_price': 24500, 'change': '+0.00', 'change_percent': '+0.00', 'timestamp': datetime.now().isoformat()})
+    # Placeholder – can be enhanced with real breadth from Dhan if needed
+    return jsonify({
+        'advances': 25,
+        'declines': 25,
+        'ad_ratio': 1.0,
+        'index_price': latest_market_data.get('current_price', 24500),
+        'change': '+0.00',
+        'change_percent': '+0.00',
+        'timestamp': datetime.now().isoformat()
+    })
 
 @application.route('/api/realtime-nifty')
 def get_realtime_nifty():
-    price = latest_market_data.get('current_price', 0)
+    price = latest_market_data.get('current_price')
     if price:
-        return jsonify({'symbol': 'NIFTY 50', 'current_price': round(price, 2), 'change': 0, 'change_percent': 0, 'timestamp': datetime.now().isoformat()})
+        return jsonify({
+            'symbol': 'NIFTY 50',
+            'current_price': round(price, 2),
+            'change': 0,
+            'change_percent': 0,
+            'timestamp': datetime.now().isoformat()
+        })
     return jsonify({'error': 'No live data yet'}), 503
 
 @application.route('/api/pcr')
 def get_pcr():
-    return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
+    # Placeholder – implement live PCR if needed
+    return jsonify({
+        'pcr': 1.05,
+        'sentiment': 'Neutral',
+        'signal': 'HOLD',
+        'timestamp': datetime.now().isoformat()
+    })
 
 # --------------------------------------------------
 # START WEBSOCKET THREAD (module level)
