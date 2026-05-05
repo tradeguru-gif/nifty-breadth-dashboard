@@ -128,17 +128,39 @@ def run_websocket():
 # --------------------------------------------------
 application = Flask(__name__)
 CORS(application)
+# ========== PASTE YOUR ROUTE DEFINITIONS HERE ==========
+@application.route('/')
+def home():
+    return jsonify({'message': 'Trade Guru API is running'})
+
+@application.route('/api/health')
+def health_check():
+    return jsonify({
+        'status': 'running',
+        'candles_available': len(minute_candles),
+        'timestamp': datetime.now().isoformat()
+    })
+
+# Also paste your other routes: /api/trading-signals, /api/breadth, etc.
+# =======================================================
+
+# --------------------------------------------------
+# START WEBSOCKET THREAD (module level)
+# --------------------------------------------------
+# print("🚀 Initializing Dhan WebSocket...")
+# ...
+
 
 # ... (keep all your route definitions exactly as before)
 
 # --------------------------------------------------
 # START WEBSOCKET THREAD (module level)
 # --------------------------------------------------
-print("🚀 Initializing Dhan WebSocket...")
-get_nifty_security_id()
-ws_thread = threading.Thread(target=run_websocket, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
+#print("🚀 Initializing Dhan WebSocket...")
+#get_nifty_security_id()
+#ws_thread = threading.Thread(target=run_websocket, daemon=True)
+#ws_thread.start()
+#print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
 
 if __name__ == '__main__':
     time.sleep(5)
