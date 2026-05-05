@@ -394,7 +394,14 @@ def calculate_dynamic_signal(df):
 # --------------------------------------------------
 application = Flask(__name__)
 CORS(application)
+application.config['CORS_HEADERS'] = 'Content-Type'
 
+@application.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 # --------------------------------------------------
 # REST Endpoints
 # --------------------------------------------------
