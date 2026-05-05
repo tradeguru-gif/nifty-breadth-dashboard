@@ -442,9 +442,9 @@ def home():
 # Main: run WebSocket background thread and start server
 # --------------------------------------------------
 if __name__ == '__main__':
-   # --------------------------------------------------
+  # --------------------------------------------------
 # START WEBSOCKET BACKGROUND THREAD (for production)
-# This runs when Gunicorn imports the module
+# This runs when Gunicorn imports the module (module level)
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
