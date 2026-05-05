@@ -129,38 +129,65 @@ def run_websocket():
 application = Flask(__name__)
 CORS(application)
 # ========== PASTE YOUR ROUTE DEFINITIONS HERE ==========
+# ========== ROUTE DEFINITIONS ==========
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru API is running'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v6.1.0 (Dhan Access Token)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
+        'version': '6.1.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
 
+@application.route('/api/trading-signals')
+def get_trading_signals():
+    try:
+        with lock:
+            if len(minute_candles) < 20:
+                return jsonify({
+                    'error': 'Building real-time candles',
+                    'candles_available': len(minute_candles),
+                    'action': 'HOLD'
+                }), 202
+            df = pd.DataFrame(minute_candles)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
+            signal = calculate_dynamic_signal(df)
+            if signal:
+                return jsonify(signal)
+            return jsonify({'action': 'HOLD', 'reason': 'Insufficient indicators'})
+    except Exception as e:
+        print(f"Error in trading-signals: {e}")
+        return jsonify({'error': str(e), 'action': 'HOLD'}), 500
+
+@application.route('/api/breadth')
+def get_breadth():
+    return jsonify({'advances': 25, 'declines': 25, 'ad_ratio': 1.0, 'index_price': 24500, 'change': '+0.00', 'change_percent': '+0.00', 'timestamp': datetime.now().isoformat()})
+
+@application.route('/api/realtime-nifty')
+def get_realtime_nifty():
+    price = latest_market_data.get('current_price', 0)
+    if price:
+        return jsonify({'symbol': 'NIFTY 50', 'current_price': round(price, 2), 'change': 0, 'change_percent': 0, 'timestamp': datetime.now().isoformat()})
+    return jsonify({'error': 'No live data yet'}), 503
+
+@application.route('/api/pcr')
+def get_pcr():
+    return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
 # Also paste your other routes: /api/trading-signals, /api/breadth, etc.
-# =======================================================
-
 # --------------------------------------------------
 # START WEBSOCKET THREAD (module level)
 # --------------------------------------------------
-# print("🚀 Initializing Dhan WebSocket...")
-# ...
-
-
-# ... (keep all your route definitions exactly as before)
-
-# --------------------------------------------------
-# START WEBSOCKET THREAD (module level)
-# --------------------------------------------------
-#print("🚀 Initializing Dhan WebSocket...")
-#get_nifty_security_id()
-#ws_thread = threading.Thread(target=run_websocket, daemon=True)
-#ws_thread.start()
-#print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
+print("🚀 Initializing Dhan WebSocket...")
+get_nifty_security_id()
+ws_thread = threading.Thread(target=run_websocket, daemon=True)
+ws_thread.start()
+print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
 
 if __name__ == '__main__':
     time.sleep(5)
