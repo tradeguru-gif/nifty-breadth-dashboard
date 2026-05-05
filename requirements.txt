@@ -1,5 +1,7 @@
-flask
-flask_cors
-requests
-gunicorn
-dhanhq
+Flask==2.3.3
+flask-cors==4.0.1
+pandas>=2.3.3
+numpy<2.0.0,>=1.24.3
+dhanhq>=2.1.0
+gunicorn==21.2.0
+requests==2.31.0
