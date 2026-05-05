@@ -24,11 +24,15 @@ EXCHANGE_SEGMENT = "NSE"
 # --------------------------------------------------
 # Fetch NIFTY security ID
 # --------------------------------------------------
+from dhanhq import dhanhq, DhanContext
+
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
     try:
-        dhan_client = dhanhq(DHAN_ACCESS_TOKEN)      # only token, no client_id
-        instruments = dhan_client.get_instruments()
+        dhan_context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+        dhan = dhanhq(dhan_context)
+        instruments = dhan.get_instruments()
+        # ... rest unchanged
         for inst in instruments:
             if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
                 NIFTY_SECURITY_ID = str(inst.get("security_id"))
@@ -121,14 +125,13 @@ async def start_market_feed():
         get_nifty_security_id()
         await asyncio.sleep(2)
 
-    dhan_client = dhanhq(DHAN_ACCESS_TOKEN)      # only token, no client_id
-    dhan_context = dhan_client.get_dhan_context()
+    dhan_context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+    dhan = dhanhq(dhan_context)
     mf = marketfeed.MarketFeed(dhan_context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
     await mf.connect()
     await mf.subscribe_instruments()
     while True:
         await asyncio.sleep(1)
-
 def run_websocket():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
