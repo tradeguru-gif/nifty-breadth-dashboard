@@ -338,10 +338,6 @@ def get_trading_signals():
             'fallback': True
         }), 500
 
-# Keep other endpoints unchanged (breadth, realtime-nifty, pcr, health, home)
-# ... (paste the rest from previous version, but ensure they also use to_native if needed)
-# For brevity, I'll include them with safe conversions:
-
 @application.route('/api/breadth')
 def get_breadth():
     df = get_nifty_ohlc_daily()
@@ -442,18 +438,14 @@ def home():
         'endpoints': ['/api/health', '/api/trading-signals', '/api/breadth', '/api/realtime-nifty', '/api/pcr']
     })
 
+# --------------------------------------------------
+# Main: run WebSocket background thread and start server
+# --------------------------------------------------
 if __name__ == '__main__':
     get_nifty_security_id()
     ws_thread = threading.Thread(target=run_websocket, daemon=True)
     ws_thread.start()
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     time.sleep(5)
-    if __name__ == '__main__':
-    get_nifty_security_id()
-    ws_thread = threading.Thread(target=run_websocket, daemon=True)
-    ws_thread.start()
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    time.sleep(5)
-    # CHANGE THE LINE BELOW:
-    # application.run(debug=False, host='0.0.0.0', port=5000) # <-- Old line
-    application.run(debug=False, host='0.0.0.0', port=5000) # <-- New line (must match Gunicorn)
+    # When running with Gunicorn, this line is ignored.
+    application.run(debug=False, host='0.0.0.0', port=5000)
