@@ -49,6 +49,28 @@ def generate_access_token(client_id, api_key, api_secret):
         if hasattr(e, 'response') and e.response is not None:
             print(f"Response body: {e.response.text}")
         return None
+
+def get_nifty_security_id():
+    global NIFTY_SECURITY_ID
+    token = generate_access_token(DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET)
+    if not token:
+        return None
+    from dhanhq import dhanhq
+    dhan = dhanhq(client_id=DHAN_CLIENT_ID, access_token=token)
+    try:
+        instruments = dhan.get_instruments()
+        for inst in instruments:
+            if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
+                NIFTY_SECURITY_ID = str(inst.get("security_id"))
+                print(f"✅ Found NIFTY security_id = {NIFTY_SECURITY_ID}")
+                return NIFTY_SECURITY_ID
+        NIFTY_SECURITY_ID = "116"
+        return NIFTY_SECURITY_ID
+    except Exception as e:
+        print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
+        NIFTY_SECURITY_ID = "116"
+        return NIFTY_SECURITY_ID
+
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
@@ -272,7 +294,6 @@ def calculate_dynamic_signal(df):
         'suggested_strike': strike_info,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
-    # Convert any numpy types
     return to_native(result)
 
 # --------------------------------------------------
@@ -303,7 +324,7 @@ def get_nifty_ohlc_daily():
             df.set_index('timestamp', inplace=True)
             df.sort_index(inplace=True)
             return df
-    except:
+    except Exception:
         pass
     return None
 
@@ -327,11 +348,7 @@ def get_trading_signals():
             return jsonify({'action': 'HOLD', 'reason': 'Insufficient indicators'})
     except Exception as e:
         print(f"Error in trading-signals: {e}")
-        return jsonify({
-            'error': str(e),
-            'action': 'HOLD',
-            'fallback': True
-        }), 500
+        return jsonify({'error': str(e), 'action': 'HOLD', 'fallback': True}), 500
 
 @application.route('/api/breadth')
 def get_breadth():
@@ -356,7 +373,8 @@ def get_breadth():
             'change_percent': f"{'+' if change > 0 else ''}{round((change/open_price)*100, 2)}",
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
-    return jsonify({'advances': 21, 'declines': 29, 'ad_ratio': 0.72, 'index_price': 23997.55, 'change': '+45.20', 'change_percent': '+0.52', 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+    return jsonify({'advances': 21, 'declines': 29, 'ad_ratio': 0.72, 'index_price': 23997.55,
+                    'change': '+45.20', 'change_percent': '+0.52', 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
 
 @application.route('/api/realtime-nifty')
 def get_realtime_nifty():
@@ -404,7 +422,8 @@ def get_pcr():
             'pcr_change': round(change_percent, 2),
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
-    return jsonify({'put_oi': 45200000, 'call_oi': 36800000, 'pcr': 1.23, 'sentiment': 'Neutral', 'signal': 'HOLD', 'pcr_change': 0, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+    return jsonify({'put_oi': 45200000, 'call_oi': 36800000, 'pcr': 1.23, 'sentiment': 'Neutral',
+                    'signal': 'HOLD', 'pcr_change': 0, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
 
 @application.route('/api/health')
 def health_check():
@@ -416,9 +435,6 @@ def health_check():
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
-# --------------------------------------------------
-# (Your existing code above remains unchanged)
-# --------------------------------------------------
 @application.route('/')
 def home():
     return jsonify({
@@ -438,6 +454,7 @@ def home():
 
 # --------------------------------------------------
 # START WEBSOCKET BACKGROUND THREAD (module level)
+# This runs when Gunicorn imports the application.
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
