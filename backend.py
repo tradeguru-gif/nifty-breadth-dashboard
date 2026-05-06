@@ -7,7 +7,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-from dhanhq import dhanhq, marketfeed, DhanContext      # <-- added DhanContext
+from dhanhq import dhanhq, marketfeed
 
 # ==================================================
 # CREDENTIALS FROM ENVIRONMENT
@@ -18,34 +18,9 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in environment")
 
-NIFTY_SECURITY_ID = None
-EXCHANGE_SEGMENT = "NSE"
+NIFTY_SECURITY_ID = "116"  # Hardcoded for NIFTY 50
+EXCHANGE_SEGMENT = "IDX"    # For index
 
-# --------------------------------------------------
-# Fetch NIFTY security ID (correct DhanContext usage)
-# --------------------------------------------------
-def get_nifty_security_id():
-    global NIFTY_SECURITY_ID
-    # Hardcoded security ID for NIFTY 50 (commonly 116)
-    NIFTY_SECURITY_ID = "116"
-    print("✅ Using hardcoded NIFTY security_id = 116")
-    return NIFTY_SECURITY_ID
-    try:
-        context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-        client = dhanhq(context)
-        instruments = client.get_instruments()
-        for inst in instruments:
-            if inst.get("instrument_name") == "NIFTY 50" and inst.get("segment") == "NSE":
-                NIFTY_SECURITY_ID = str(inst.get("security_id"))
-                print(f"✅ Found NIFTY security_id = {NIFTY_SECURITY_ID}")
-                return NIFTY_SECURITY_ID
-        NIFTY_SECURITY_ID = "116"
-        print("⚠️ Using fallback NIFTY security_id = 116")
-        return NIFTY_SECURITY_ID
-    except Exception as e:
-        print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
-        NIFTY_SECURITY_ID = "116"
-        return NIFTY_SECURITY_ID
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
@@ -75,84 +50,68 @@ current_position = {
     'entry_time': None
 }
 
-def on_ticks(ticks):
+def process_tick(price, volume, tick_time):
+    """Process a single tick and build 1-minute candles"""
     global current_candle, minute_candles, latest_market_data
-    now = datetime.now()
     with lock:
-        for tick in ticks:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
-            tick_time = datetime.fromtimestamp(tick.get('exchange_time', time.time()))
-            
-            latest_market_data['current_price'] = float(price)
-            latest_market_data['last_update'] = now.isoformat()
-            if latest_market_data['day_high'] is None or price > latest_market_data['day_high']:
-                latest_market_data['day_high'] = float(price)
-            if latest_market_data['day_low'] is None or price < latest_market_data['day_low']:
-                latest_market_data['day_low'] = float(price)
+        latest_market_data['current_price'] = float(price)
+        latest_market_data['last_update'] = tick_time.isoformat()
+        if latest_market_data['day_high'] is None or price > latest_market_data['day_high']:
+            latest_market_data['day_high'] = float(price)
+        if latest_market_data['day_low'] is None or price < latest_market_data['day_low']:
+            latest_market_data['day_low'] = float(price)
 
-            latest_market_data['total_pv'] += price * volume
-            latest_market_data['total_vol'] += volume
-            if latest_market_data['total_vol'] > 0:
-                latest_market_data['vwap'] = float(latest_market_data['total_pv'] / latest_market_data['total_vol'])
+        latest_market_data['total_pv'] += price * volume
+        latest_market_data['total_vol'] += volume
+        if latest_market_data['total_vol'] > 0:
+            latest_market_data['vwap'] = float(latest_market_data['total_pv'] / latest_market_data['total_vol'])
 
-            current_minute = tick_time.replace(second=0, microsecond=0)
-            if current_candle is None or current_candle['timestamp'] != current_minute:
-                if current_candle is not None:
-                    minute_candles.append(current_candle)
-                    if len(minute_candles) > 500:
-                        minute_candles.pop(0)
-                current_candle = {
-                    'timestamp': current_minute,
-                    'open': float(price),
-                    'high': float(price),
-                    'low': float(price),
-                    'close': float(price),
-                    'volume': int(volume)
-                }
-            else:
-                current_candle['high'] = max(current_candle['high'], float(price))
-                current_candle['low'] = min(current_candle['low'], float(price))
-                current_candle['close'] = float(price)
-                current_candle['volume'] += int(volume)
-#--------------------------------------
-#START MARKET FEED
-#--------------------------------
+        current_minute = tick_time.replace(second=0, microsecond=0)
+        if current_candle is None or current_candle['timestamp'] != current_minute:
+            if current_candle is not None:
+                minute_candles.append(current_candle)
+                if len(minute_candles) > 500:
+                    minute_candles.pop(0)
+            current_candle = {
+                'timestamp': current_minute,
+                'open': float(price),
+                'high': float(price),
+                'low': float(price),
+                'close': float(price),
+                'volume': int(volume)
+            }
+        else:
+            current_candle['high'] = max(current_candle['high'], float(price))
+            current_candle['low'] = min(current_candle['low'], float(price))
+            current_candle['close'] = float(price)
+            current_candle['volume'] += int(volume)
+
+# --------------------------------------------------
+# WebSocket connection (synchronous version for dhanhq 2.0.2)
+# --------------------------------------------------
 def start_market_feed():
-    global NIFTY_SECURITY_ID
-    from dhanhq import marketfeed
-    
-    while NIFTY_SECURITY_ID is None:
-        get_nifty_security_id()
-        time.sleep(2)
-    
-    # Use the synchronous DhanFeed pattern (works in v2.0.2)
-    instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    
-    # For NIFTY index, use IDX segment instead
+    print("🚀 Starting Dhan WebSocket feed...")
+    # Create instruments list using marketfeed.IDX for index
     instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     
+    # Create the feed (synchronous, no async/await)
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     
-    # Define callback for incoming ticks
     def on_message(tick):
         try:
-            # Process the tick and build candles
             price = float(tick.get('ltp', 0))
             volume = int(tick.get('volume', 0))
             tick_time = datetime.now()
-            
-            # Update your minute_candles logic here
-            # (keep your existing on_ticks logic but adapt to this format)
             process_tick(price, volume, tick_time)
-            
         except Exception as e:
-            print(f"Error in on_message: {e}")
+            print(f"Error processing tick: {e}")
     
     feed.on_message = on_message
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
+
 # --------------------------------------------------
-# Technical Indicators & Dynamic Logic (placeholders – keep your existing code)
+# Technical Indicators & Dynamic Logic
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -423,7 +382,7 @@ def get_trading_signals():
 
 @application.route('/api/breadth')
 def get_breadth():
-    return jsonify({'advances': 25, 'declines': 25, 'ad_ratio': 1.0, 'index_price': 24500, 'change': '+0.00', 'change_percent': '+0.00', 'timestamp': datetime.now().isoformat()})
+    return jsonify({'advances': 25, 'declines': 25, 'ad_ratio': 1.0, 'index_price': latest_market_data.get('current_price', 24500), 'change': '+0.00', 'change_percent': '+0.00', 'timestamp': datetime.now().isoformat()})
 
 @application.route('/api/realtime-nifty')
 def get_realtime_nifty():
@@ -435,26 +394,15 @@ def get_realtime_nifty():
 @application.route('/api/pcr')
 def get_pcr():
     return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
+
 # --------------------------------------------------
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
-def start_market_feed():
-    global NIFTY_SECURITY_ID
-    from dhanhq import marketfeed
-    
-    while NIFTY_SECURITY_ID is None:
-        get_nifty_security_id()
-        time.sleep(2)
-    
-    # Use IDX segment for NIFTY 50 index
-    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-    
-    def on_message(tick):
-        on_ticks([tick])
-    
-    feed.on_message = on_message
-    feed.run_forever()
+print("🚀 Initializing Dhan WebSocket...")
 ws_thread = threading.Thread(target=start_market_feed, daemon=True)
+ws_thread.start()
+print("🚀 Dhan WebSocket thread started.")
 
+if __name__ == '__main__':
+    time.sleep(5)
+    application.run(debug=False, host='0.0.0.0', port=5000)
