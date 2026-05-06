@@ -118,24 +118,39 @@ def on_ticks(ticks):
 #--------------------------------------
 #START MARKET FEED
 #--------------------------------
-async def start_market_feed():
+def start_market_feed():
     global NIFTY_SECURITY_ID
+    from dhanhq import marketfeed
+    
     while NIFTY_SECURITY_ID is None:
         get_nifty_security_id()
-        await asyncio.sleep(2)
-
-    context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-    # Correct order: context, instruments, callback, version
-    mf = marketfeed.MarketFeed(context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks, "2.0")
-    await mf.connect()
-    await mf.subscribe_instruments()
-    while True:
-        await asyncio.sleep(1)
-
-def run_websocket():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_market_feed())
+        time.sleep(2)
+    
+    # Use the synchronous DhanFeed pattern (works in v2.0.2)
+    instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    
+    # For NIFTY index, use IDX segment instead
+    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    
+    # Define callback for incoming ticks
+    def on_message(tick):
+        try:
+            # Process the tick and build candles
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            tick_time = datetime.now()
+            
+            # Update your minute_candles logic here
+            # (keep your existing on_ticks logic but adapt to this format)
+            process_tick(price, volume, tick_time)
+            
+        except Exception as e:
+            print(f"Error in on_message: {e}")
+    
+    feed.on_message = on_message
+    feed.run_forever()
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic (placeholders – keep your existing code)
 # --------------------------------------------------
@@ -423,13 +438,23 @@ def get_pcr():
 # --------------------------------------------------
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
-print("🚀 Initializing Dhan WebSocket...")
-get_nifty_security_id()
-ws_thread = threading.Thread(target=run_websocket, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
+def start_market_feed():
+    global NIFTY_SECURITY_ID
+    from dhanhq import marketfeed
+    
+    while NIFTY_SECURITY_ID is None:
+        get_nifty_security_id()
+        time.sleep(2)
+    
+    # Use IDX segment for NIFTY 50 index
+    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    
+    def on_message(tick):
+        on_ticks([tick])
+    
+    feed.on_message = on_message
+    feed.run_forever()
+ws_thread = threading.Thread(target=start_market_feed, daemon=True)
 
-# This block is only for local testing (ignored by Gunicorn)
-if __name__ == '__main__':
-    time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
