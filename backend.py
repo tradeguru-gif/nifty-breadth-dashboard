@@ -26,6 +26,10 @@ EXCHANGE_SEGMENT = "NSE"
 # --------------------------------------------------
 def get_nifty_security_id():
     global NIFTY_SECURITY_ID
+    # Hardcoded security ID for NIFTY 50 (commonly 116)
+    NIFTY_SECURITY_ID = "116"
+    print("✅ Using hardcoded NIFTY security_id = 116")
+    return NIFTY_SECURITY_ID
     try:
         context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
         client = dhanhq(context)
