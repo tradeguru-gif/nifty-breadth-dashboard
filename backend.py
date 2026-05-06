@@ -1,7 +1,7 @@
 import os
 import time
 import threading
-import asyncio
+import asyncio      # <-- ADD THIS LINE
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -91,10 +91,12 @@ def process_tick(price, volume, tick_time):
 # --------------------------------------------------
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
-    # Create instruments list using marketfeed.IDX for index
-    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     
-    # Create the feed (synchronous, no async/await)
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     
     def on_message(tick):
@@ -109,7 +111,6 @@ def start_market_feed():
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
-
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
 # --------------------------------------------------
