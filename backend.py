@@ -42,7 +42,6 @@ def get_nifty_security_id():
         print(f"⚠️ Instrument fetch error: {e}, using fallback 116")
         NIFTY_SECURITY_ID = "116"
         return NIFTY_SECURITY_ID
-
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
@@ -112,7 +111,9 @@ def on_ticks(ticks):
                 current_candle['low'] = min(current_candle['low'], float(price))
                 current_candle['close'] = float(price)
                 current_candle['volume'] += int(volume)
-
+#--------------------------------------
+#START MARKET FEED
+#--------------------------------
 async def start_market_feed():
     global NIFTY_SECURITY_ID
     while NIFTY_SECURITY_ID is None:
@@ -120,18 +121,12 @@ async def start_market_feed():
         await asyncio.sleep(2)
 
     context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-    # MarketFeed expects (context, instruments, callback) – no version argument
-    mf = marketfeed.MarketFeed(context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks)
+    # Correct order: context, instruments, callback, version
+    mf = marketfeed.MarketFeed(context, [(EXCHANGE_SEGMENT, NIFTY_SECURITY_ID)], on_ticks, "2.0")
     await mf.connect()
     await mf.subscribe_instruments()
     while True:
         await asyncio.sleep(1)
-
-def run_websocket():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_market_feed())
-
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic (placeholders – keep your existing code)
 # --------------------------------------------------
