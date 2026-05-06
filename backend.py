@@ -416,9 +416,8 @@ def get_realtime_nifty():
 @application.route('/api/pcr')
 def get_pcr():
     return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
-
 # --------------------------------------------------
-# START WEBSOCKET THREAD (MUST BE AT THE VERY BOTTOM)
+# START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 get_nifty_security_id()
@@ -426,6 +425,7 @@ ws_thread = threading.Thread(target=run_websocket, daemon=True)
 ws_thread.start()
 print("🚀 Dhan WebSocket thread started. Waiting for ticks...")
 
+# This block is only for local testing (ignored by Gunicorn)
 if __name__ == '__main__':
     time.sleep(5)
     application.run(debug=False, host='0.0.0.0', port=5000)
