@@ -127,6 +127,11 @@ async def start_market_feed():
     await mf.subscribe_instruments()
     while True:
         await asyncio.sleep(1)
+
+def run_websocket():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_market_feed())
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic (placeholders – keep your existing code)
 # --------------------------------------------------
