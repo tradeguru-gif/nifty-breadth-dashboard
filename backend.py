@@ -102,7 +102,7 @@ def start_market_feed():
         except Exception as e:
             print(f"Error processing tick: {e}")
     
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v3")
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
@@ -232,7 +232,7 @@ def calculate_dynamic_signal(df):
     last_price = float(df['close'].iloc[-1])
     current_time = datetime.now()
     
-    # ========== TIME FILTER (Avoid open/close volatility) ==========
+    # ========== TIME FILTER ==========
     if not is_market_hours():
         return {
             'action': 'HOLD',
