@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import asyncio 
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -91,45 +92,6 @@ def process_tick(price, volume, tick_time):
 # --------------------------------------------------
 # WebSocket connection (working for dhanhq==2.0.2)
 # --------------------------------------------------
-def start_market_feed():
-    print("🚀 Starting Dhan WebSocket feed...")
-
-    # Instruments for the Index (NIFTY 50)
-    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-
-    # 1. Create the asynchronous feed object
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-
-    # 2. PATCH the connect method: 
-    #    Replace the async connect with a synchronous version that runs in a new event loop.
-    original_async_connect = feed.connect
-    def sync_connect():
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        try:
-            result = new_loop.run_until_complete(original_async_connect())
-        finally:
-            new_loop.close()
-        return result
-    feed.connect = sync_connect
-
-    # 3. Define the callback for incoming data
-    def on_message(tick):
-        try:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
-            tick_time = datetime.now()
-            process_tick(price, volume, tick_time)
-        except Exception as e:
-            print(f"❌ Error processing tick: {e}")
-
-    feed.on_message = on_message
-    feed.on_connect = lambda instance: print("✅ WebSocket connected and authorized.")
-    feed.on_error = lambda instance, error: print(f"❌ WebSocket Error: {error}")
-    feed.on_close = lambda instance: print("🔌 WebSocket connection closed.")
-
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    feed.run_forever()
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
 # --------------------------------------------------
@@ -511,6 +473,39 @@ def get_pcr():
 # --------------------------------------------------
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
+async def run_market_feed():
+    """Async function that sets up and runs the WebSocket feed."""
+    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+    def on_message(tick):
+        try:
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            tick_time = datetime.now()
+            process_tick(price, volume, tick_time)
+        except Exception as e:
+            print(f"Error processing tick: {e}")
+
+    feed.on_message = on_message
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    
+    # Connect and subscribe (async)
+    await feed.connect()
+    await feed.subscribe_instruments()
+    
+    # Keep the loop alive
+    while True:
+        await asyncio.sleep(1)
+
+def start_market_feed():
+    print("🚀 Starting Dhan WebSocket feed...")
+    # asyncio.run() creates a new event loop and runs the coroutine.
+    # It blocks the thread until the async function finishes – but our
+    # run_market_feed never returns (infinite loop), so this thread will
+    # stay alive and handle WebSocket messages.
+    asyncio.run(run_market_feed())
+
 print("🚀 Initializing Dhan WebSocket...")
 ws_thread = threading.Thread(target=start_market_feed, daemon=True)
 ws_thread.start()
