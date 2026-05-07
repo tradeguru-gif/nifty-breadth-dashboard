@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import asyncio      # <-- ADD THIS LINE
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -89,23 +88,53 @@ def process_tick(price, volume, tick_time):
 # --------------------------------------------------
 # WebSocket connection (synchronous version for dhanhq 2.0.2)
 # --------------------------------------------------
+
+# Remove the "import asyncio" line from the top of your file. It is not needed.
+
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
-    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    # The correct way to structure instruments for dhanhq 2.0.2
+    # Format is: (exchange_segment, "security_id", subscription_type)
+    # marketfeed.Ticker is for LTP data
+    instruments = [
+        (marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)
+    ]
     
-    def on_message(tick):
+    # Add a callback for when the connection opens (optional but good for debugging)
+    def on_connect(instance):
+        print("✅ WebSocket connection opened and authorized.")
+        print(f"   Subscribed to instruments: {instruments}")
+
+    # Add a callback for when a tick is received
+    def on_message(instance, message):
         try:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
+            # The message structure might vary. This is a safe way to get the price.
+            # 'ltp' is a common key for Last Traded Price in the tick data.
+            price = float(message.get('ltp', 0))
+            volume = int(message.get('volume', 0)) # Volume might not be in Ticker packet
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
+            
+            # Optional: Print a tick to confirm receipt (add sparingly, can flood logs)
+            # print(f"📊 {tick_time.strftime('%H:%M:%S')} - Price: {price}, Vol: {volume}")
+            
         except Exception as e:
-            print(f"Error processing tick: {e}")
+            print(f"❌ Error processing tick: {e}")
     
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments)
-    feed.on_message = on_message
+    # Initialize the feed using the correct, stable approach
+    # Note: Version 'v2' is for the newer WebSocket protocol
+    feed = marketfeed.DhanFeed(
+        DHAN_CLIENT_ID,
+        DHAN_ACCESS_TOKEN,
+        instruments,
+        "v2",
+        on_connect=on_connect,
+        on_message=on_message
+    )
+    
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    # This is a blocking call. It will run forever.
     feed.run_forever()
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
@@ -369,10 +398,9 @@ def get_trading_signals():
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
             df.sort_index(inplace=True)
-            signal = calculate_dynamic_signal(df)
-            if signal:
-                return jsonify(signal)
-            return jsonify({'action': 'HOLD', 'reason': 'Insufficient indicators'})
+if signal:
+    return jsonify(signal)
+return jsonify({'action': 'HOLD', 'reason': 'Insufficient indicators'})
     except Exception as e:
         print(f"Error in trading-signals: {e}")
         return jsonify({'error': str(e), 'action': 'HOLD'}), 500
