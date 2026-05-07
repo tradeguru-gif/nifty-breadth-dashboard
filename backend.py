@@ -474,9 +474,17 @@ def get_pcr():
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
 async def run_market_feed():
-    """Async function that sets up and runs the WebSocket feed."""
     instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
 
     def on_message(tick):
         try:
@@ -487,30 +495,13 @@ async def run_market_feed():
         except Exception as e:
             print(f"Error processing tick: {e}")
 
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
     feed.on_message = on_message
+
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    
-    # Connect and subscribe (async)
     await feed.connect()
     await feed.subscribe_instruments()
-    
-    # Keep the loop alive
     while True:
         await asyncio.sleep(1)
-
-def start_market_feed():
-    print("🚀 Starting Dhan WebSocket feed...")
-    # asyncio.run() creates a new event loop and runs the coroutine.
-    # It blocks the thread until the async function finishes – but our
-    # run_market_feed never returns (infinite loop), so this thread will
-    # stay alive and handle WebSocket messages.
-    asyncio.run(run_market_feed())
-
-print("🚀 Initializing Dhan WebSocket...")
-ws_thread = threading.Thread(target=start_market_feed, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started.")
-
-if __name__ == '__main__':
-    time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
