@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import asyncio
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -9,7 +10,7 @@ import numpy as np
 from dhanhq import dhanhq, marketfeed
 
 # ==================================================
-# CREDENTIALS FROM ENVIRONMENT
+# CREDENTIALS
 # ==================================================
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
@@ -17,7 +18,6 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# NIFTY 50 Index – security ID 26000 on NSE
 NIFTY_SECURITY_ID = "26000"
 EXCHANGE_SEGMENT = "NSE"
 
@@ -85,47 +85,48 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – synchronous, stable with dhanhq 2.0.2
+# WebSocket – async with asyncio.run() inside thread
 # --------------------------------------------------
 def start_market_feed():
-    print("🚀 Starting Dhan WebSocket feed (synchronous)...")
-    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    async def run_feed():
+        instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+        feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
 
-    def on_connect(instance):
-        print("✅ WebSocket connected and authorized.")
+        def on_connect(instance):
+            print("✅ WebSocket connected and authorized.")
+        def on_error(instance, error):
+            print(f"❌ WebSocket error: {error}")
+        def on_close(instance):
+            print("🔌 WebSocket closed.")
+        def on_message(instance, tick):
+            try:
+                price = float(tick.get('ltp', 0))
+                volume = int(tick.get('volume', 0))
+                tick_time = datetime.now()
+                process_tick(price, volume, tick_time)
+                if not hasattr(on_message, "count"):
+                    on_message.count = 0
+                on_message.count += 1
+                if on_message.count <= 10:
+                    print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+            except Exception as e:
+                print(f"Error processing tick: {e}")
 
-    def on_error(instance, error):
-        print(f"❌ WebSocket error: {error}")
+        feed.on_connect = on_connect
+        feed.on_error = on_error
+        feed.on_close = on_close
+        feed.on_message = on_message
 
-    def on_close(instance):
-        print("🔌 WebSocket closed.")
+        print("🚀 Dhan WebSocket started. Waiting for ticks...")
+        await feed.connect()
+        await feed.subscribe_instruments()
+        while True:
+            await asyncio.sleep(1)
 
-    def on_message(instance, tick):
-        try:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
-            tick_time = datetime.now()
-            process_tick(price, volume, tick_time)
-            # Print first 10 ticks for debugging
-            if not hasattr(on_message, "count"):
-                on_message.count = 0
-            on_message.count += 1
-            if on_message.count <= 10:
-                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
-        except Exception as e:
-            print(f"Error processing tick: {e}")
-
-    feed.on_connect = on_connect
-    feed.on_error = on_error
-    feed.on_close = on_close
-    feed.on_message = on_message
-
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    feed.run_forever()   # Blocks forever – works in background thread
+    asyncio.run(run_feed())
 
 # --------------------------------------------------
-# Technical Indicators & Signal Logic
+# Technical Indicators & Signal Logic (unchanged)
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -252,7 +253,6 @@ def calculate_dynamic_signal(df):
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
-    # ATR
     high_low = df['high'] - df['low']
     high_close = abs(df['high'] - df['close'].shift())
     low_close = abs(df['low'] - df['close'].shift())
@@ -261,14 +261,12 @@ def calculate_dynamic_signal(df):
     if pd.isna(atr) or atr == 0:
         atr = 10.0
 
-    # Momentum (3 min)
     if len(df) >= 4:
         price_3min_ago = float(df['close'].iloc[-4])
         momentum = last_price - price_3min_ago
     else:
         momentum = 0.0
 
-    # Volume ratio & spike
     current_vol = int(df['volume'].iloc[-1])
     avg_vol = float(df['volume'].tail(20).mean())
     vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
@@ -276,7 +274,6 @@ def calculate_dynamic_signal(df):
     vol_ok = spike_level >= 0
     vol_text = f"Volume {vol_ratio:.1f}x avg ({spike_strength})" if vol_ok else f"Weak volume ({vol_ratio:.1f}x avg)"
 
-    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -284,21 +281,17 @@ def calculate_dynamic_signal(df):
     rsi_val = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50.0
     rsi = float(rsi_val)
 
-    # EMA20 & VWAP
     ema20 = float(calculate_ema(df['close'], 20).iloc[-1])
     vwap = latest_market_data.get('vwap', last_price) or last_price
     vwap = float(vwap)
 
-    # MACD
     macd_line, sig_line, hist = calculate_macd(df)
     macd_bullish = macd_line > sig_line and hist > 0
 
-    # ADX – trend strength
     adx = calculate_adx(df)
     strong_trend = adx > 25
     trend_text = f"ADX {adx:.1f} ({'Strong trend' if strong_trend else 'Weak trend'})"
 
-    # Exit checks (if already in a position)
     if current_position['active']:
         exit_signal = None
         if current_position['type'] == 'LONG':
@@ -348,7 +341,6 @@ def calculate_dynamic_signal(df):
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
 
-    # Entry signals (only if no active position)
     buy_signal = sell_signal = False
     trigger_reason = "No trigger"
     confidence = "Low"
@@ -428,13 +420,13 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.2 (Synchronous WebSocket)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.3 (Async WebSocket)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '7.2.0',
+        'version': '7.3.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
