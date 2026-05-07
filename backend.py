@@ -482,11 +482,58 @@ def get_pcr():
 # --------------------------------------------------
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
-print("🚀 Initializing Dhan WebSocket...")
-ws_thread = threading.Thread(target=start_market_feed, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started.")
+# --------------------------------------------------
+# WebSocket connection – using multiprocessing to avoid event loop issues
+# --------------------------------------------------
+import multiprocessing
 
-if __name__ == '__main__':
-    time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
+def run_market_feed_process():
+    """Function to run in a separate process (has its own event loop)."""
+    import asyncio
+    from dhanhq import marketfeed
+
+    async def run_feed():
+        instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+        feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+        def on_connect(instance):
+            print("✅ WebSocket connected and authorized.")
+
+        def on_error(instance, error):
+            print(f"❌ WebSocket error: {error}")
+
+        def on_close(instance):
+            print("🔌 WebSocket closed.")
+
+        def on_message(instance, tick):
+            try:
+                price = float(tick.get('ltp', 0))
+                volume = int(tick.get('volume', 0))
+                tick_time = datetime.now()
+                process_tick(price, volume, tick_time)
+                if not hasattr(on_message, "count"):
+                    on_message.count = 0
+                on_message.count += 1
+                if on_message.count <= 10:
+                    print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+            except Exception as e:
+                print(f"Error processing tick: {e}")
+
+        feed.on_connect = on_connect
+        feed.on_error = on_error
+        feed.on_close = on_close
+        feed.on_message = on_message
+
+        print("🚀 Dhan WebSocket started. Waiting for ticks...")
+        await feed.connect()
+        await feed.subscribe_instruments()
+        while True:
+            await asyncio.sleep(1)
+
+    asyncio.run(run_feed())
+
+# Start the WebSocket process (instead of a thread)
+print("🚀 Initializing Dhan WebSocket (separate process)...")
+ws_process = multiprocessing.Process(target=run_market_feed_process, daemon=True)
+ws_process.start()
+print("🚀 Dhan WebSocket process started.")
