@@ -87,12 +87,21 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket connection (async, runs in background thread)
+#  Run_mMrket_Feed
 # --------------------------------------------------
 async def run_market_feed():
-    """Async coroutine that sets up and runs the WebSocket feed."""
-    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    # Try using NSE_FNO segment and security ID 13 (NIFTY futures)
+    instruments = [(marketfeed.NSE_FNO, "13", marketfeed.Ticker)]
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
 
     def on_message(instance, tick):
         try:
@@ -100,23 +109,25 @@ async def run_market_feed():
             volume = int(tick.get('volume', 0))
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
-            # Optional debug print (uncomment if needed)
-            # print(f"Tick: {price} at {tick_time}")
+            # Debug: print first few ticks
+            if not hasattr(on_message, "count"):
+                on_message.count = 0
+            on_message.count += 1
+            if on_message.count <= 10:
+                print(f"📊 Tick {on_message.count}: price={price}, volume={volume}")
         except Exception as e:
             print(f"Error processing tick: {e}")
 
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
     feed.on_message = on_message
+
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     await feed.connect()
     await feed.subscribe_instruments()
     while True:
         await asyncio.sleep(1)
-
-def start_market_feed():
-    """Function to be run in a background thread."""
-    print("🚀 Starting Dhan WebSocket feed...")
-    # asyncio.run() creates a new event loop for this thread and runs it
-    asyncio.run(run_market_feed())
 
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
