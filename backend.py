@@ -18,8 +18,8 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in environment")
 
-NIFTY_SECURITY_ID = "116"  # Hardcoded for NIFTY 50
-EXCHANGE_SEGMENT = "IDX"   # For index
+NIFTY_SECURITY_ID = "13"      # NIFTY futures – known working
+EXCHANGE_SEGMENT = "NSE_FNO"  # Futures segment
 
 # --------------------------------------------------
 # Real‑time data structures
@@ -87,11 +87,10 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-#  Run_mMrket_Feed
+# WebSocket connection (async, with robust error callbacks)
 # --------------------------------------------------
 async def run_market_feed():
-    # Try using NSE_FNO segment and security ID 13 (NIFTY futures)
-    instruments = [(marketfeed.NSE_FNO, "13", marketfeed.Ticker)]
+    instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
 
     def on_connect(instance):
@@ -109,12 +108,12 @@ async def run_market_feed():
             volume = int(tick.get('volume', 0))
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
-            # Debug: print first few ticks
+            # Debug print first 10 ticks
             if not hasattr(on_message, "count"):
                 on_message.count = 0
             on_message.count += 1
             if on_message.count <= 10:
-                print(f"📊 Tick {on_message.count}: price={price}, volume={volume}")
+                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
         except Exception as e:
             print(f"Error processing tick: {e}")
 
@@ -129,8 +128,13 @@ async def run_market_feed():
     while True:
         await asyncio.sleep(1)
 
+def start_market_feed():
+    """Function to run in background thread – creates event loop and runs async feed."""
+    print("🚀 Starting Dhan WebSocket feed (background thread)...")
+    asyncio.run(run_market_feed())
+
 # --------------------------------------------------
-# Technical Indicators & Dynamic Logic
+# Technical Indicators & Dynamic Logic (unchanged)
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -195,22 +199,17 @@ def calculate_adx(df, period=14):
     high = df['high']
     low = df['low']
     close = df['close']
-    
     high_low = high - low
     high_close = abs(high - close.shift())
     low_close = abs(low - close.shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    
     up_move = high - high.shift()
     down_move = low.shift() - low
-    
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
-    
     tr_smooth = tr.rolling(period).mean()
     plus_di = 100 * (plus_dm.rolling(period).mean() / tr_smooth)
     minus_di = 100 * (minus_dm.rolling(period).mean() / tr_smooth)
-    
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = dx.rolling(period).mean()
     return adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 20.0
@@ -219,12 +218,10 @@ def is_market_hours():
     now = datetime.now()
     ist_offset = timedelta(hours=5, minutes=30)
     current_ist = now + ist_offset
-    
     market_open = current_ist.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close = current_ist.replace(hour=15, minute=30, second=0, microsecond=0)
     optimal_start = current_ist.replace(hour=9, minute=30, second=0, microsecond=0)
     optimal_end = current_ist.replace(hour=15, minute=15, second=0, microsecond=0)
-    
     if current_ist < market_open or current_ist > market_close:
         return False
     if current_ist < optimal_start or current_ist > optimal_end:
@@ -433,13 +430,13 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.0 (Stable Async WebSocket)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.1 (WebSocket Callbacks + Futures)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '7.0.0',
+        'version': '7.1.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
