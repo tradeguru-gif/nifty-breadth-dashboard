@@ -399,11 +399,13 @@ def get_pcr():
 # --------------------------------------------------
 # START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
 # --------------------------------------------------
+# --------------------------------------------------
+# START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
+# --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
-ws_thread = threading.Thread(target=start_market_feed, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started.")
-
-if __name__ == '__main__':
-    time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
+try:
+    ws_thread = threading.Thread(target=start_market_feed, daemon=True)
+    ws_thread.start()
+    print("🚀 Dhan WebSocket thread started successfully.")
+except Exception as e:
+    print(f"❌ Failed to start thread: {e}")
