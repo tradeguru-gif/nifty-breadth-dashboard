@@ -27,6 +27,18 @@ latest_signal = {
     "trigger_reason": "Waiting for Signal...",
     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 }
+@app.route('/api/trading-signals', methods=['GET', 'POST'], strict_slashes=False)
+def trading_signals():
+    global latest_signal
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        if data:
+            # This updates our storage with the new signal from PowerShell/TradingView
+            latest_signal.update(data)
+            latest_signal["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return jsonify({"status": "success"}), 200
+        return jsonify({"status": "error", "message": "No data"}), 400
 
 # ==================================================
 # CREDENTIALS FROM ENVIRONMENT
@@ -444,8 +456,9 @@ def calculate_dynamic_signal(df):
 # --------------------------------------------------
 # Flask Application
 # --------------------------------------------------
-application = Flask(__name__)
-CORS(application)
+app = Flask(__name__)
+application = app  # <--- ADD THIS LINE
+CORS(app)
 
 @application.route('/')
 def home():
