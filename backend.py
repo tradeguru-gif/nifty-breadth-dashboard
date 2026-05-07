@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import asyncio   
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -85,12 +86,8 @@ def process_tick(price, volume, tick_time):
             current_candle['close'] = float(price)
             current_candle['volume'] += int(volume)
 
-# --------------------------------------------------
-# WebSocket connection (synchronous, with callbacks)
-# --------------------------------------------------
-def start_market_feed():
-    print("🚀 Starting Dhan WebSocket feed...")
-    
+async def run_market_feed():
+    """Async coroutine that sets up and runs the WebSocket feed."""
     instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
 
@@ -109,7 +106,6 @@ def start_market_feed():
             volume = int(tick.get('volume', 0))
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
-            # Debug: print first 10 ticks
             if not hasattr(on_message, "count"):
                 on_message.count = 0
             on_message.count += 1
@@ -124,8 +120,15 @@ def start_market_feed():
     feed.on_message = on_message
 
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    feed.run_forever()
+    await feed.connect()
+    await feed.subscribe_instruments()
+    while True:
+        await asyncio.sleep(1)
 
+def start_market_feed():
+    """Function to run in background thread – creates and runs the async loop."""
+    print("🚀 Starting Dhan WebSocket feed (background thread)...")
+    asyncio.run(run_market_feed())   # ✅ This creates a new event loop and runs the async function
 # --------------------------------------------------
 # Technical Indicators & Signal Logic
 # --------------------------------------------------
