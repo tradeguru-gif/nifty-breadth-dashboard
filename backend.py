@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import asyncio      # <-- ADD THIS LINE
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -86,12 +87,17 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket connection (synchronous for dhanhq 1.1.1)
+# WebSocket connection (synchronous version for dhanhq 2.0.2)
 # --------------------------------------------------
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     
     def on_message(tick):
         try:
@@ -102,11 +108,9 @@ def start_market_feed():
         except Exception as e:
             print(f"Error processing tick: {e}")
     
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v3")
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
-
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
 # --------------------------------------------------
@@ -169,61 +173,6 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
     hist = macd_line - signal_line
     return macd_line.iloc[-1], signal_line.iloc[-1], hist.iloc[-1]
 
-def calculate_adx(df, period=14):
-    """Calculate Average Directional Index for trend strength"""
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    high_low = high - low
-    high_close = abs(high - close.shift())
-    low_close = abs(low - close.shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    
-    up_move = high - high.shift()
-    down_move = low.shift() - low
-    
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
-    
-    tr_smooth = tr.rolling(period).mean()
-    plus_di = 100 * (plus_dm.rolling(period).mean() / tr_smooth)
-    minus_di = 100 * (minus_dm.rolling(period).mean() / tr_smooth)
-    
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(period).mean()
-    
-    return adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 20.0
-
-def is_market_hours():
-    """Check if within optimal trading hours (avoid open/close volatility)"""
-    now = datetime.now()
-    ist_offset = timedelta(hours=5, minutes=30)
-    current_ist = now + ist_offset
-    
-    market_open = current_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = current_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    
-    optimal_start = current_ist.replace(hour=9, minute=30, second=0, microsecond=0)
-    optimal_end = current_ist.replace(hour=15, minute=15, second=0, microsecond=0)
-    
-    if current_ist < market_open or current_ist > market_close:
-        return False
-    if current_ist < optimal_start or current_ist > optimal_end:
-        return False
-    return True
-
-def calculate_volume_spike(vol_ratio, atr):
-    """Dynamic volume confirmation based on market conditions"""
-    if vol_ratio >= 3.0:
-        return 2, "Very Strong"
-    elif vol_ratio >= 2.0:
-        return 1, "Strong"
-    elif vol_ratio >= 1.5:
-        return 0, "Normal"
-    else:
-        return -1, "Weak"
-
 def calculate_dynamic_signal(df):
     global current_position
     if len(df) < 20:
@@ -231,25 +180,8 @@ def calculate_dynamic_signal(df):
 
     last_price = float(df['close'].iloc[-1])
     current_time = datetime.now()
-    
-    # ========== TIME FILTER ==========
-    if not is_market_hours():
-        return {
-            'action': 'HOLD',
-            'recommendation': 'HOLD – Outside optimal trading hours',
-            'confidence': 'Low',
-            'trigger_reason': 'Avoiding open/close volatility (9:30-3:15 only)',
-            'spot_price': round(last_price, 2),
-            'position_active': current_position['active'],
-            'entry_price': round(current_position['entry_price'], 2) if current_position['active'] else None,
-            'stop_loss': round(current_position['stop_loss'], 2) if current_position['active'] else None,
-            'take_profit': round(current_position['take_profit'], 2) if current_position['active'] else None,
-            'trailing_stop': round(current_position['trailing_stop'], 2) if current_position['active'] else None,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
 
-    # ========== TECHNICAL INDICATORS ==========
-    # ATR (14)
+    # ATR
     high_low = df['high'] - df['low']
     high_close = abs(df['high'] - df['close'].shift())
     low_close = abs(df['low'] - df['close'].shift())
@@ -258,27 +190,19 @@ def calculate_dynamic_signal(df):
     if pd.isna(atr) or atr == 0:
         atr = 10.0
 
-    # 3-Minute Momentum
+    # Momentum
     if len(df) >= 4:
         price_3min_ago = float(df['close'].iloc[-4])
         momentum = last_price - price_3min_ago
     else:
         momentum = 0.0
 
-    # Volume with Spike Detection
+    # Volume
     current_vol = int(df['volume'].iloc[-1])
     avg_vol = float(df['volume'].tail(20).mean())
     vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
-    spike_level, spike_strength = calculate_volume_spike(vol_ratio, atr)
-    
-    if spike_level < 0:
-        vol_ok = False
-        vol_text = f"Weak volume ({vol_ratio:.1f}x avg)"
-    else:
-        vol_ok = vol_ratio > 1.5
-        vol_text = f"Volume {vol_ratio:.1f}x avg ({spike_strength})"
 
-    # RSI (14)
+    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -299,13 +223,8 @@ def calculate_dynamic_signal(df):
     # MACD
     macd_line, signal_line, hist = calculate_macd(df)
     macd_bullish = macd_line > signal_line and hist > 0
-    
-    # ========== TREND STRENGTH (ADX) ==========
-    adx = calculate_adx(df)
-    strong_trend = adx > 25
-    trend_text = f"ADX {adx:.1f} ({'Strong trend' if strong_trend else 'Weak trend'})"
 
-    # ========== EXIT CHECKS (if position active) ==========
+    # --- EXIT CHECKS (if position active) ---
     if current_position['active']:
         exit_signal = None
         if current_position['type'] == 'LONG':
@@ -348,28 +267,26 @@ def calculate_dynamic_signal(df):
                 'ema20': round(ema20, 2),
                 'macd_hist': round(float(hist), 4),
                 'macd_bullish': macd_bullish,
-                'adx': round(adx, 1),
                 'expiry': expiry_date.strftime('%Y-%m-%d'),
                 'days_to_expiry': days_left,
                 'suggested_strike': suggest_strike(last_price, exit_signal, days_left),
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
 
-    # ========== ENTRY SIGNALS (only if no active position) ==========
+    # --- NEW ENTRY SIGNALS ---
     buy_signal = sell_signal = False
     trigger_reason = "No trigger"
     confidence = "Low"
 
-    # Only generate entries if ADX > 25 (strong trend) and volume adequate
-    if strong_trend and vol_ok and abs(momentum) > 1.5 * atr:
+    if abs(momentum) > 1.5 * atr and vol_ratio > 1.5:
         if momentum > 0 and last_price > ema20 and last_price > vwap and rsi > 50 and macd_bullish:
             buy_signal = True
-            confidence = "High" if spike_level >= 1 else "Medium"
-            trigger_reason = f"Bullish: {momentum:.2f} pts, {vol_text}, {trend_text}"
+            confidence = "High" if vol_ratio > 2.0 else "Medium"
+            trigger_reason = f"Bullish momentum {momentum:.2f} > 1.5×ATR + MACD bullish"
         elif momentum < 0 and last_price < ema20 and last_price < vwap and rsi < 50 and not macd_bullish:
             sell_signal = True
-            confidence = "High" if spike_level >= 1 else "Medium"
-            trigger_reason = f"Bearish: {abs(momentum):.2f} pts, {vol_text}, {trend_text}"
+            confidence = "High" if vol_ratio > 2.0 else "Medium"
+            trigger_reason = f"Bearish momentum {abs(momentum):.2f} > 1.5×ATR + MACD bearish"
 
     if buy_signal or sell_signal:
         entry_price = last_price
@@ -415,7 +332,6 @@ def calculate_dynamic_signal(df):
         'ema20': round(ema20, 2),
         'macd_hist': round(float(hist), 4),
         'macd_bullish': macd_bullish,
-        'adx': round(adx, 1),
         'position_active': current_position['active'],
         'entry_price': round(current_position['entry_price'], 2) if current_position['active'] else None,
         'stop_loss': round(current_position['stop_loss'], 2) if current_position['active'] else None,
@@ -436,13 +352,13 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.0 (Dhan Stable WebSocket)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v6.2 (Dhan Access Token)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '7.0.0',
+        'version': '6.2.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
