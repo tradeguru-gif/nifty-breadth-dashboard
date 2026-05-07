@@ -10,7 +10,7 @@ import numpy as np
 from dhanhq import dhanhq, marketfeed
 
 # ==================================================
-# CREDENTIALS
+# CREDENTIALS FROM ENVIRONMENT
 # ==================================================
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
@@ -18,6 +18,7 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
+# NIFTY 50 index – security ID 26000 on NSE (try 116 if 26000 fails)
 NIFTY_SECURITY_ID = "26000"
 EXCHANGE_SEGMENT = "NSE"
 
@@ -85,48 +86,55 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – async with asyncio.run() inside thread
+# WebSocket – correct async pattern inside a thread
 # --------------------------------------------------
+async def run_feed():
+    """Async coroutine that sets up and runs the WebSocket feed."""
+    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
+
+    def on_message(instance, tick):
+        try:
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            tick_time = datetime.now()
+            process_tick(price, volume, tick_time)
+            # Print first 10 ticks for debugging
+            if not hasattr(on_message, "count"):
+                on_message.count = 0
+            on_message.count += 1
+            if on_message.count <= 10:
+                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+        except Exception as e:
+            print(f"Error processing tick: {e}")
+
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
+    feed.on_message = on_message
+
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    await feed.connect()
+    await feed.subscribe_instruments()
+    while True:
+        await asyncio.sleep(1)
+
 def start_market_feed():
-    async def run_feed():
-        instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-        feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-
-        def on_connect(instance):
-            print("✅ WebSocket connected and authorized.")
-        def on_error(instance, error):
-            print(f"❌ WebSocket error: {error}")
-        def on_close(instance):
-            print("🔌 WebSocket closed.")
-        def on_message(instance, tick):
-            try:
-                price = float(tick.get('ltp', 0))
-                volume = int(tick.get('volume', 0))
-                tick_time = datetime.now()
-                process_tick(price, volume, tick_time)
-                if not hasattr(on_message, "count"):
-                    on_message.count = 0
-                on_message.count += 1
-                if on_message.count <= 10:
-                    print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
-            except Exception as e:
-                print(f"Error processing tick: {e}")
-
-        feed.on_connect = on_connect
-        feed.on_error = on_error
-        feed.on_close = on_close
-        feed.on_message = on_message
-
-        print("🚀 Dhan WebSocket started. Waiting for ticks...")
-        await feed.connect()
-        await feed.subscribe_instruments()
-        while True:
-            await asyncio.sleep(1)
-
+    """Function to run in background thread – creates event loop and runs async feed."""
+    print("🚀 Starting Dhan WebSocket feed (background thread with asyncio.run)...")
     asyncio.run(run_feed())
 
 # --------------------------------------------------
-# Technical Indicators & Signal Logic (unchanged)
+# Technical Indicators & Dynamic Logic (keep all your existing functions)
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -292,6 +300,7 @@ def calculate_dynamic_signal(df):
     strong_trend = adx > 25
     trend_text = f"ADX {adx:.1f} ({'Strong trend' if strong_trend else 'Weak trend'})"
 
+    # Exit checks
     if current_position['active']:
         exit_signal = None
         if current_position['type'] == 'LONG':
@@ -341,6 +350,7 @@ def calculate_dynamic_signal(df):
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
 
+    # Entry signals
     buy_signal = sell_signal = False
     trigger_reason = "No trigger"
     confidence = "Low"
@@ -420,7 +430,7 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.3 (Async WebSocket)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.3 (Async WebSocket in thread)'})
 
 @application.route('/api/health')
 def health_check():
