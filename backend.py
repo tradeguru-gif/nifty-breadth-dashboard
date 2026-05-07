@@ -2,12 +2,31 @@ import os
 import time
 import threading
 import asyncio
-from datetime import datetime, timedelta
-from flask import Flask, jsonify
-from flask_cors import CORS
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dhanhq import dhanhq, marketfeed
+
+# Initialize the Flask app only ONCE
+app = Flask(__name__)
+
+# Enable CORS for your WordPress site
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# ============================================
+# PERSISTENT DATA STORAGE
+# ============================================
+# This holds your data in memory so the dashboard stays "Live"
+latest_signal = {
+    "action": "HOLD",
+    "recommendation": "System Connected",
+    "confidence": "Low",
+    "spot_price": 0.0,
+    "trigger_reason": "Waiting for Signal...",
+    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+}
 
 # ==================================================
 # CREDENTIALS FROM ENVIRONMENT
