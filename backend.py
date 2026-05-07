@@ -22,16 +22,17 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 @app.route('/api/trading-signals', methods=['GET', 'POST'], strict_slashes=False)
 def trading_signals():
     global latest_signal
-    
     if request.method == 'POST':
-        data = request.get_json()
-        if data:
-            # This updates our storage with the new signal
-            latest_signal.update(data)
-            latest_signal["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            return jsonify({"status": "success"}), 200
-        return jsonify({"status": "error", "message": "No data"}), 400
-
+        try:
+            data = request.get_json()
+            if data:
+                latest_signal.update(data)
+                latest_signal["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return jsonify({"status": "success", "message": "Signal Updated"}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+            
+    return jsonify(latest_signal)
     # IMPORTANT: This part must exist so your WordPress dashboard can READ the data
     return jsonify(latest_signal)
 # ==================================================
