@@ -91,8 +91,9 @@ def process_tick(price, volume, tick_time):
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
-    # Use NSE segment (more stable than IDX)
-    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    # For NIFTY 50 index, use segment 'IDX' (if available) or 'NSE'
+    # In dhanhq 1.1.1, marketfeed.IDX exists
+    instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
     
     def on_message(tick):
         try:
@@ -103,11 +104,11 @@ def start_market_feed():
         except Exception as e:
             print(f"Error processing tick: {e}")
     
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    # Note: no "v2" parameter, no asyncio
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments)
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
-
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
 # --------------------------------------------------
