@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import asyncio      # <-- ADD THIS LINE
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -87,17 +86,12 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket connection (synchronous version for dhanhq 2.0.2)
+# WebSocket connection (synchronous for dhanhq 1.1.1)
 # --------------------------------------------------
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     
     def on_message(tick):
         try:
@@ -108,9 +102,11 @@ def start_market_feed():
         except Exception as e:
             print(f"Error processing tick: {e}")
     
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
+
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic
 # --------------------------------------------------
@@ -172,6 +168,7 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     hist = macd_line - signal_line
     return macd_line.iloc[-1], signal_line.iloc[-1], hist.iloc[-1]
+
 def calculate_adx(df, period=14):
     """Calculate Average Directional Index for trend strength"""
     high = df['high']
@@ -226,9 +223,7 @@ def calculate_volume_spike(vol_ratio, atr):
         return 0, "Normal"
     else:
         return -1, "Weak"
-# --------------------------------------------------
-# Calculate_Dynamic_Signal
-# --------------------------------------------------
+
 def calculate_dynamic_signal(df):
     global current_position
     if len(df) < 20:
@@ -441,13 +436,13 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v6.2 (Dhan Access Token)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.0 (Dhan Stable WebSocket)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '6.2.0',
+        'version': '7.0.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
