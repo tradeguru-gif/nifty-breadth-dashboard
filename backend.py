@@ -92,12 +92,7 @@ def process_tick(price, volume, tick_time):
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     instruments = [(marketfeed.IDX, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
     
     def on_message(tick):
         try:
@@ -105,9 +100,11 @@ def start_market_feed():
             volume = int(tick.get('volume', 0))
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
+            print(f"📊 Tick: Price={price}, Volume={volume}")  # Debug print
         except Exception as e:
             print(f"Error processing tick: {e}")
     
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v3")
     feed.on_message = on_message
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
     feed.run_forever()
