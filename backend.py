@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import asyncio
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -16,10 +15,10 @@ DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
-    raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in environment")
+    raise ValueError("Missing credentials")
 
-NIFTY_SECURITY_ID = "13"      # NIFTY futures – known working
-EXCHANGE_SEGMENT = "NSE_FNO"  # Futures segment
+NIFTY_SECURITY_ID = "13"      # NIFTY futures
+EXCHANGE_SEGMENT = "NSE_FNO"
 
 # --------------------------------------------------
 # Real‑time data structures
@@ -37,7 +36,6 @@ latest_market_data = {
     'last_update': None
 }
 
-# Position tracking
 current_position = {
     'active': False,
     'type': None,
@@ -51,7 +49,6 @@ current_position = {
 }
 
 def process_tick(price, volume, tick_time):
-    """Process a single tick and build 1-minute candles"""
     global current_candle, minute_candles, latest_market_data
     with lock:
         latest_market_data['current_price'] = float(price)
@@ -89,50 +86,20 @@ def process_tick(price, volume, tick_time):
 # --------------------------------------------------
 # WebSocket connection (async, with robust error callbacks)
 # --------------------------------------------------
-async def run_market_feed():
+def start_market_feed():
+    print("🚀 Starting Dhan WebSocket feed...")
+    
     instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    
+    # Create feed object (no asyncio)
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-
+    
+    # Define callbacks
     def on_connect(instance):
         print("✅ WebSocket connected and authorized.")
-
+    
     def on_error(instance, error):
         print(f"❌ WebSocket error: {error}")
-
-    def on_close(instance):
-        print("🔌 WebSocket closed.")
-
-    def on_message(instance, tick):
-        try:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
-            tick_time = datetime.now()
-            process_tick(price, volume, tick_time)
-            # Debug print first 10 ticks
-            if not hasattr(on_message, "count"):
-                on_message.count = 0
-            on_message.count += 1
-            if on_message.count <= 10:
-                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
-        except Exception as e:
-            print(f"Error processing tick: {e}")
-
-    feed.on_connect = on_connect
-    feed.on_error = on_error
-    feed.on_close = on_close
-    feed.on_message = on_message
-
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    await feed.connect()
-    await feed.subscribe_instruments()
-    while True:
-        await asyncio.sleep(1)
-
-def start_market_feed():
-    """Function to run in background thread – creates event loop and runs async feed."""
-    print("🚀 Starting Dhan WebSocket feed (background thread)...")
-    asyncio.run(run_market_feed())
-
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic (unchanged)
 # --------------------------------------------------
@@ -430,23 +397,23 @@ CORS(application)
 
 @application.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.1 (WebSocket Callbacks + Futures)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.2 (Synchronous WebSocket)'})
 
 @application.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
-        'version': '7.1.0',
+        'version': '7.2.0',
         'candles_available': len(minute_candles),
         'timestamp': datetime.now().isoformat()
     })
 
 @application.route('/api/trading-signals')
 def get_trading_signals():
-    try:
-        with lock:
-            if len(minute_candles) < 20:
-                return jsonify({'error': 'Building real-time candles', 'candles_available': len(minute_candles), 'action': 'HOLD'}), 202
+with lock:
+        if len(minute_candles) < 20:
+            return jsonify({'error': 'Building real-time candles', 'candles_available': len(minute_candles), 'action': 'HOLD'}), 202
+
             df = pd.DataFrame(minute_candles)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
