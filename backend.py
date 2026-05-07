@@ -17,7 +17,7 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# Using NIFTY 50 Index (official security ID 26000 on NSE)
+# NIFTY 50 Index – security ID 26000 on NSE
 NIFTY_SECURITY_ID = "26000"
 EXCHANGE_SEGMENT = "NSE"
 
@@ -85,7 +85,7 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – synchronous, stable for dhanhq 1.1.1
+# WebSocket – synchronous, stable with dhanhq 2.0.2
 # --------------------------------------------------
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed (synchronous)...")
@@ -122,10 +122,10 @@ def start_market_feed():
     feed.on_message = on_message
 
     print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    feed.run_forever()
+    feed.run_forever()   # Blocks forever – works in background thread
 
 # --------------------------------------------------
-# Technical Indicators & Signal Logic (all your existing functions)
+# Technical Indicators & Signal Logic
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -252,6 +252,7 @@ def calculate_dynamic_signal(df):
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
+    # ATR
     high_low = df['high'] - df['low']
     high_close = abs(df['high'] - df['close'].shift())
     low_close = abs(df['low'] - df['close'].shift())
@@ -260,12 +261,14 @@ def calculate_dynamic_signal(df):
     if pd.isna(atr) or atr == 0:
         atr = 10.0
 
+    # Momentum (3 min)
     if len(df) >= 4:
         price_3min_ago = float(df['close'].iloc[-4])
         momentum = last_price - price_3min_ago
     else:
         momentum = 0.0
 
+    # Volume ratio & spike
     current_vol = int(df['volume'].iloc[-1])
     avg_vol = float(df['volume'].tail(20).mean())
     vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
@@ -273,6 +276,7 @@ def calculate_dynamic_signal(df):
     vol_ok = spike_level >= 0
     vol_text = f"Volume {vol_ratio:.1f}x avg ({spike_strength})" if vol_ok else f"Weak volume ({vol_ratio:.1f}x avg)"
 
+    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -280,18 +284,21 @@ def calculate_dynamic_signal(df):
     rsi_val = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50.0
     rsi = float(rsi_val)
 
+    # EMA20 & VWAP
     ema20 = float(calculate_ema(df['close'], 20).iloc[-1])
     vwap = latest_market_data.get('vwap', last_price) or last_price
     vwap = float(vwap)
 
+    # MACD
     macd_line, sig_line, hist = calculate_macd(df)
     macd_bullish = macd_line > sig_line and hist > 0
 
+    # ADX – trend strength
     adx = calculate_adx(df)
     strong_trend = adx > 25
     trend_text = f"ADX {adx:.1f} ({'Strong trend' if strong_trend else 'Weak trend'})"
 
-    # Exit checks
+    # Exit checks (if already in a position)
     if current_position['active']:
         exit_signal = None
         if current_position['type'] == 'LONG':
@@ -341,7 +348,7 @@ def calculate_dynamic_signal(df):
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
 
-    # Entry signals
+    # Entry signals (only if no active position)
     buy_signal = sell_signal = False
     trigger_reason = "No trigger"
     confidence = "Low"
@@ -466,7 +473,7 @@ def get_pcr():
     return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
 
 # --------------------------------------------------
-# START WEBSOCKET THREAD (MUST BE AT MODULE LEVEL)
+# START WEBSOCKET THREAD
 # --------------------------------------------------
 print("🚀 Initializing Dhan WebSocket...")
 ws_thread = threading.Thread(target=start_market_feed, daemon=True)
