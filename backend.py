@@ -15,9 +15,9 @@ DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
-    raise ValueError("Missing credentials")
+    raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in environment")
 
-NIFTY_SECURITY_ID = "13"      # NIFTY futures
+NIFTY_SECURITY_ID = "13"       # NIFTY futures – known to work
 EXCHANGE_SEGMENT = "NSE_FNO"
 
 # --------------------------------------------------
@@ -36,6 +36,7 @@ latest_market_data = {
     'last_update': None
 }
 
+# Position tracking
 current_position = {
     'active': False,
     'type': None,
@@ -49,6 +50,7 @@ current_position = {
 }
 
 def process_tick(price, volume, tick_time):
+    """Process a single tick and build 1-minute candles"""
     global current_candle, minute_candles, latest_market_data
     with lock:
         latest_market_data['current_price'] = float(price)
@@ -84,24 +86,48 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket connection (async, with robust error callbacks)
+# WebSocket connection (synchronous, with callbacks)
 # --------------------------------------------------
 def start_market_feed():
     print("🚀 Starting Dhan WebSocket feed...")
     
     instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    
-    # Create feed object (no asyncio)
     feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-    
-    # Define callbacks
+
     def on_connect(instance):
         print("✅ WebSocket connected and authorized.")
-    
+
     def on_error(instance, error):
         print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
+
+    def on_message(instance, tick):
+        try:
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            tick_time = datetime.now()
+            process_tick(price, volume, tick_time)
+            # Debug: print first 10 ticks
+            if not hasattr(on_message, "count"):
+                on_message.count = 0
+            on_message.count += 1
+            if on_message.count <= 10:
+                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+        except Exception as e:
+            print(f"Error processing tick: {e}")
+
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
+    feed.on_message = on_message
+
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    feed.run_forever()
+
 # --------------------------------------------------
-# Technical Indicators & Dynamic Logic (unchanged)
+# Technical Indicators & Signal Logic
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -182,6 +208,7 @@ def calculate_adx(df, period=14):
     return adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 20.0
 
 def is_market_hours():
+    """Check if within optimal trading hours (avoid open/close volatility)"""
     now = datetime.now()
     ist_offset = timedelta(hours=5, minutes=30)
     current_ist = now + ist_offset
@@ -213,6 +240,7 @@ def calculate_dynamic_signal(df):
     last_price = float(df['close'].iloc[-1])
     current_time = datetime.now()
     
+    # Time filter
     if not is_market_hours():
         return {
             'action': 'HOLD',
@@ -228,6 +256,7 @@ def calculate_dynamic_signal(df):
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
+    # ATR
     high_low = df['high'] - df['low']
     high_close = abs(df['high'] - df['close'].shift())
     low_close = abs(df['low'] - df['close'].shift())
@@ -236,12 +265,14 @@ def calculate_dynamic_signal(df):
     if pd.isna(atr) or atr == 0:
         atr = 10.0
 
+    # 3‑minute momentum
     if len(df) >= 4:
         price_3min_ago = float(df['close'].iloc[-4])
         momentum = last_price - price_3min_ago
     else:
         momentum = 0.0
 
+    # Volume with spike detection
     current_vol = int(df['volume'].iloc[-1])
     avg_vol = float(df['volume'].tail(20).mean())
     vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
@@ -249,6 +280,7 @@ def calculate_dynamic_signal(df):
     vol_ok = spike_level >= 0
     vol_text = f"Volume {vol_ratio:.1f}x avg ({spike_strength})" if vol_ok else f"Weak volume ({vol_ratio:.1f}x avg)"
 
+    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -256,13 +288,16 @@ def calculate_dynamic_signal(df):
     rsi_val = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50.0
     rsi = float(rsi_val)
 
+    # EMA20
     ema20 = float(calculate_ema(df['close'], 20).iloc[-1])
     vwap = latest_market_data.get('vwap', last_price) or last_price
     vwap = float(vwap)
 
+    # MACD
     macd_line, signal_line, hist = calculate_macd(df)
     macd_bullish = macd_line > signal_line and hist > 0
 
+    # ADX
     adx = calculate_adx(df)
     strong_trend = adx > 25
     trend_text = f"ADX {adx:.1f} ({'Strong trend' if strong_trend else 'Weak trend'})"
@@ -410,10 +445,10 @@ def health_check():
 
 @application.route('/api/trading-signals')
 def get_trading_signals():
-with lock:
-        if len(minute_candles) < 20:
-            return jsonify({'error': 'Building real-time candles', 'candles_available': len(minute_candles), 'action': 'HOLD'}), 202
-
+    try:
+        with lock:
+            if len(minute_candles) < 20:
+                return jsonify({'error': 'Building real-time candles', 'candles_available': len(minute_candles), 'action': 'HOLD'}), 202
             df = pd.DataFrame(minute_candles)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
