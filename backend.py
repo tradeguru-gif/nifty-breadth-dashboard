@@ -197,9 +197,8 @@ class SignalFeedHandler(marketfeed.MarketFeed):
                         f"RSI:{rsi:.1f} PCR:{pcr:.2f} -> {signal}")
             self.last_signal = signal
 
-
 # ===================================================
-# MAIN EXECUTION
+# MAIN EXECUTION – STARTED IN BACKGROUND THREAD
 # ===================================================
 async def main():
     try:
@@ -231,5 +230,26 @@ async def main():
         if 'feed' in locals():
             await feed.disconnect()
 
+def start_signal_engine():
+    """Run the async main() in a separate event loop (called from a thread)."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
+
+# Launch the signal engine in a background daemon thread
+# (so it doesn't block the Flask/Gunicorn main thread)
+thread = threading.Thread(target=start_signal_engine, daemon=True)
+thread.start()
+
+# Flask application object (make sure it's named 'application' for Gunicorn)
+from flask import Flask
+app = Flask(__name__)
+application = app   # Gunicorn looks for 'application'
+
+@app.route('/')
+def home():
+    return "Nifty Options Signal Engine is running."
+
 if __name__ == "__main__":
+    # For local testing, you can run the main directly
     asyncio.run(main())
