@@ -44,10 +44,8 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# NIFTY 50 index – security ID 26000 on NSE (try 116 if 26000 fails)
-NIFTY_SECURITY_ID = "26000"
-EXCHANGE_SEGMENT = "NSE"
-
+NIFTY_SECURITY_ID = "13" 
+EXCHANGE_SEGMENT = "IDX_I" # Standard for Nifty Indices in Dhan
 # --------------------------------------------------
 # Real‑time data structures
 # --------------------------------------------------
