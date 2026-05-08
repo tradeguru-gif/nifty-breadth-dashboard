@@ -44,8 +44,7 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 NIFTY_SECURITY_ID = "13"
-EXCHANGE_SEGMENT = MarketFeed.NSE_INDEX  # Using the class constant instead of a string
-
+EXCHANGE_SEGMENT = "IDX_I"  # Correct segment for Indices on Dhan
 
 
 
