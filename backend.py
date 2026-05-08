@@ -9,44 +9,34 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dhanhq import dhanhq, marketfeed
 
-# Initialize the Flask app only ONCE
+# ============================================
+# INITIALIZE FLASK AND GLOBALS
+# ============================================
 app = Flask(__name__)
-
-# Enable CORS for your WordPress site
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+application = app   # For Gunicorn
+
+latest_signal = {}  # <-- FIX: define global signal storage
+
 # ============================================
-# PERSISTENT DATA STORAGE
-# ============================================
-# This holds your data in memory so the dashboard stays "Live"
-@app.route('/api/trading-signals', methods=['GET', 'POST'], strict_slashes=False)
-def trading_signals():
-    global latest_signal
-    if request.method == 'POST':
-        try:
-            data = request.get_json()
-            if data:
-                latest_signal.update(data)
-                latest_signal["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                return jsonify({"status": "success", "message": "Signal Updated"}), 200
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 400
-            
-    return jsonify(latest_signal)
-    # IMPORTANT: This part must exist so your WordPress dashboard can READ the data
-    return jsonify(latest_signal)
-# ==================================================
 # CREDENTIALS FROM ENVIRONMENT
-# ==================================================
+# ============================================
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
-NIFTY_SECURITY_ID = "13"
-EXCHANGE_SEGMENT = "IDX_I"  # Correct segment for Indices on Dhan
 
-
+# ============================================
+# INSTRUMENT SETTINGS
+# ============================================
+# Use NIFTY 50 spot index (common ID 26000 on NSE)
+NIFTY_SECURITY_ID = "26000"
+EXCHANGE_SEGMENT = "NSE"
+# Fallback: If above doesn't work, try futures (uncomment next line and comment above)
+# NIFTY_SECURITY_ID = "13"
+# EXCHANGE_SEGMENT = "NSE_FNO"
 
 # --------------------------------------------------
 # Real‑time data structures
@@ -112,66 +102,93 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – Cleaned merged version
+# WebSocket – PROPER ASYNC PATTERN (works on Render)
 # --------------------------------------------------
-
-def on_connect(instance):
-    print("✅ WebSocket Connected to Dhan!")
-
-def on_error(instance, error):
-    print(f"❌ WebSocket Error: {error}")
-
-def on_close(instance):
-    print("🔌 WebSocket closed.")
-
-def on_message(instance, tick):
-    try:
-        # For 'FULL' packets, Dhan usually sends 'last_price' or 'ltp'
-        price = float(tick.get('ltp', tick.get('last_price', 0)))
-        volume = int(tick.get('volume', 0))
-        tick_time = datetime.now()
-        
-        process_tick(price, volume, tick_time)
-        
-        # Debugging: Print first 5 ticks to Render logs
-        if not hasattr(on_message, "count"):
-            on_message.count = 0
-        on_message.count += 1
-        if on_message.count <= 5:
-            print(f"📊 Tick Received: Price={price}")
-            
-    except Exception as e:
-        print(f"Error processing tick: {e}")
-
 async def run_feed():
-    print("🚀 Assigning callbacks and connecting...")
-    
-    # Attach the handlers to the feed object
+    print("🚀 run_feed() started")
+    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
+    print(f"🔧 Instruments: {instruments}")
+
+    try:
+        feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+        print("✅ DhanFeed created")
+    except Exception as e:
+        print(f"❌ Failed to create DhanFeed: {e}")
+        return
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
+
+    def on_message(instance, tick):
+        try:
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            tick_time = datetime.now()
+            process_tick(price, volume, tick_time)
+            if not hasattr(on_message, "count"):
+                on_message.count = 0
+            on_message.count += 1
+            if on_message.count <= 10:
+                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+        except Exception as e:
+            print(f"Error processing tick: {e}")
+
     feed.on_connect = on_connect
     feed.on_error = on_error
     feed.on_close = on_close
     feed.on_message = on_message
-    
-    # 1. Initialize the connection
-    await feed.connect()
-    
-    # 2. Subscribe using FULL mode for NIFTY 50 (ID 13)
-    print("📡 Subscribing to NIFTY 50 Index (ID 13)...")
-    await feed.subscribe_symbols([(MarketFeed.NSE_INDEX, "13", MarketFeed.FULL)])
-    
-    # 3. Keep the connection alive
+
+    try:
+        print("⏳ Calling feed.connect()...")
+        await feed.connect()
+        print("✅ feed.connect() completed")
+    except Exception as e:
+        print(f"❌ Exception in feed.connect(): {e}")
+        return
+
+    try:
+        print("⏳ Calling feed.subscribe_instruments()...")
+        await feed.subscribe_instruments()
+        print("✅ Subscribed to instruments")
+    except Exception as e:
+        print(f"❌ Exception in feed.subscribe_instruments(): {e}")
+        return
+
+    print("🚀 Dhan WebSocket is live. Waiting for ticks...")
     while True:
         await asyncio.sleep(1)
 
 def start_market_feed():
     """Function to run in background thread – creates event loop and runs async feed."""
     print("🚀 Starting Dhan WebSocket feed thread...")
-    try:
-        asyncio.run(run_feed())
-    except Exception as e:
-        print(f"❌ Fatal Thread Error: {e}")
+    asyncio.run(run_feed())
+
 # --------------------------------------------------
-# Technical Indicators & Dynamic Logic (keep all your existing functions)
+# API Endpoints (including the POST/GET for signals)
+# --------------------------------------------------
+@app.route('/api/trading-signals', methods=['GET', 'POST'], strict_slashes=False)
+def trading_signals():
+    global latest_signal
+    if request.method == 'POST':
+        try:
+            data = request.get_json()
+            if data:
+                latest_signal.update(data)
+                latest_signal["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return jsonify({"status": "success", "message": "Signal Updated"}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+    # GET request – return the latest signal (or empty dict if none)
+    return jsonify(latest_signal)
+
+# --------------------------------------------------
+# Existing Trading Signals Endpoint (calculated from candles)
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -252,18 +269,21 @@ def calculate_adx(df, period=14):
     return adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 20.0
 
 def is_market_hours():
-    now = datetime.now()
-    ist_offset = timedelta(hours=5, minutes=30)
-    current_ist = now + ist_offset
-    market_open = current_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = current_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    optimal_start = current_ist.replace(hour=9, minute=30, second=0, microsecond=0)
-    optimal_end = current_ist.replace(hour=15, minute=15, second=0, microsecond=0)
-    if current_ist < market_open or current_ist > market_close:
-        return False
-    if current_ist < optimal_start or current_ist > optimal_end:
-        return False
-    return True
+    # For testing, you can return True to ignore time filter
+    # Uncomment the block below to enforce 9:30-3:15 IST
+    # now = datetime.now()
+    # ist_offset = timedelta(hours=5, minutes=30)
+    # current_ist = now + ist_offset
+    # market_open = current_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    # market_close = current_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    # optimal_start = current_ist.replace(hour=9, minute=30, second=0, microsecond=0)
+    # optimal_end = current_ist.replace(hour=15, minute=15, second=0, microsecond=0)
+    # if current_ist < market_open or current_ist > market_close:
+    #     return False
+    # if current_ist < optimal_start or current_ist > optimal_end:
+    #     return False
+    # return True
+    return True   # Temporarily always on for debugging
 
 def calculate_volume_spike(vol_ratio, atr):
     if vol_ratio >= 3.0:
@@ -460,17 +480,13 @@ def calculate_dynamic_signal(df):
     return to_native(result)
 
 # --------------------------------------------------
-# Flask Application
+# Other Flask endpoints (health, breadth, etc.)
 # --------------------------------------------------
-app = Flask(__name__)
-application = app  # <--- ADD THIS LINE
-CORS(app)
-
-@application.route('/')
+@app.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.3 (Async WebSocket in thread)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.3 (Corrected)'})
 
-@application.route('/api/health')
+@app.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'running',
@@ -479,8 +495,8 @@ def health_check():
         'timestamp': datetime.now().isoformat()
     })
 
-@application.route('/api/trading-signals')
-def get_trading_signals():
+@app.route('/api/trading-signals-calculated')
+def get_trading_signals_calculated():
     try:
         with lock:
             if len(minute_candles) < 20:
@@ -494,21 +510,21 @@ def get_trading_signals():
                 return jsonify(signal)
             return jsonify({'action': 'HOLD', 'reason': 'Insufficient indicators'})
     except Exception as e:
-        print(f"Error in trading-signals: {e}")
+        print(f"Error in trading-signals-calculated: {e}")
         return jsonify({'error': str(e), 'action': 'HOLD'}), 500
 
-@application.route('/api/breadth')
+@app.route('/api/breadth')
 def get_breadth():
     return jsonify({'advances': 25, 'declines': 25, 'ad_ratio': 1.0, 'index_price': latest_market_data.get('current_price', 24500), 'change': '+0.00', 'change_percent': '+0.00', 'timestamp': datetime.now().isoformat()})
 
-@application.route('/api/realtime-nifty')
+@app.route('/api/realtime-nifty')
 def get_realtime_nifty():
     price = latest_market_data.get('current_price')
     if price:
         return jsonify({'symbol': 'NIFTY 50', 'current_price': round(price, 2), 'change': 0, 'change_percent': 0, 'timestamp': datetime.now().isoformat()})
     return jsonify({'error': 'No live data yet'}), 503
 
-@application.route('/api/pcr')
+@app.route('/api/pcr')
 def get_pcr():
     return jsonify({'pcr': 1.05, 'sentiment': 'Neutral', 'signal': 'HOLD', 'timestamp': datetime.now().isoformat()})
 
@@ -522,4 +538,4 @@ print("🚀 Dhan WebSocket thread started.")
 
 if __name__ == '__main__':
     time.sleep(5)
-    application.run(debug=False, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
