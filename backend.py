@@ -113,16 +113,51 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – correct async pattern inside a thread
+# WebSocket – Cleaned merged version
 # --------------------------------------------------
+
+def on_connect(instance):
+    print("✅ WebSocket Connected to Dhan!")
+
+def on_error(instance, error):
+    print(f"❌ WebSocket Error: {error}")
+
+def on_close(instance):
+    print("🔌 WebSocket closed.")
+
+def on_message(instance, tick):
+    try:
+        # For 'FULL' packets, Dhan usually sends 'last_price' or 'ltp'
+        price = float(tick.get('ltp', tick.get('last_price', 0)))
+        volume = int(tick.get('volume', 0))
+        tick_time = datetime.now()
+        
+        process_tick(price, volume, tick_time)
+        
+        # Debugging: Print first 5 ticks to Render logs
+        if not hasattr(on_message, "count"):
+            on_message.count = 0
+        on_message.count += 1
+        if on_message.count <= 5:
+            print(f"📊 Tick Received: Price={price}")
+            
+    except Exception as e:
+        print(f"Error processing tick: {e}")
+
 async def run_feed():
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    print("🚀 Assigning callbacks and connecting...")
+    
+    # Attach the handlers to the feed object
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
+    feed.on_message = on_message
     
     # 1. Initialize the connection
     await feed.connect()
     
-    # 2. Subscribe using FULL mode to get OHLC data for candles
-    # This replaces the old TICKER mode
+    # 2. Subscribe using FULL mode for NIFTY 50 (ID 13)
+    print("📡 Subscribing to NIFTY 50 Index (ID 13)...")
     await feed.subscribe_symbols([(MarketFeed.NSE_INDEX, "13", MarketFeed.FULL)])
     
     # 3. Keep the connection alive
@@ -131,45 +166,11 @@ async def run_feed():
 
 def start_market_feed():
     """Function to run in background thread – creates event loop and runs async feed."""
-    print("🚀 Starting Dhan WebSocket feed (background thread with asyncio.run)...")
+    print("🚀 Starting Dhan WebSocket feed thread...")
     try:
         asyncio.run(run_feed())
     except Exception as e:
-        print(f"❌ WebSocket Error: {e}")
-    def on_close(instance):
-        print("🔌 WebSocket closed.")
-
-    def on_message(instance, tick):
-        try:
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
-            tick_time = datetime.now()
-            process_tick(price, volume, tick_time)
-            # Print first 10 ticks for debugging
-            if not hasattr(on_message, "count"):
-                on_message.count = 0
-            on_message.count += 1
-            if on_message.count <= 10:
-                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
-        except Exception as e:
-            print(f"Error processing tick: {e}")
-
-    feed.on_connect = on_connect
-    feed.on_error = on_error
-    feed.on_close = on_close
-    feed.on_message = on_message
-
-    print("🚀 Dhan WebSocket started. Waiting for ticks...")
-    await feed.connect()
-    await feed.subscribe_instruments()
-    while True:
-        await asyncio.sleep(1)
-
-def start_market_feed():
-    """Function to run in background thread – creates event loop and runs async feed."""
-    print("🚀 Starting Dhan WebSocket feed (background thread with asyncio.run)...")
-    asyncio.run(run_feed())
-
+        print(f"❌ Fatal Thread Error: {e}")
 # --------------------------------------------------
 # Technical Indicators & Dynamic Logic (keep all your existing functions)
 # --------------------------------------------------
