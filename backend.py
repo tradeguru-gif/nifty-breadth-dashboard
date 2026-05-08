@@ -7,14 +7,14 @@ import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dhanhq import DhanContext, MarketFeed
+from dhanhq import dhanhq, marketfeed
 
 # ============================================
 # 1. FLASK APP & GLOBALS
 # ============================================
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-application = app
+application = app  # for Gunicorn
 
 latest_signal = {
     "action": "WAITING",
@@ -41,7 +41,7 @@ latest_market_data = {
 
 current_position = {
     'active': False,
-    'type': None,
+    'type': None,          # 'LONG' or 'SHORT'
     'entry_price': 0.0,
     'stop_loss': 0.0,
     'take_profit': 0.0,
@@ -60,9 +60,9 @@ DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-dhan_context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-feed = MarketFeed(dhan_context, version='v2')   # this is the working connection object
-
+# For marketfeed we will create feed inside the async function later,
+# but we keep the client for potential other uses.
+# We'll also need the marketfeed constants, which come from the module.
 # --------------------------------------------------
 # 3. CANDLE BUILDING & TICK PROCESSING
 # --------------------------------------------------
@@ -102,50 +102,53 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# 4. WEBSOCKET HANDLERS (using the working connection)
+# 4. WEBSOCKET (using marketfeed.DhanFeed and asyncio.run)
 # --------------------------------------------------
-def on_connect(instance):
-    print("✅ WebSocket connected and authorized.")
-
-def on_error(instance, error):
-    print(f"❌ WebSocket error: {error}")
-
-def on_close(instance):
-    print("🔌 WebSocket closed.")
-
-def on_message(instance, tick):
-    global latest_signal
-    try:
-        price = float(tick.get('ltp', 0))
-        volume = int(tick.get('volume', 0))
-        if price > 0:
-            tick_time = datetime.now()
-            process_tick(price, volume, tick_time)
-            latest_signal.update({
-                "action": "TRACKING",
-                "price": price,
-                "timestamp": tick_time.strftime("%Y-%m-%d %H:%M:%S")
-            })
-            # Optional: print first 10 ticks for debugging
-            if not hasattr(on_message, "count"):
-                on_message.count = 0
-            on_message.count += 1
-            if on_message.count <= 10:
-                print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
-    except Exception as e:
-        print(f"⚠️ Error processing tick: {e}")
-
 async def run_feed():
-    # Assign callbacks
+    # Use NIFTY 50 index – security ID 13 (NSE_INDEX) with FULL mode
+    instruments = [(marketfeed.NSE_INDEX, "13", marketfeed.FULL)]
+    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed.")
+
+    def on_message(instance, tick):
+        global latest_signal
+        try:
+            price = float(tick.get('ltp', 0))
+            volume = int(tick.get('volume', 0))
+            if price > 0:
+                tick_time = datetime.now()
+                process_tick(price, volume, tick_time)
+                latest_signal.update({
+                    "action": "TRACKING",
+                    "price": price,
+                    "timestamp": tick_time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+                # Debug first 10 ticks
+                if not hasattr(on_message, "count"):
+                    on_message.count = 0
+                on_message.count += 1
+                if on_message.count <= 10:
+                    print(f"📊 Tick #{on_message.count}: price={price}, volume={volume}")
+        except Exception as e:
+            print(f"⚠️ Error processing tick: {e}")
+
     feed.on_connect = on_connect
     feed.on_error = on_error
     feed.on_close = on_close
     feed.on_message = on_message
 
+    print("🚀 Connecting to Dhan WebSocket...")
     await feed.connect()
-    # Subscribe to NIFTY 50 Index (ID 13, FULL mode for all data)
-    instruments = [(feed.NSE_INDEX, "13", feed.FULL)]
-    await feed.subscribe_symbols(instruments)
+    print("✅ Connected, now subscribing to instruments...")
+    await feed.subscribe_instruments()
     print("🚀 Dhan WebSocket is live. Waiting for ticks...")
     while True:
         await asyncio.sleep(1)
@@ -157,7 +160,7 @@ def start_market_feed():
         print(f"❌ WebSocket thread error: {e}")
 
 # --------------------------------------------------
-# 5. TECHNICAL INDICATORS & SIGNAL LOGIC (full version)
+# 5. TECHNICAL INDICATORS & SIGNAL LOGIC (full version from previous)
 # --------------------------------------------------
 def to_native(obj):
     if isinstance(obj, (np.integer, np.int64)):
@@ -293,7 +296,7 @@ def calculate_dynamic_signal(df):
     if pd.isna(atr) or atr == 0:
         atr = 10.0
 
-    # 3-min momentum
+    # 3‑min momentum
     if len(df) >= 4:
         price_3min_ago = float(df['close'].iloc[-4])
         momentum = last_price - price_3min_ago
@@ -467,7 +470,7 @@ def trading_signals_endpoint():
                 return jsonify({"status": "success", "message": "Signal Updated"}), 200
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 400
-    # GET: return the latest manually set signal
+    # GET request
     return jsonify(latest_signal)
 
 @app.route('/api/health')
@@ -533,7 +536,7 @@ def get_pcr():
 
 @app.route('/')
 def home():
-    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.4 (Stable WebSocket + Full Logic)'})
+    return jsonify({'message': 'Trade Guru NIFTY Trading API v7.4 (WebSocket + Full Logic)'})
 
 # --------------------------------------------------
 # 7. START WEBSOCKET THREAD & FLASK
