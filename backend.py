@@ -117,7 +117,7 @@ async def main():
         if len(security_ids) < 2:
             logger.error("Could not find two option contracts.")
             return
-        instruments = [(marketfeed.IDX_I, sid, marketfeed.Ticker) for sid in security_ids]
+        instruments = [(marketfeed.NSE_FNO, security_id, marketfeed.Ticker) for security_id in security_ids]
         dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
         feed = SignalFeedHandler(dhan_context, instruments, version="v1")
         await feed.connect()
