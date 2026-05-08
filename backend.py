@@ -1,36 +1,44 @@
-import os
-import time
 import threading
 import asyncio
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+import os
+import time
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from dhanhq import dhanhq, marketfeed
+from datetime import datetime
+from dhanhq import DhanContext, MarketFeed
 
 # ============================================
-# INITIALIZE FLASK
-# ============================================
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
-application = app
-latest_signal = {}
-
-# ============================================
-# CREDENTIALS & INSTRUMENT
+# 1. CREDENTIALS (Must be first)
 # ============================================
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
-if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
-    raise ValueError("Missing credentials")
 
-# Use NIFTY futures – known to work
-NIFTY_SECURITY_ID = "13"
-EXCHANGE_SEGMENT = "NSE_FNO"
+# For local testing only (Comment out when on Render)
+# DHAN_CLIENT_ID = "YOUR_ID"
+# DHAN_ACCESS_TOKEN = "YOUR_TOKEN"
+
+# ============================================
+# 2. INITIALIZE OBJECTS
+# ============================================
+app = Flask(__name__)
+CORS(app)
+
+# Signal storage
+latest_signal = {
+    "action": "WAITING",
+    "price": 0.0,
+    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+}
+
+# Now we can safely initialize Dhan
+if DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN:
+    dhan_context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+    feed = MarketFeed(dhan_context, version='v2')
+else:
+    print("⚠️ Warning: Credentials not found. WebSocket will not start.")
 
 # --------------------------------------------------
-# Real‑time data structures
+# Real-time data structures
 # --------------------------------------------------
 minute_candles = []
 current_candle = None
@@ -39,25 +47,23 @@ latest_market_data = {
     'current_price': None, 'vwap': None, 'total_pv': 0, 'total_vol': 0,
     'day_high': None, 'day_low': None, 'last_update': None
 }
-current_position = {
-    'active': False, 'type': None, 'entry_price': 0.0, 'stop_loss': 0.0,
-    'take_profit': 0.0, 'highest_price': 0.0, 'lowest_price': 0.0,
-    'trailing_stop': 0.0, 'entry_time': None
-}
 
 def process_tick(price, volume, tick_time):
     global current_candle, minute_candles, latest_market_data
     with lock:
         latest_market_data['current_price'] = float(price)
         latest_market_data['last_update'] = tick_time.isoformat()
+        
         if latest_market_data['day_high'] is None or price > latest_market_data['day_high']:
             latest_market_data['day_high'] = float(price)
         if latest_market_data['day_low'] is None or price < latest_market_data['day_low']:
             latest_market_data['day_low'] = float(price)
+            
         latest_market_data['total_pv'] += price * volume
         latest_market_data['total_vol'] += volume
         if latest_market_data['total_vol'] > 0:
             latest_market_data['vwap'] = float(latest_market_data['total_pv'] / latest_market_data['total_vol'])
+            
         current_minute = tick_time.replace(second=0, microsecond=0)
         if current_candle is None or current_candle['timestamp'] != current_minute:
             if current_candle is not None:
@@ -76,77 +82,84 @@ def process_tick(price, volume, tick_time):
             current_candle['volume'] += int(volume)
 
 # --------------------------------------------------
-# WebSocket – async with callbacks
+# WebSocket Handlers
 # --------------------------------------------------
-async def run_feed():
-    print("🚀 run_feed() started")
-    instruments = [(marketfeed.NSE_FNO, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    print(f"🔧 Instruments: {instruments}")
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
-    print("✅ DhanFeed created")
+def on_connect(instance):
+    print("✅ WebSocket connected and authorized.")
 
-    def on_connect(instance):
-        print("✅ WebSocket connected and authorized.")
+def on_error(instance, error):
+    print(f"❌ WebSocket error: {error}")
 
-    def on_error(instance, error):
-        print(f"❌ WebSocket error: {error}")
+def on_close(instance):
+    print("🔌 WebSocket closed.")
 
-    def on_close(instance):
-        print("🔌 WebSocket closed.")
-
-    def on_message(instance, tick):
-        try:
-            # Print full tick for debugging (remove after it works)
-            print(f"📦 Tick: {tick}")
-            price = float(tick.get('ltp', 0))
-            volume = int(tick.get('volume', 0))
+def on_message(instance, tick):
+    global latest_signal
+    try:
+        price = float(tick.get('ltp', 0))
+        volume = int(tick.get('volume', 0))
+        
+        if price > 0:
             tick_time = datetime.now()
             process_tick(price, volume, tick_time)
-        except Exception as e:
-            print(f"Error: {e}")
+            
+            latest_signal.update({
+                "action": "TRACKING",
+                "price": price,
+                "timestamp": tick_time.strftime("%Y-%m-%d %H:%M:%S")
+            })
+    except Exception as e:
+        print(f"⚠️ Error processing tick: {e}")
 
+async def run_feed():
     feed.on_connect = on_connect
     feed.on_error = on_error
     feed.on_close = on_close
     feed.on_message = on_message
 
-    print("⏳ Calling feed.connect()...")
     await feed.connect()
-    print("✅ feed.connect() completed")
-    print("⏳ Calling feed.subscribe_instruments()...")
-    await feed.subscribe_instruments()
-    print("✅ Subscribed to instruments")
-    print("🚀 Dhan WebSocket is live. Waiting for ticks...")
+    # Subscription using feed instance constants
+    instruments = [(feed.NSE_INDEX, "13", feed.FULL)]
+    await feed.subscribe_symbols(instruments)
+    
     while True:
         await asyncio.sleep(1)
 
 def start_market_feed():
-    print("🚀 Starting Dhan WebSocket feed thread...")
-    asyncio.run(run_feed())
+    try:
+        asyncio.run(run_feed())
+    except Exception as e:
+        print(f"❌ Feed Thread Error: {e}")
 
 # --------------------------------------------------
-# Flask endpoints (keep your original ones)
+# Flask Routes
 # --------------------------------------------------
-@app.route('/api/health')
-def health_check():
-    return jsonify({
-        'status': 'running',
-        'version': '7.3.0',
-        'candles_available': len(minute_candles),
-        'timestamp': datetime.now().isoformat()
-    })
+@app.route('/api/trading-signals', methods=['GET', 'POST'])
+def trading_signals():
+    global latest_signal
+    if request.method == 'POST':
+        data = request.json
+        latest_signal.update({
+            "action": data.get("action", "HOLD"),
+            "price": data.get("price", 0.0),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        return jsonify({"status": "success"}), 200
+    return jsonify(latest_signal)
 
-# ... (add your other endpoints: /api/trading-signals, /api/breadth, etc.)
-# For brevity, keep them as they were – no change needed.
+@app.route('/api/status', methods=['GET'])
+def get_status():
+    return jsonify({"status": "online", "server_time": datetime.now().isoformat()})
 
 # --------------------------------------------------
-# START WEBSOCKET THREAD
+# MAIN EXECUTION
 # --------------------------------------------------
-print("🚀 Initializing Dhan WebSocket...")
-ws_thread = threading.Thread(target=start_market_feed, daemon=True)
-ws_thread.start()
-print("🚀 Dhan WebSocket thread started.")
-
 if __name__ == '__main__':
-    time.sleep(5)
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    # Start WebSocket thread only if credentials exist
+    if DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN:
+        ws_thread = threading.Thread(target=start_market_feed, daemon=True)
+        ws_thread.start()
+        print("🚀 Dhan WebSocket thread started.")
+    
+    # Run Flask
+    app.run(host='0.0.0.0', port=5000, debug=False)
