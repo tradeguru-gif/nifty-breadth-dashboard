@@ -110,33 +110,26 @@ class SignalFeedHandler(marketfeed.MarketFeed):
 # ===================================================
 # 3. ASYNC MAIN LOOP (runs in background thread)
 # ===================================================
-async def main():
-    try:
-        logger.info("Starting Nifty 50 Options Signal Engine...")
-        security_ids, _ = get_option_contracts(CURRENT_NIFTY)
-        if len(security_ids) < 2:
-            logger.error("Could not find two option contracts.")
-            return
-        instruments = [(marketfeed.NSE_FNO, security_id, marketfeed.Ticker) for security_id in security_ids]
-        dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        feed = SignalFeedHandler(dhan_context, instruments, version="v1")
-        await feed.connect()
-        await feed.subscribe_instruments()
-        logger.info("✅ WebSocket connected. Waiting for ticks...")
-        while True:
-            await asyncio.sleep(2)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-    finally:
-        if 'feed' in locals():
-            await feed.disconnect()
+async def run_feed():
+    """Main async loop for the Dhan feed"""
+    # Attach callbacks
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
+    feed.on_message = on_message
 
-def start_signal_engine():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
-
-# ===================================================
+    await feed.connect()
+    
+    # FIX: Using the direct integer for NSE_INDEX (which is 2) 
+    # and FULL (which is 15) to avoid attribute errors.
+    # (NSE_INDEX = 2, Security ID = "13", Mode = 15 for FULL)
+    instruments = [(2, "13", 15)]
+    
+    await feed.subscribe_symbols(instruments)
+    print("🚀 Subscription active for NIFTY 50.")
+    
+    while True:
+        await asyncio.sleep(1)# ===================================================
 # 4. FLASK APP
 # ===================================================
 app = Flask(__name__)
