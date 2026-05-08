@@ -116,16 +116,26 @@ def process_tick(price, volume, tick_time):
 # WebSocket – correct async pattern inside a thread
 # --------------------------------------------------
 async def run_feed():
-    """Async coroutine that sets up and runs the WebSocket feed."""
-    instruments = [(marketfeed.NSE, NIFTY_SECURITY_ID, marketfeed.Ticker)]
-    feed = marketfeed.DhanFeed(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, instruments, "v2")
+    print("🚀 Dhan WebSocket started. Waiting for ticks...")
+    
+    # 1. Initialize the connection
+    await feed.connect()
+    
+    # 2. Subscribe using FULL mode to get OHLC data for candles
+    # This replaces the old TICKER mode
+    await feed.subscribe_symbols([(MarketFeed.NSE_INDEX, "13", MarketFeed.FULL)])
+    
+    # 3. Keep the connection alive
+    while True:
+        await asyncio.sleep(1)
 
-    def on_connect(instance):
-        print("✅ WebSocket connected and authorized.")
-
-    def on_error(instance, error):
-        print(f"❌ WebSocket error: {error}")
-
+def start_market_feed():
+    """Function to run in background thread – creates event loop and runs async feed."""
+    print("🚀 Starting Dhan WebSocket feed (background thread with asyncio.run)...")
+    try:
+        asyncio.run(run_feed())
+    except Exception as e:
+        print(f"❌ WebSocket Error: {e}")
     def on_close(instance):
         print("🔌 WebSocket closed.")
 
