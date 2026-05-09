@@ -20,7 +20,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # <--- ADD THIS LINE HERE
+
+@app.route('/')
+def home():
+    # This now allows your WordPress site to read this JSON
+    return jsonify({"status": "running", "data": latest_data})
 
 latest_data = {
     "signal": "INITIALIZING",
