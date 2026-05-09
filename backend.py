@@ -51,7 +51,7 @@ dhan = DhanHQ(
 logger.info("Dhan client initialized successfully")
 
 #-----------------------------------------------------
-INSTRUMENT METER
+# INSTRUMENT METER
 #---------------------------------------------------------
 
 import pandas as pd
