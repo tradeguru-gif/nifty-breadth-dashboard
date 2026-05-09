@@ -368,23 +368,19 @@ def run_feed():
             )
 
             # ------------------------------------------------
-            # Get CE/PE contracts
+            # Get contracts
             # ------------------------------------------------
             get_option_contracts(
                 CURRENT_NIFTY
             )
 
-            # ------------------------------------------------
-            # Validate IDs
-            # ------------------------------------------------
             if (
                 not SELECTED_CE_ID
                 or not SELECTED_PE_ID
             ):
 
                 logger.error(
-                    "No valid contracts found. "
-                    "Retrying in 30 seconds..."
+                    "No valid contracts found."
                 )
 
                 time.sleep(30)
@@ -398,16 +394,15 @@ def run_feed():
             )
 
             # ------------------------------------------------
-            # Create Feed
+            # Create websocket
             # ------------------------------------------------
             feed = marketfeed.DhanFeed(
 
-                client_id=CLIENT_ID,
+                CLIENT_ID,
 
-                access_token=ACCESS_TOKEN,
+                ACCESS_TOKEN,
 
-                instruments=[
-
+                [
                     (
                         marketfeed.NSE_FNO,
                         str(SELECTED_CE_ID),
@@ -419,31 +414,16 @@ def run_feed():
                         str(SELECTED_PE_ID),
                         marketfeed.Ticker
                     )
-                ],
-
-                on_connect=lambda instance:
-                logger.info(
-                    "✅ Connected to Dhan WebSocket"
-                ),
-
-                on_message=on_message,
-
-                on_error=lambda instance, err:
-                logger.error(
-                    f"❌ WebSocket Error: {err}"
-                ),
-
-                on_close=lambda instance:
-                logger.warning(
-                    "⚠️ WebSocket closed. "
-                    "Reconnecting..."
-                )
+                ]
             )
 
             logger.info(
-                "Starting Dhan live feed..."
+                "✅ Dhan Feed Started"
             )
 
+            # ------------------------------------------------
+            # Connect websocket
+            # ------------------------------------------------
             feed.run_forever()
 
         except Exception as e:
@@ -452,12 +432,7 @@ def run_feed():
                 f"Feed crashed: {e}"
             )
 
-            logger.info(
-                "Retrying in 10 seconds..."
-            )
-
             time.sleep(10)
-
 
 # ------------------------------------------------------------
 # Flask Routes
