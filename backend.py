@@ -219,9 +219,46 @@ def get_option_contracts(nifty_price):
 
         # Only NIFTY options
         opts = df[
-            (df["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
-            (df["SM_SYMBOL_NAME"] == "NIFTY")
-        ].copy()
+          
+      # Normalize columns first
+df.columns = df.columns.str.strip()
+
+# Convert to uppercase strings
+df["SEM_INSTRUMENT_NAME"] = (
+    df["SEM_INSTRUMENT_NAME"]
+    .astype(str)
+    .str.upper()
+)
+
+df["SM_SYMBOL_NAME"] = (
+    df["SM_SYMBOL_NAME"]
+    .astype(str)
+    .str.upper()
+)
+
+# Filter NIFTY options
+
+opts = df[
+    (
+        df["SEM_INSTRUMENT_NAME"]
+        .str.contains("OPT", na=False)
+    ) &
+    (
+        df["SM_SYMBOL_NAME"]
+        .str.contains("NIFTY", na=False)
+    )
+].copy()
+
+logger.info(
+    f"Unique instrument names: "
+    f"{df['SEM_INSTRUMENT_NAME'].unique()[:10]}"
+)
+
+logger.info(
+    f"Unique symbols: "
+    f"{df['SM_SYMBOL_NAME'].unique()[:10]}"
+)
+
 
         logger.info(f"NIFTY option rows: {len(opts)}")
 
