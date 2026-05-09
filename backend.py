@@ -217,14 +217,14 @@ def get_option_contracts(nifty_price):
         # ------------------------------------------------
         # FILTER ONLY NIFTY OPTIONS
         # ------------------------------------------------
-        opts = df[
-            df[instrument_col]
-            .astype(str)
-            .str.upper()
-            .str.contains("OPTIDX", na=False)
-        ].copy()
+opts = opts[
+    opts[symbol_col]
+    .astype(str)
+    .str.upper()
+    .str.contains("NIFTY", na=False)
+].copy()
 
-        logger.info(f"OPTION rows: {len(opts)}")
+logger.info(f"NIFTY option rows: {len(opts)}")       
 
         # ------------------------------------------------
         # FILTER NIFTY ONLY
