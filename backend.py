@@ -12,7 +12,7 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from dhanhq import dhanhq, marketfeed
+from dhanhq import dhanhq marketfeed
 
 # ------------------------------------------------------------
 # Logging
