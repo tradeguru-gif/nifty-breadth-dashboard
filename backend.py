@@ -215,7 +215,10 @@ def get_option_contracts(nifty_price):
 
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-        df = pd.read_csv(url)
+        df = pd.read_csv(
+    url,
+    low_memory=False
+)
 
         # Only NIFTY options
         opts = df[
@@ -224,20 +227,40 @@ def get_option_contracts(nifty_price):
 df.columns = df.columns.str.strip()
 
 # Convert to uppercase strings
+# ------------------------------------------------
+# Normalize columns
+# ------------------------------------------------
+df.columns = df.columns.str.strip()
+
+# Convert important columns to string
 df["SEM_INSTRUMENT_NAME"] = (
     df["SEM_INSTRUMENT_NAME"]
     .astype(str)
     .str.upper()
+    .str.strip()
 )
 
 df["SM_SYMBOL_NAME"] = (
     df["SM_SYMBOL_NAME"]
     .astype(str)
     .str.upper()
+    .str.strip()
 )
 
-# Filter NIFTY options
+# Debug logs
+logger.info(
+    f"Instrument names sample: "
+    f"{df['SEM_INSTRUMENT_NAME'].unique()[:20]}"
+)
 
+logger.info(
+    f"Symbol names sample: "
+    f"{df['SM_SYMBOL_NAME'].unique()[:20]}"
+)
+
+# ------------------------------------------------
+# Filter NIFTY option contracts
+# ------------------------------------------------
 opts = df[
     (
         df["SEM_INSTRUMENT_NAME"]
@@ -250,15 +273,8 @@ opts = df[
 ].copy()
 
 logger.info(
-    f"Unique instrument names: "
-    f"{df['SEM_INSTRUMENT_NAME'].unique()[:10]}"
+    f"NIFTY option rows: {len(opts)}"
 )
-
-logger.info(
-    f"Unique symbols: "
-    f"{df['SM_SYMBOL_NAME'].unique()[:10]}"
-)
-
 
         logger.info(f"NIFTY option rows: {len(opts)}")
 
