@@ -6,6 +6,3 @@ dhanhq==2.1.0
 gunicorn==23.0.0
 requests==2.32.3
 websockets==13.0.1
-cryptography==42.0.5
-pyOpenSSL==24.0.0
-typing-extensions==4.12.2
