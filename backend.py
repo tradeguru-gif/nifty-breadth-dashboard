@@ -12,7 +12,7 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from dhanhq import marketfeed
+from dhanhq import dhanhq, marketfeed
 
 # ------------------------------------------------------------
 # Logging
@@ -231,13 +231,12 @@ def get_option_contracts(nifty_price):
         # ------------------------------------------------
         # FILTER NIFTY ONLY
         # ------------------------------------------------
-        opts = opts[
-            df[symbol_col]
-            .astype(str)
-            .str.upper()
-            .str.contains("NIFTY", na=False)
-        ].copy()
-
+       opts = opts[
+    opts[symbol_col]
+    .astype(str)
+    .str.upper()
+    .str.contains("NIFTY", na=False)
+].copy()
         logger.info(f"NIFTY option rows: {len(opts)}")
 
         # ------------------------------------------------
