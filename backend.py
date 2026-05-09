@@ -106,15 +106,22 @@ def get_option_contracts(nifty_spot):
 
         logger.info("Fetching instrument master...")
 
-        df = dhan.fetch_security_list("detailed")
+       df = dhan.fetch_security_list("detailed")
+
+logger.info(f"ALL COLUMNS: {df.columns.tolist()}")
+
+logger.info(f"FIRST 5 ROWS:\n{df.head()}")
+
+return []
 
         # ------------------------------------------------
         # Filter NSE FNO options
         # ------------------------------------------------
-        fno = df[df["SEGMENT"] == "NSE_FNO"]
+       logger.info(f"ALL COLUMNS: {df.columns.tolist()}")
 
-        opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
+logger.info(f"FIRST 5 ROWS:\n{df.head()}")
 
+return []
         if opts.empty:
             logger.error("No OPTIDX instruments found")
             return []
@@ -175,6 +182,13 @@ def get_option_contracts(nifty_spot):
         )
 
         opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
+#---------------------------------------
+DEBUGGING LOGS
+#-------------------------------------
+logger.info(f"Columns: {opts_nearest.columns.tolist()}")
+logger.info(f"OPTION_TYPE values: {opts_nearest['OPTION_TYPE'].unique()}")
+logger.info(f"Nearest expiry rows: {len(opts_nearest)}")
+
 
         if opts_nearest.empty:
             logger.error("Strike conversion failed")
