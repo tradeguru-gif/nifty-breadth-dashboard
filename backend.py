@@ -1,236 +1,276 @@
+# backend.py - Production Stable Dhan Options Engine
+
 import os
 import time
-import json
-import math
 import threading
 import logging
 import requests
 import pandas as pd
-import asyncio
-import redis
 
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
+from collections import deque
+
 from dhanhq import dhanhq as DhanHQ
 from dhanhq import marketfeed
 
-# =============================
-# CONFIG
-# =============================
+# ----------------------------
+# Logging
+# ----------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("backend")
 
+# ----------------------------
+# Flask
+# ----------------------------
 app = Flask(__name__)
 CORS(app)
 
+# ----------------------------
+# ENV
+# ----------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
 
-NIFTY_SPOT = 24000
-
-# =============================
-# REDIS CACHE (PRODUCTION)
-# =============================
-try:
-    rcache = redis.Redis(
-        host=os.getenv("REDIS_HOST", "localhost"),
-        port=6379,
-        decode_responses=True
-    )
-    rcache.ping()
-    logger.info("Redis connected")
-except:
-    rcache = None
-    logger.warning("Redis not available - fallback to memory cache")
-
-# =============================
-# DHAN CLIENT
-# =============================
+# ----------------------------
+# Dhan Init (FIXED)
+# ----------------------------
 dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
 
-# =============================
-# GLOBAL STATE
-# =============================
-latest = {
-    "ce": 0,
-    "pe": 0,
+# ----------------------------
+# Runtime State
+# ----------------------------
+latest_data = {
+    "ce_price": 0,
+    "pe_price": 0,
     "spread": 0,
-    "pcr": 0,
-    "iv": 0,
-    "signal": "WAITING"
+    "pcr": 1.0,
+    "signal": "WAITING",
+    "timestamp": ""
 }
 
-CE_ID = None
-PE_ID = None
+SELECTED_CE = None
+SELECTED_PE = None
 
-# =============================
-# PCR CACHE (5 sec refresh)
-# =============================
+price_history = deque(maxlen=200)
+
+# ----------------------------
+# CACHE (PCR)
+# ----------------------------
+pcr_cache = {
+    "value": 1.0,
+    "timestamp": 0
+}
+
+PCR_CACHE_TTL = 60  # seconds
+
+# ----------------------------
+# SAFE PCR (NO SPAM NSE)
+# ----------------------------
 def get_pcr_cached():
-    try:
-        if rcache:
-            cached = rcache.get("pcr")
-            if cached:
-                return float(cached)
+    now = time.time()
 
+    if now - pcr_cache["timestamp"] < PCR_CACHE_TTL:
+        return pcr_cache["value"]
+
+    try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers)
-        res = s.get(url, headers=headers)
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
 
+        res = session.get(url, headers=headers, timeout=5)
         data = res.json()
 
-        ce = pe = 0
+        ce, pe = 0, 0
+
         for i in data["records"]["data"]:
             if "CE" in i:
                 ce += i["CE"]["openInterest"]
             if "PE" in i:
                 pe += i["PE"]["openInterest"]
 
-        pcr = ce / pe if pe else 1
+        value = ce / pe if pe else 1.0
 
-        if rcache:
-            rcache.setex("pcr", 5, pcr)
+        pcr_cache["value"] = value
+        pcr_cache["timestamp"] = now
 
-        return pcr
+        return value
 
-    except:
-        return 1.0
+    except Exception as e:
+        logger.error(f"PCR error: {e}")
+        return pcr_cache["value"]
 
-# =============================
-# SMART ATM + IV STRIKE
-# =============================
-def smart_strike_selection(df, spot):
-    atm = round(spot / 50) * 50
 
-    # IV-weighted strike selection (simplified proxy)
-    df["DIST"] = abs(df["STRIKE"] - atm)
+# ----------------------------
+# SAFE INSTRUMENT LOAD (NO BREAK)
+# ----------------------------
+def load_instruments():
+    try:
+        df = dhan.get_instrument_list()
 
-    df["WEIGHT"] = 1 / (df["DIST"] + 1)
+        df.columns = df.columns.str.upper()
 
-    return df.sort_values("WEIGHT", ascending=False)
+        return df
 
-# =============================
-# INSTRUMENT LOADER (STABLE)
-# =============================
-def load_master():
-    url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-    df = pd.read_csv(url, low_memory=False)
-    df.columns = df.columns.str.upper()
-    return df
+    except Exception as e:
+        logger.error(f"Instrument load failed: {e}")
+        return pd.DataFrame()
 
-# =============================
-# CONTRACT SELECTION
-# =============================
-def select_contracts():
-    global CE_ID, PE_ID
 
-    df = load_master()
+# ----------------------------
+# SMART ATM + IV STYLE SELECTION (SIMPLIFIED)
+# ----------------------------
+def select_contracts(spot):
+    global SELECTED_CE, SELECTED_PE
 
-    opts = df[df["SEM_INSTRUMENT_NAME"].str.contains("OPT", na=False)]
-    opts = opts[opts["SEM_TRADING_SYMBOL"].str.contains("NIFTY", na=False)]
+    df = load_instruments()
 
-    opts["SEM_EXPIRY_DATE"] = pd.to_datetime(opts["SEM_EXPIRY_DATE"], errors="coerce")
-    opts = opts.dropna(subset=["SEM_EXPIRY_DATE"])
+    if df.empty:
+        logger.error("Instrument master empty")
+        return []
 
-    # multi-expiry logic (weekly + monthly)
-    expiries = sorted(opts["SEM_EXPIRY_DATE"].unique())[:2]
-    opts = opts[opts["SEM_EXPIRY_DATE"].isin(expiries)]
+    try:
+        # SAFE FILTER
+        df = df[df["SEM_INSTRUMENT_NAME"].astype(str).str.contains("OPTIDX")]
 
-    opts["STRIKE"] = opts["SEM_STRIKE_PRICE"]
+        df = df[df["SEM_TRADING_SYMBOL"].astype(str).str.contains("NIFTY")]
 
-    ce = opts[opts["SEM_OPTION_TYPE"] == "CE"]
-    pe = opts[opts["SEM_OPTION_TYPE"] == "PE"]
+        df["STRIKE"] = df["SEM_STRIKE_PRICE"].astype(float)
 
-    ce = smart_strike_selection(ce, NIFTY_SPOT)
-    pe = smart_strike_selection(pe, NIFTY_SPOT)
+        df["EXPIRY"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce")
 
-    CE_ID = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-    PE_ID = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+        df = df.dropna(subset=["EXPIRY"])
 
-    logger.info(f"CE={CE_ID}, PE={PE_ID}")
+        expiry = df["EXPIRY"].min()
 
-# =============================
+        df = df[df["EXPIRY"] == expiry]
+
+        # SMART ATM (nearest strike)
+        strikes = sorted(df["STRIKE"].unique())
+
+        atm = min(strikes, key=lambda x: abs(x - spot))
+
+        ce = df[(df["SEM_OPTION_TYPE"] == "CE") & (df["STRIKE"] == atm)]
+        pe = df[(df["SEM_OPTION_TYPE"] == "PE") & (df["STRIKE"] == atm)]
+
+        if ce.empty or pe.empty:
+            raise Exception("No ATM contracts found")
+
+        SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+
+        logger.info(f"CE={SELECTED_CE} PE={SELECTED_PE}")
+
+        return [SELECTED_CE, SELECTED_PE]
+
+    except Exception as e:
+        logger.error(f"Contract error: {e}")
+        return []
+
+
+# ----------------------------
 # SIGNAL ENGINE
-# =============================
-def compute_signal():
+# ----------------------------
+def update_signal():
+    ce = latest_data["ce_price"]
+    pe = latest_data["pe_price"]
+
+    if ce == 0 or pe == 0:
+        return
+
+    spread = ce - pe
+    latest_data["spread"] = spread
+
+    price_history.append(ce)
+
     pcr = get_pcr_cached()
-
-    spread = latest["ce"] - latest["pe"]
-
-    latest["pcr"] = pcr
-    latest["spread"] = spread
+    latest_data["pcr"] = pcr
 
     if spread > 5 and pcr < 0.8:
-        latest["signal"] = "BULLISH"
+        signal = "BULLISH"
     elif spread < -5 and pcr > 1.2:
-        latest["signal"] = "BEARISH"
+        signal = "BEARISH"
     else:
-        latest["signal"] = "NEUTRAL"
+        signal = "NEUTRAL"
 
-# =============================
-# WEBSOCKET (AUTO RECOVERY)
-# =============================
-def run_ws():
+    latest_data["signal"] = signal
+    latest_data["timestamp"] = datetime.now().strftime("%H:%M:%S")
 
-    global CE_ID, PE_ID
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# ----------------------------
+# WEBSOCKET (RECONNECT SAFE)
+# ----------------------------
+def run_feed():
+    global SELECTED_CE, SELECTED_PE
 
     while True:
         try:
-            select_contracts()
+            select_contracts(NIFTY_SPOT)
+
+            if not SELECTED_CE or not SELECTED_PE:
+                logger.error("No contracts, retrying...")
+                time.sleep(10)
+                continue
 
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
-                    (marketfeed.NSE_FNO, CE_ID, marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, PE_ID, marketfeed.Ticker)
+                    (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
+                    (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
                 ],
                 on_message=on_message
             )
 
-            logger.info("WebSocket started")
+            logger.info("Feed started")
             feed.run_forever()
 
         except Exception as e:
-            logger.error(f"WS crashed: {e}")
-            time.sleep(3)
+            logger.error(f"Feed restart: {e}")
+            time.sleep(5)
 
-# =============================
+
+# ----------------------------
 # CALLBACK
-# =============================
+# ----------------------------
 def on_message(instance, tick):
-    sec = str(tick.get("security_id"))
-    price = tick.get("ltp", 0)
+    try:
+        sid = str(tick.get("security_id"))
+        price = tick.get("ltp", 0)
 
-    if sec == CE_ID:
-        latest["ce"] = price
-    elif sec == PE_ID:
-        latest["pe"] = price
+        if sid == SELECTED_CE:
+            latest_data["ce_price"] = price
+        elif sid == SELECTED_PE:
+            latest_data["pe_price"] = price
 
-    compute_signal()
+        update_signal()
 
-# =============================
-# FLASK
-# =============================
+    except Exception as e:
+        logger.error(f"Message error: {e}")
+
+
+# ----------------------------
+# ROUTES
+# ----------------------------
 @app.route("/")
 def home():
-    return jsonify(latest)
+    return jsonify(latest_data)
 
-@app.route("/health")
+@app.route("/api/health")
 def health():
-    return "OK"
+    return "OK", 200
 
-# =============================
+
+# ----------------------------
 # START
-# =============================
-threading.Thread(target=run_ws, daemon=True).start()
+# ----------------------------
+threading.Thread(target=run_feed, daemon=True).start()
+
+application = app
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
