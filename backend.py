@@ -170,6 +170,7 @@ def get_nifty_pcr():
         return 1.0
 
 
+
 # ------------------------------------------------------------
 # Dynamic Option Contract Selection
 # ------------------------------------------------------------
@@ -201,7 +202,7 @@ def get_option_contracts(nifty_price):
         logger.info(f"Columns: {df.columns.tolist()}")
 
         # ----------------------------------------------------
-        # Filter only NSE FNO
+        # Filter NSE_FNO
         # ----------------------------------------------------
         fno = df[
             df["SEM_SEGMENT"]
@@ -212,14 +213,16 @@ def get_option_contracts(nifty_price):
         logger.info(f"NSE_FNO rows: {len(fno)}")
 
         # ----------------------------------------------------
-        # ATM Strike
+        # ATM STRIKE
         # ----------------------------------------------------
         atm = round(nifty_price / 50) * 50
 
-        logger.info(f"ATM Strike: {atm}")
+        logger.info(f"NIFTY PRICE: {nifty_price}")
+
+        logger.info(f"ATM STRIKE: {atm}")
 
         # ----------------------------------------------------
-        # Only NIFTY options
+        # Only NIFTY contracts
         # ----------------------------------------------------
         nifty_opts = fno[
             fno["SEM_TRADING_SYMBOL"]
@@ -227,40 +230,42 @@ def get_option_contracts(nifty_price):
             .str.contains("NIFTY", case=False, na=False)
         ].copy()
 
+        logger.info(
+            f"NIFTY option rows: {len(nifty_opts)}"
+        )
+
         # ----------------------------------------------------
-        # Find CE contracts
+        # CE contracts
         # ----------------------------------------------------
         ce_df = nifty_opts[
             nifty_opts["SEM_TRADING_SYMBOL"]
             .astype(str)
             .str.contains(f"{atm}", na=False)
             &
-            nifty_opts["SEM_OPTION_TYPE"]
+            nifty_opts["SEM_TRADING_SYMBOL"]
             .astype(str)
-            .str.upper()
-            .str.contains("CE", na=False)
-        ]
+            .str.endswith("CE", na=False)
+        ].copy()
 
         # ----------------------------------------------------
-        # Find PE contracts
+        # PE contracts
         # ----------------------------------------------------
         pe_df = nifty_opts[
             nifty_opts["SEM_TRADING_SYMBOL"]
             .astype(str)
             .str.contains(f"{atm}", na=False)
             &
-            nifty_opts["SEM_OPTION_TYPE"]
+            nifty_opts["SEM_TRADING_SYMBOL"]
             .astype(str)
-            .str.upper()
-            .str.contains("PE", na=False)
-        ]
+            .str.endswith("PE", na=False)
+        ].copy()
 
-        logger.info(f"CE Found: {len(ce_df)}")
+        logger.info(f"CE contracts found: {len(ce_df)}")
 
-        logger.info(f"PE Found: {len(pe_df)}")
+        logger.info(f"PE contracts found: {len(pe_df)}")
 
         # ----------------------------------------------------
-        # Validation
+        # Validate
         # ----------------------------------------------------
         if ce_df.empty:
             raise Exception("No CE contract found")
@@ -269,12 +274,21 @@ def get_option_contracts(nifty_price):
             raise Exception("No PE contract found")
 
         # ----------------------------------------------------
+        # Sort by expiry
+        # ----------------------------------------------------
+        if "SEM_EXPIRY_DATE" in ce_df.columns:
+
+            ce_df = ce_df.sort_values(
+                "SEM_EXPIRY_DATE"
+            )
+
+            pe_df = pe_df.sort_values(
+                "SEM_EXPIRY_DATE"
+            )
+
+        # ----------------------------------------------------
         # Select nearest expiry
         # ----------------------------------------------------
-        ce_df = ce_df.sort_values("SEM_EXPIRY_DATE")
-
-        pe_df = pe_df.sort_values("SEM_EXPIRY_DATE")
-
         ce_row = ce_df.iloc[0]
 
         pe_row = pe_df.iloc[0]
@@ -291,15 +305,21 @@ def get_option_contracts(nifty_price):
         )
 
         logger.info(
-            f"Selected CE: "
-            f"{ce_row['SEM_TRADING_SYMBOL']} "
-            f"| ID={SELECTED_CE_ID}"
+            f"SELECTED CE: "
+            f"{ce_row['SEM_TRADING_SYMBOL']}"
         )
 
         logger.info(
-            f"Selected PE: "
-            f"{pe_row['SEM_TRADING_SYMBOL']} "
-            f"| ID={SELECTED_PE_ID}"
+            f"SELECTED PE: "
+            f"{pe_row['SEM_TRADING_SYMBOL']}"
+        )
+
+        logger.info(
+            f"CE ID: {SELECTED_CE_ID}"
+        )
+
+        logger.info(
+            f"PE ID: {SELECTED_PE_ID}"
         )
 
     except Exception as e:
@@ -311,7 +331,6 @@ def get_option_contracts(nifty_price):
         SELECTED_CE_ID = None
 
         SELECTED_PE_ID = None
-
 
 # ------------------------------------------------------------
 # Signal Logic
