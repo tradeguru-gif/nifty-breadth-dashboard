@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine with Dynamic Contract Selection
+# backend.py - Nifty Options Signal Engine (Compatible with dhanhq 2.0.2)
 
 import os
 import threading
@@ -10,8 +10,8 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# Dhan SDK imports
-from dhanhq import DhanContext, dhanhq, marketfeed
+# Dhan SDK imports – using the stable 2.0.2 pattern
+from dhanhq import dhanhq, marketfeed
 
 # ------------------------------------------------------------
 # Helper functions for technical indicators
@@ -43,7 +43,7 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     return ema_fast - ema_slow   # MACD line as proxy for histogram
 
 def get_nifty_pcr():
-    """Fetch Put/Call Ratio from NSE (free)."""
+    """Fetch Put/Call Ratio from NSE (free, no API key)."""
     url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -97,14 +97,13 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Dynamic Option Contract Selection
+# Dynamic Option Contract Selection (using dhanhq 2.0.2)
 # ------------------------------------------------------------
 def get_option_contracts(nifty_spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
     try:
         import pandas as pd
-        dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        dhan = dhanhq(dhan_context)
+        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
         logger.info("Fetching instrument master...")
         df = dhan.fetch_security_list("detailed")
         fno = df[df["SEGMENT"] == "NSE_FNO"]
@@ -118,13 +117,13 @@ def get_option_contracts(nifty_spot):
         opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
         calls = opts_nearest[opts_nearest["OPTION_TYPE"] == "CE"]
         puts = opts_nearest[opts_nearest["OPTION_TYPE"] == "PE"]
-        # Find call above spot
+        # Call above spot
         calls_above = calls[calls["STRIKE"] >= nifty_spot]
         if not calls_above.empty:
             call_contract = calls_above.sort_values("STRIKE").iloc[0]
         else:
             call_contract = calls.iloc[(calls["STRIKE"] - nifty_spot).abs().argmin()]
-        # Find put below spot
+        # Put below spot
         puts_below = puts[puts["STRIKE"] <= nifty_spot]
         if not puts_below.empty:
             put_contract = puts_below.sort_values("STRIKE", ascending=False).iloc[0]
@@ -231,9 +230,15 @@ def health():
 application = app
 
 # ------------------------------------------------------------
-# Start background thread
+# Start background thread (for both local and Gunicorn)
 # ------------------------------------------------------------
-if __name__ == "__main__" or True:   # Ensures thread starts even when imported by Gunicorn
-    t = threading.Thread(target=run_feed, daemon=True)
-    t.start()
-    logger.info("Background signal engine thread started.")
+# This runs when the module is loaded (including by Gunicorn)
+t = threading.Thread(target=run_feed, daemon=True)
+t.start()
+logger.info("Background signal engine thread started.")
+
+# ------------------------------------------------------------
+# For local testing (if run directly)
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
