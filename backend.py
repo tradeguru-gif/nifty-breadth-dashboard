@@ -190,7 +190,7 @@ def get_option_contracts(nifty_price):
         df = pd.read_csv(url)
 
         # ----------------------------------------------------
-        # Normalize Columns
+        # Normalize columns
         # ----------------------------------------------------
         df.columns = (
             df.columns
@@ -198,143 +198,108 @@ def get_option_contracts(nifty_price):
             .str.upper()
         )
 
-        logger.info(
-            f"Columns found: {df.columns.tolist()}"
-        )
+        logger.info(f"Columns: {df.columns.tolist()}")
 
         # ----------------------------------------------------
-        # Auto-detect columns
-        # ----------------------------------------------------
-        segment_col = None
-        security_col = None
-        symbol_col = None
-
-        for col in [
-            "SEM_SEGMENT",
-            "SEGMENT",
-            "EXCH_SEGMENT"
-        ]:
-            if col in df.columns:
-                segment_col = col
-                break
-
-        for col in [
-            "SEM_SMST_SECURITY_ID",
-            "SECURITY_ID"
-        ]:
-            if col in df.columns:
-                security_col = col
-                break
-
-        for col in [
-            "SEM_TRADING_SYMBOL",
-            "TRADING_SYMBOL"
-        ]:
-            if col in df.columns:
-                symbol_col = col
-                break
-
-        if not segment_col:
-            raise Exception("Segment column not found")
-
-        if not security_col:
-            raise Exception("Security column not found")
-
-        if not symbol_col:
-            raise Exception("Trading symbol column not found")
-
-        logger.info(f"Using segment column: {segment_col}")
-
-        logger.info(f"Using security column: {security_col}")
-
-        logger.info(f"Using symbol column: {symbol_col}")
-
-        # ----------------------------------------------------
-        # Filter NSE_FNO
+        # Filter only NSE FNO
         # ----------------------------------------------------
         fno = df[
-            df[segment_col]
+            df["SEM_SEGMENT"]
             .astype(str)
             .str.contains("NSE_FNO", na=False)
         ].copy()
 
-        logger.info(
-            f"Total NSE_FNO rows: {len(fno)}"
-        )
+        logger.info(f"NSE_FNO rows: {len(fno)}")
 
         # ----------------------------------------------------
         # ATM Strike
         # ----------------------------------------------------
         atm = round(nifty_price / 50) * 50
 
-        logger.info(f"NIFTY Spot: {nifty_price}")
-
         logger.info(f"ATM Strike: {atm}")
 
         # ----------------------------------------------------
-        # CE Search
+        # Only NIFTY options
         # ----------------------------------------------------
-        ce_df = fno[
-            fno[symbol_col]
+        nifty_opts = fno[
+            fno["SEM_TRADING_SYMBOL"]
             .astype(str)
-            .str.contains(
-                f"NIFTY.*{atm}.*CE",
-                case=False,
-                na=False
-            )
+            .str.contains("NIFTY", case=False, na=False)
+        ].copy()
+
+        # ----------------------------------------------------
+        # Find CE contracts
+        # ----------------------------------------------------
+        ce_df = nifty_opts[
+            nifty_opts["SEM_TRADING_SYMBOL"]
+            .astype(str)
+            .str.contains(f"{atm}", na=False)
+            &
+            nifty_opts["SEM_OPTION_TYPE"]
+            .astype(str)
+            .str.upper()
+            .str.contains("CE", na=False)
         ]
 
         # ----------------------------------------------------
-        # PE Search
+        # Find PE contracts
         # ----------------------------------------------------
-        pe_df = fno[
-            fno[symbol_col]
+        pe_df = nifty_opts[
+            nifty_opts["SEM_TRADING_SYMBOL"]
             .astype(str)
-            .str.contains(
-                f"NIFTY.*{atm}.*PE",
-                case=False,
-                na=False
-            )
+            .str.contains(f"{atm}", na=False)
+            &
+            nifty_opts["SEM_OPTION_TYPE"]
+            .astype(str)
+            .str.upper()
+            .str.contains("PE", na=False)
         ]
 
-        logger.info(f"CE Contracts: {len(ce_df)}")
+        logger.info(f"CE Found: {len(ce_df)}")
 
-        logger.info(f"PE Contracts: {len(pe_df)}")
-
-        if ce_df.empty or pe_df.empty:
-            raise Exception(
-                "Matching CE/PE contracts not found"
-            )
+        logger.info(f"PE Found: {len(pe_df)}")
 
         # ----------------------------------------------------
-        # Select first contract
+        # Validation
         # ----------------------------------------------------
+        if ce_df.empty:
+            raise Exception("No CE contract found")
+
+        if pe_df.empty:
+            raise Exception("No PE contract found")
+
+        # ----------------------------------------------------
+        # Select nearest expiry
+        # ----------------------------------------------------
+        ce_df = ce_df.sort_values("SEM_EXPIRY_DATE")
+
+        pe_df = pe_df.sort_values("SEM_EXPIRY_DATE")
+
         ce_row = ce_df.iloc[0]
 
         pe_row = pe_df.iloc[0]
 
+        # ----------------------------------------------------
+        # Security IDs
+        # ----------------------------------------------------
         SELECTED_CE_ID = str(
-            ce_row[security_col]
+            ce_row["SEM_SMST_SECURITY_ID"]
         )
 
         SELECTED_PE_ID = str(
-            pe_row[security_col]
+            pe_row["SEM_SMST_SECURITY_ID"]
         )
 
         logger.info(
-            f"Selected CE ID: {SELECTED_CE_ID}"
+            f"Selected CE: "
+            f"{ce_row['SEM_TRADING_SYMBOL']} "
+            f"| ID={SELECTED_CE_ID}"
         )
 
         logger.info(
-            f"Selected PE ID: {SELECTED_PE_ID}"
-        )
-
-        logger.info(
-            f"CE Symbol: {ce_row[symbol_col]}"
-        )
-
-        logger.info(
-            f"PE Symbol: {pe_row[symbol_col]}"
+            f"Selected PE: "
+            f"{pe_row['SEM_TRADING_SYMBOL']} "
+            f"| ID={SELECTED_PE_ID}"
         )
 
     except Exception as e:
