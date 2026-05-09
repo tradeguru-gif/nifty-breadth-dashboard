@@ -99,18 +99,18 @@ async def run_feed():
         logger.error(f"Error selecting contracts: {e}")
         return
 
-    # Initialize directly without DhanContext to support v2.0+
+    # Initialize directly with credentials (v2.0.2 style)
     feed = MarketFeed(CLIENT_ID, ACCESS_TOKEN, version='v2')
     feed.on_message = on_message
     
     await feed.connect()
     
-    # 1 = NSE_FNO, 15 = Full/Ticker mode
-   # Use '1' for NSE_FNO and '15' for the data mode
-# This is what is causing your crash
-# 1 = NSE_FNO, 15 = Ticker Mode
-# This cannot throw an "AttributeError" because it uses plain numbers
-subscription = [(1, SELECTED_CE_ID, 15), (1, SELECTED_PE_ID, 15)]
+    # --- NO WORDS HERE, ONLY NUMBERS ---
+    # 1 = NSE_FNO (Segment)
+    # 15 = Ticker Mode
+    subscription = [
+        (1, SELECTED_CE_ID, 15), 
+        (1, SELECTED_PE_ID, 15)
     ]
     
     await feed.subscribe_symbols(subscription)
@@ -118,7 +118,6 @@ subscription = [(1, SELECTED_CE_ID, 15), (1, SELECTED_PE_ID, 15)]
     
     while True:
         await asyncio.sleep(1)
-
 def start_engine():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
