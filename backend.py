@@ -213,54 +213,62 @@ def get_option_contracts(nifty_price):
 
         logger.info("Loading Dhan instrument master...")
 
-        df = load_instruments()
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-        # Only NIFTY option contracts
-        nifty_opts = df[
+        df = pd.read_csv(url)
+
+        # Only NIFTY options
+        opts = df[
             (df["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
             (df["SM_SYMBOL_NAME"] == "NIFTY")
         ].copy()
 
-        logger.info(f"NIFTY option rows: {len(nifty_opts)}")
+        logger.info(f"NIFTY option rows: {len(opts)}")
 
-        # Convert strike price
-        nifty_opts["SEM_STRIKE_PRICE"] = (
-            nifty_opts["SEM_STRIKE_PRICE"]
+        # Convert strike
+        opts["SEM_STRIKE_PRICE"] = (
+            opts["SEM_STRIKE_PRICE"]
             .astype(float)
         )
 
         # Convert expiry
-        nifty_opts["SEM_EXPIRY_DATE"] = pd.to_datetime(
-            nifty_opts["SEM_EXPIRY_DATE"],
+        opts["SEM_EXPIRY_DATE"] = pd.to_datetime(
+            opts["SEM_EXPIRY_DATE"],
             errors="coerce"
         )
 
-        # Get nearest expiry
-        nearest_expiry = nifty_opts[
+        opts = opts.dropna(
+            subset=["SEM_EXPIRY_DATE"]
+        )
+
+        # Nearest expiry
+        nearest_expiry = opts[
             "SEM_EXPIRY_DATE"
         ].min()
 
-        nifty_opts = nifty_opts[
-            nifty_opts["SEM_EXPIRY_DATE"] == nearest_expiry
+        opts = opts[
+            opts["SEM_EXPIRY_DATE"] == nearest_expiry
         ]
 
-        logger.info(f"Nearest expiry: {nearest_expiry}")
+        logger.info(
+            f"Nearest expiry: {nearest_expiry}"
+        )
 
-        # ATM Strike
+        # ATM
         atm = round(nifty_price / 50) * 50
 
         logger.info(f"ATM Strike: {atm}")
 
         # CE
-        ce_df = nifty_opts[
-            (nifty_opts["SEM_OPTION_TYPE"] == "CE") &
-            (nifty_opts["SEM_STRIKE_PRICE"] == atm)
+        ce_df = opts[
+            (opts["SEM_OPTION_TYPE"] == "CE") &
+            (opts["SEM_STRIKE_PRICE"] == atm)
         ]
 
         # PE
-        pe_df = nifty_opts[
-            (nifty_opts["SEM_OPTION_TYPE"] == "PE") &
-            (nifty_opts["SEM_STRIKE_PRICE"] == atm)
+        pe_df = opts[
+            (opts["SEM_OPTION_TYPE"] == "PE") &
+            (opts["SEM_STRIKE_PRICE"] == atm)
         ]
 
         if ce_df.empty:
@@ -280,15 +288,20 @@ def get_option_contracts(nifty_price):
             pe_row["SEM_SMST_SECURITY_ID"]
         )
 
-        logger.info(f"CE ID: {SELECTED_CE_ID}")
-        logger.info(f"PE ID: {SELECTED_PE_ID}")
-
         logger.info(
-            f"CE SYMBOL: {ce_row['SEM_TRADING_SYMBOL']}"
+            f"Selected CE: {SELECTED_CE_ID}"
         )
 
         logger.info(
-            f"PE SYMBOL: {pe_row['SEM_TRADING_SYMBOL']}"
+            f"Selected PE: {SELECTED_PE_ID}"
+        )
+
+        logger.info(
+            f"CE Symbol: {ce_row['SEM_TRADING_SYMBOL']}"
+        )
+
+        logger.info(
+            f"PE Symbol: {pe_row['SEM_TRADING_SYMBOL']}"
         )
 
         return [
@@ -298,7 +311,9 @@ def get_option_contracts(nifty_price):
 
     except Exception as e:
 
-        logger.exception(f"Contract selection failed: {e}")
+        logger.exception(
+            f"Contract selection failed: {e}"
+        )
 
         return []
 # ------------------------------------------------------------
