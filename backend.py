@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Compatible with dhanhq 2.0.2)
+# backend.py - Nifty Options Signal Engine (Corrected column names)
 
 import os
 import threading
@@ -10,11 +10,10 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# Dhan SDK imports – using the stable 2.0.2 pattern
 from dhanhq import dhanhq, marketfeed
 
 # ------------------------------------------------------------
-# Helper functions for technical indicators
+# Helper functions
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -40,10 +39,9 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
         return result
     ema_fast = ema(prices, fast)
     ema_slow = ema(prices, slow)
-    return ema_fast - ema_slow   # MACD line as proxy for histogram
+    return ema_fast - ema_slow
 
 def get_nifty_pcr():
-    """Fetch Put/Call Ratio from NSE (free, no API key)."""
     url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -77,7 +75,6 @@ CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 CURRENT_NIFTY = int(os.getenv("CURRENT_NIFTY", "24000"))
 
-# Global variables
 latest_data = {
     "signal": "WAITING",
     "ce_price": 0,
@@ -97,7 +94,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Dynamic Option Contract Selection (using dhanhq 2.0.2)
+# Dynamic Option Contract Selection (correct column names)
 # ------------------------------------------------------------
 def get_option_contracts(nifty_spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -108,7 +105,8 @@ def get_option_contracts(nifty_spot):
         df = dhan.fetch_security_list("detailed")
         fno = df[df["SEGMENT"] == "NSE_FNO"]
         opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
-        opts["EXPIRY_DT"] = pd.to_datetime(opts["SEM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
+        # Use correct expiry column: SM_EXPIRY_DATE
+        opts["EXPIRY_DT"] = pd.to_datetime(opts["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
         opts = opts.dropna(subset=["EXPIRY_DT"])
         opts = opts.sort_values("EXPIRY_DT")
         nearest_expiry = opts["EXPIRY_DT"].iloc[0]
@@ -139,7 +137,7 @@ def get_option_contracts(nifty_spot):
         return []
 
 # ------------------------------------------------------------
-# Signal update logic (RSI, MACD, PCR)
+# Signal update logic
 # ------------------------------------------------------------
 def update_signal(ce_price, pe_price):
     global latest_data, price_history, update_counter
@@ -187,7 +185,7 @@ def on_message(instance, tick):
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket feed runner (with auto-reconnect)
+# WebSocket feed runner
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -230,15 +228,11 @@ def health():
 application = app
 
 # ------------------------------------------------------------
-# Start background thread (for both local and Gunicorn)
+# Start background thread
 # ------------------------------------------------------------
-# This runs when the module is loaded (including by Gunicorn)
 t = threading.Thread(target=run_feed, daemon=True)
 t.start()
 logger.info("Background signal engine thread started.")
 
-# ------------------------------------------------------------
-# For local testing (if run directly)
-# ------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
