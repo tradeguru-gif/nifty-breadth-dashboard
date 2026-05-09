@@ -1,80 +1,46 @@
-# backend.py - Nifty Options Signal Engine (Corrected Expiry Column)
+# backend.py - Nifty Options Signal Engine (Fully Corrected)
 
 import os
 import threading
 import logging
 import time
 import requests
+import pandas as pd
+
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from dhanhq import dhanhq, marketfeed
+from dhanhq import marketfeed
 
 # ------------------------------------------------------------
-# Helper functions (RSI, MACD, PCR)
-# ------------------------------------------------------------
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return 50.0
-    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [-d if d < 0 else 0 for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow + signal:
-        return 0.0
-    def ema(data, period):
-        alpha = 2 / (period + 1)
-        result = data[0]
-        for price in data[1:]:
-            result = alpha * price + (1 - alpha) * result
-        return result
-    ema_fast = ema(prices, fast)
-    ema_slow = ema(prices, slow)
-    return ema_fast - ema_slow
-
-def get_nifty_pcr():
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers)
-        time.sleep(0.5)
-        response = session.get(url, headers=headers)
-        data = response.json()
-        total_ce_oi = 0
-        total_pe_oi = 0
-        for record in data['records']['data']:
-            if 'CE' in record:
-                total_ce_oi += record['CE']['openInterest']
-            if 'PE' in record:
-                total_pe_oi += record['PE']['openInterest']
-        return total_ce_oi / total_pe_oi if total_pe_oi > 0 else 1.0
-    except Exception as e:
-        logging.error(f"PCR fetch failed: {e}")
-        return None
-
-# ------------------------------------------------------------
-# Configuration
+# Logging
 # ------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------
+# Flask App
+# ------------------------------------------------------------
 app = Flask(__name__)
+
 CORS(app)
 
+# ------------------------------------------------------------
+# Environment Variables
+# ------------------------------------------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
 
+CURRENT_NIFTY = float(
+    os.getenv("CURRENT_NIFTY", "24000")
+)
+
+# ------------------------------------------------------------
+# Global Variables
+# ------------------------------------------------------------
 latest_data = {
     "signal": "WAITING",
     "ce_price": 0,
@@ -85,263 +51,578 @@ latest_data = {
     "pcr": 1.0,
     "timestamp": ""
 }
-SELECTED_CE_ID = ""
-SELECTED_PE_ID = ""
+
+SELECTED_CE_ID = None
+SELECTED_PE_ID = None
 
 price_history = deque(maxlen=100)
+
 update_counter = 0
+
 UPDATE_INTERVAL = 10
+
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Dynamic Option Contract Selection (Correct column: SM_EXPIRY_DATE)
+# Indicators
 # ------------------------------------------------------------
-def get_option_contracts(nifty_spot):
-    global SELECTED_CE_ID, SELECTED_PE_ID
+def calculate_rsi(prices, period=14):
+
+    if len(prices) < period + 1:
+        return 50.0
+
+    deltas = [
+        prices[i] - prices[i - 1]
+        for i in range(1, len(prices))
+    ]
+
+    gains = [d if d > 0 else 0 for d in deltas]
+
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+
+    avg_loss = sum(losses[:period]) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_macd(prices, fast=12, slow=26):
+
+    if len(prices) < slow:
+        return 0.0
+
+    def ema(data, period):
+
+        alpha = 2 / (period + 1)
+
+        value = data[0]
+
+        for price in data[1:]:
+            value = alpha * price + (1 - alpha) * value
+
+        return value
+
+    ema_fast = ema(prices, fast)
+
+    ema_slow = ema(prices, slow)
+
+    return ema_fast - ema_slow
+
+
+# ------------------------------------------------------------
+# PCR
+# ------------------------------------------------------------
+def get_nifty_pcr():
+
+    url = (
+        "https://www.nseindia.com/api/"
+        "option-chain-indices?symbol=NIFTY"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
     try:
-        import pandas as pd
 
-        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+        session = requests.Session()
 
-        logger.info("Fetching instrument master...")
+        session.get(
+            "https://www.nseindia.com",
+            headers=headers
+        )
 
-       df = dhan.fetch_security_list("detailed")
+        time.sleep(0.5)
 
-logger.info(f"ALL COLUMNS: {df.columns.tolist()}")
+        response = session.get(
+            url,
+            headers=headers
+        )
 
-logger.info(f"FIRST 5 ROWS:\n{df.head()}")
+        data = response.json()
 
-return []
+        total_ce_oi = 0
+        total_pe_oi = 0
 
-        # ------------------------------------------------
-        # Filter NSE FNO options
-        # ------------------------------------------------
-       logger.info(f"ALL COLUMNS: {df.columns.tolist()}")
+        for record in data["records"]["data"]:
 
-logger.info(f"FIRST 5 ROWS:\n{df.head()}")
+            if "CE" in record:
+                total_ce_oi += record["CE"]["openInterest"]
 
-return []
-        if opts.empty:
-            logger.error("No OPTIDX instruments found")
-            return []
+            if "PE" in record:
+                total_pe_oi += record["PE"]["openInterest"]
 
-        # ------------------------------------------------
-        # Detect expiry column
-        # ------------------------------------------------
-        expiry_col = None
+        if total_pe_oi == 0:
+            return 1.0
 
-        for col in opts.columns:
-            if "EXPIRY" in col.upper():
-                expiry_col = col
+        return total_ce_oi / total_pe_oi
+
+    except Exception as e:
+
+        logger.error(f"PCR fetch failed: {e}")
+
+        return 1.0
+
+
+# ------------------------------------------------------------
+# Dynamic Option Contract Selection
+# ------------------------------------------------------------
+def get_option_contracts(nifty_price):
+
+    global SELECTED_CE_ID
+    global SELECTED_PE_ID
+
+    try:
+
+        logger.info("Downloading Dhan instrument master...")
+
+        url = (
+            "https://images.dhan.co/api-data/"
+            "api-scrip-master.csv"
+        )
+
+        df = pd.read_csv(url)
+
+        # ----------------------------------------------------
+        # Normalize Columns
+        # ----------------------------------------------------
+        df.columns = (
+            df.columns
+            .str.strip()
+            .str.upper()
+        )
+
+        logger.info(
+            f"Columns found: {df.columns.tolist()}"
+        )
+
+        # ----------------------------------------------------
+        # Auto-detect columns
+        # ----------------------------------------------------
+        segment_col = None
+        security_col = None
+        symbol_col = None
+
+        for col in [
+            "SEM_SEGMENT",
+            "SEGMENT",
+            "EXCH_SEGMENT"
+        ]:
+            if col in df.columns:
+                segment_col = col
                 break
 
-        if not expiry_col:
-            logger.error(f"No expiry column found. Columns: {opts.columns.tolist()}")
-            return []
+        for col in [
+            "SEM_SMST_SECURITY_ID",
+            "SECURITY_ID"
+        ]:
+            if col in df.columns:
+                security_col = col
+                break
 
-        logger.info(f"Using expiry column: {expiry_col}")
+        for col in [
+            "SEM_TRADING_SYMBOL",
+            "TRADING_SYMBOL"
+        ]:
+            if col in df.columns:
+                symbol_col = col
+                break
 
-        # ------------------------------------------------
-        # SAFE expiry conversion
-        # ------------------------------------------------
-        opts["EXPIRY_DT"] = pd.to_datetime(
-            opts[expiry_col],
-            errors="coerce"
-        )
+        if not segment_col:
+            raise Exception("Segment column not found")
 
-        opts = opts.dropna(subset=["EXPIRY_DT"])
+        if not security_col:
+            raise Exception("Security column not found")
 
-        if opts.empty:
-            logger.error("All expiry dates became invalid after conversion")
-            return []
+        if not symbol_col:
+            raise Exception("Trading symbol column not found")
 
-        # ------------------------------------------------
-        # Sort expiries
-        # ------------------------------------------------
-        opts = opts.sort_values("EXPIRY_DT")
+        logger.info(f"Using segment column: {segment_col}")
 
-        nearest_expiry = opts["EXPIRY_DT"].min()
+        logger.info(f"Using security column: {security_col}")
 
-        logger.info(f"Nearest expiry: {nearest_expiry}")
+        logger.info(f"Using symbol column: {symbol_col}")
 
-        opts_nearest = opts[
-            opts["EXPIRY_DT"] == nearest_expiry
+        # ----------------------------------------------------
+        # Filter NSE_FNO
+        # ----------------------------------------------------
+        fno = df[
+            df[segment_col]
+            .astype(str)
+            .str.contains("NSE_FNO", na=False)
         ].copy()
 
-        if opts_nearest.empty:
-            logger.error("No options found for nearest expiry")
-            return []
-
-        # ------------------------------------------------
-        # Convert strike prices
-        # ------------------------------------------------
-        opts_nearest["STRIKE"] = pd.to_numeric(
-            opts_nearest["STRIKE_PRICE"],
-            errors="coerce"
+        logger.info(
+            f"Total NSE_FNO rows: {len(fno)}"
         )
 
-        opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
-#---------------------------------------
-DEBUGGING LOGS
-#-------------------------------------
-logger.info(f"Columns: {opts_nearest.columns.tolist()}")
-logger.info(f"OPTION_TYPE values: {opts_nearest['OPTION_TYPE'].unique()}")
-logger.info(f"Nearest expiry rows: {len(opts_nearest)}")
+        # ----------------------------------------------------
+        # ATM Strike
+        # ----------------------------------------------------
+        atm = round(nifty_price / 50) * 50
 
+        logger.info(f"NIFTY Spot: {nifty_price}")
 
-        if opts_nearest.empty:
-            logger.error("Strike conversion failed")
-            return []
+        logger.info(f"ATM Strike: {atm}")
 
-        # ------------------------------------------------
-        # Separate CE and PE
-        # ------------------------------------------------
-        calls = opts_nearest[
-    opts_nearest["OPTION_TYPE"]
-    .astype(str)
-    .str.upper()
-    .str.contains("C")
-].copy()
+        # ----------------------------------------------------
+        # CE Search
+        # ----------------------------------------------------
+        ce_df = fno[
+            fno[symbol_col]
+            .astype(str)
+            .str.contains(
+                f"NIFTY.*{atm}.*CE",
+                case=False,
+                na=False
+            )
+        ]
 
-puts = opts_nearest[
-    opts_nearest["OPTION_TYPE"]
-    .astype(str)
-    .str.upper()
-    .str.contains("P")
-].copy()
+        # ----------------------------------------------------
+        # PE Search
+        # ----------------------------------------------------
+        pe_df = fno[
+            fno[symbol_col]
+            .astype(str)
+            .str.contains(
+                f"NIFTY.*{atm}.*PE",
+                case=False,
+                na=False
+            )
+        ]
 
-        # ------------------------------------------------
-        # Find nearest CE strike
-        # ------------------------------------------------
-        calls["DIFF"] = (calls["STRIKE"] - nifty_spot).abs()
+        logger.info(f"CE Contracts: {len(ce_df)}")
 
-        call_contract = calls.sort_values("DIFF").iloc[0]
+        logger.info(f"PE Contracts: {len(pe_df)}")
 
-        # ------------------------------------------------
-        # Find nearest PE strike
-        # ------------------------------------------------
-        puts["DIFF"] = (puts["STRIKE"] - nifty_spot).abs()
+        if ce_df.empty or pe_df.empty:
+            raise Exception(
+                "Matching CE/PE contracts not found"
+            )
 
-        put_contract = puts.sort_values("DIFF").iloc[0]
+        # ----------------------------------------------------
+        # Select first contract
+        # ----------------------------------------------------
+        ce_row = ce_df.iloc[0]
 
-        # ------------------------------------------------
-        # Security IDs
-        # ------------------------------------------------
-        SELECTED_CE_ID = str(call_contract["SECURITY_ID"])
+        pe_row = pe_df.iloc[0]
 
-        SELECTED_PE_ID = str(put_contract["SECURITY_ID"])
+        SELECTED_CE_ID = str(
+            ce_row[security_col]
+        )
 
-        logger.info(
-            f"Selected CE -> {SELECTED_CE_ID} | Strike: {call_contract['STRIKE']}"
+        SELECTED_PE_ID = str(
+            pe_row[security_col]
         )
 
         logger.info(
-            f"Selected PE -> {SELECTED_PE_ID} | Strike: {put_contract['STRIKE']}"
+            f"Selected CE ID: {SELECTED_CE_ID}"
         )
 
-        return [SELECTED_CE_ID, SELECTED_PE_ID]
+        logger.info(
+            f"Selected PE ID: {SELECTED_PE_ID}"
+        )
+
+        logger.info(
+            f"CE Symbol: {ce_row[symbol_col]}"
+        )
+
+        logger.info(
+            f"PE Symbol: {pe_row[symbol_col]}"
+        )
 
     except Exception as e:
-        logger.exception(f"Dynamic selection failed: {e}")
-        return []
+
+        logger.exception(
+            f"Dynamic contract selection failed: {e}"
+        )
+
+        SELECTED_CE_ID = None
+
+        SELECTED_PE_ID = None
+
+
 # ------------------------------------------------------------
-# Signal update logic
+# Signal Logic
 # ------------------------------------------------------------
 def update_signal(ce_price, pe_price):
-    global latest_data, price_history, update_counter
+
+    global latest_data
+    global price_history
+    global update_counter
+
     spread = ce_price - pe_price
-    latest_data["spread"] = spread
+
+    latest_data["spread"] = round(spread, 2)
+
     if ce_price > 0:
         price_history.append(ce_price)
+
     update_counter += 1
-    if update_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
+
+    if (
+        update_counter >= UPDATE_INTERVAL
+        and len(price_history) >= 20
+    ):
+
         update_counter = 0
-        rsi = calculate_rsi(list(price_history))
-        macd_hist = calculate_macd(list(price_history))
+
+        rsi = calculate_rsi(
+            list(price_history)
+        )
+
+        macd = calculate_macd(
+            list(price_history)
+        )
+
         pcr = get_nifty_pcr()
-        if pcr is None:
-            pcr = latest_data.get("pcr", 1.0)
+
         latest_data["rsi"] = round(rsi, 2)
-        latest_data["macd"] = round(macd_hist, 2)
+
+        latest_data["macd"] = round(macd, 2)
+
         latest_data["pcr"] = round(pcr, 2)
-        if spread > SPREAD_THRESHOLD and rsi < 70 and macd_hist > 0 and pcr < 0.8:
+
+        # ----------------------------------------------------
+        # Signal Rules
+        # ----------------------------------------------------
+        if (
+            spread > SPREAD_THRESHOLD
+            and rsi < 70
+            and macd > 0
+            and pcr < 0.8
+        ):
+
             signal = "LONG SPREAD (Bullish)"
-        elif spread < -SPREAD_THRESHOLD and rsi > 30 and macd_hist < 0 and pcr > 1.2:
+
+        elif (
+            spread < -SPREAD_THRESHOLD
+            and rsi > 30
+            and macd < 0
+            and pcr > 1.2
+        ):
+
             signal = "SHORT SPREAD (Bearish)"
+
         else:
+
             signal = "NEUTRAL"
+
         latest_data["signal"] = signal
-    latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    latest_data["timestamp"] = (
+        datetime.now()
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+
 
 # ------------------------------------------------------------
-# WebSocket callback
+# WebSocket Callback
 # ------------------------------------------------------------
 def on_message(instance, tick):
-    global latest_data, SELECTED_CE_ID, SELECTED_PE_ID
+
+    global latest_data
+
     try:
-        sec_id = str(tick.get('security_id'))
-        price = tick.get('ltp', 0)
+
+        sec_id = str(
+            tick.get("security_id")
+        )
+
+        price = tick.get("ltp", 0)
+
         if sec_id == SELECTED_CE_ID:
+
             latest_data["ce_price"] = price
+
         elif sec_id == SELECTED_PE_ID:
+
             latest_data["pe_price"] = price
-        if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
-            update_signal(latest_data["ce_price"], latest_data["pe_price"])
+
+        # ----------------------------------------------------
+        # Update signal
+        # ----------------------------------------------------
+        if (
+            latest_data["ce_price"] > 0
+            and latest_data["pe_price"] > 0
+        ):
+
+            update_signal(
+                latest_data["ce_price"],
+                latest_data["pe_price"]
+            )
+
         else:
-            latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            latest_data["timestamp"] = (
+                datetime.now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+            )
+
     except Exception as e:
-        logger.error(f"on_message error: {e}")
+
+        logger.error(
+            f"on_message error: {e}"
+        )
+
 
 # ------------------------------------------------------------
-# WebSocket feed runner (auto-reconnect)
+# WebSocket Feed Runner
 # ------------------------------------------------------------
 def run_feed():
-    global SELECTED_CE_ID, SELECTED_PE_ID
+
+    global SELECTED_CE_ID
+    global SELECTED_PE_ID
+
     while True:
+
         try:
-            get_option_contracts(CURRENT_NIFTY)
-            if not SELECTED_CE_ID or not SELECTED_PE_ID:
-                logger.error("No valid security IDs. Retrying in 30 seconds...")
-                time.sleep(30)
-                continue
-            logger.info(f"Subscribing to CE: {SELECTED_CE_ID}, PE: {SELECTED_PE_ID}")
-            feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=[
-                    (marketfeed.NSE_FNO, SELECTED_CE_ID, marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, SELECTED_PE_ID, marketfeed.Ticker)
-                ],
-                on_message=on_message,
-                on_connect=lambda instance: logger.info("✅ Connected to Dhan WebSocket"),
-                on_error=lambda instance, err: logger.error(f"WebSocket error: {err}"),
-                on_close=lambda instance: logger.warning("WebSocket closed. Reconnecting...")
+
+            logger.info(
+                "Selecting option contracts..."
             )
+
+            # ------------------------------------------------
+            # Get CE/PE contracts
+            # ------------------------------------------------
+            get_option_contracts(
+                CURRENT_NIFTY
+            )
+
+            # ------------------------------------------------
+            # Validate IDs
+            # ------------------------------------------------
+            if (
+                not SELECTED_CE_ID
+                or not SELECTED_PE_ID
+            ):
+
+                logger.error(
+                    "No valid contracts found. "
+                    "Retrying in 30 seconds..."
+                )
+
+                time.sleep(30)
+
+                continue
+
+            logger.info(
+                f"Subscribing to "
+                f"CE={SELECTED_CE_ID}, "
+                f"PE={SELECTED_PE_ID}"
+            )
+
+            # ------------------------------------------------
+            # Create Feed
+            # ------------------------------------------------
+            feed = marketfeed.DhanFeed(
+
+                client_id=CLIENT_ID,
+
+                access_token=ACCESS_TOKEN,
+
+                instruments=[
+
+                    (
+                        marketfeed.NSE_FNO,
+                        str(SELECTED_CE_ID),
+                        marketfeed.Ticker
+                    ),
+
+                    (
+                        marketfeed.NSE_FNO,
+                        str(SELECTED_PE_ID),
+                        marketfeed.Ticker
+                    )
+                ],
+
+                on_connect=lambda instance:
+                logger.info(
+                    "✅ Connected to Dhan WebSocket"
+                ),
+
+                on_message=on_message,
+
+                on_error=lambda instance, err:
+                logger.error(
+                    f"❌ WebSocket Error: {err}"
+                ),
+
+                on_close=lambda instance:
+                logger.warning(
+                    "⚠️ WebSocket closed. "
+                    "Reconnecting..."
+                )
+            )
+
+            logger.info(
+                "Starting Dhan live feed..."
+            )
+
             feed.run_forever()
+
         except Exception as e:
-            logger.error(f"Feed crashed: {e}. Reconnecting in 10 seconds...")
+
+            logger.exception(
+                f"Feed crashed: {e}"
+            )
+
+            logger.info(
+                "Retrying in 10 seconds..."
+            )
+
             time.sleep(10)
 
-# ------------------------------------------------------------
-# Flask endpoints
-# ------------------------------------------------------------
-@app.route('/')
-def home():
-    return jsonify({"status": "active", "data": latest_data})
 
-@app.route('/api/health')
+# ------------------------------------------------------------
+# Flask Routes
+# ------------------------------------------------------------
+@app.route("/")
+def home():
+
+    return jsonify({
+        "status": "active",
+        "data": latest_data
+    })
+
+
+@app.route("/api/health")
 def health():
+
     return "OK", 200
 
+
+# ------------------------------------------------------------
+# WSGI
+# ------------------------------------------------------------
 application = app
 
 # ------------------------------------------------------------
-# Start background thread
+# Start Background Thread
 # ------------------------------------------------------------
-t = threading.Thread(target=run_feed, daemon=True)
-t.start()
-logger.info("Background signal engine thread started.")
+threading.Thread(
+    target=run_feed,
+    daemon=True
+).start()
 
+logger.info(
+    "Background signal engine started."
+)
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get("PORT", 10000)
+        )
+    )
