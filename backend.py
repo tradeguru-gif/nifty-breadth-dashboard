@@ -20,12 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # <--- ADD THIS LINE HERE
-
-@app.route('/')
-def home():
-    # This now allows your WordPress site to read this JSON
-    return jsonify({"status": "running", "data": latest_data})
+CORS(app) # CRITICAL for WordPress connection
 
 latest_data = {
     "signal": "INITIALIZING",
@@ -35,7 +30,6 @@ latest_data = {
     "timestamp": ""
 }
 
-# Store IDs globally so the message handler knows which is which
 SELECTED_CE_ID = ""
 SELECTED_PE_ID = ""
 
@@ -49,7 +43,6 @@ def get_option_contracts(nifty_spot):
     
     df = dhan.fetch_security_list("detailed")
     if df is None or df.empty:
-        # Emergency fallbacks (these vary by week, so spot check recommended)
         return ["0", "0"] 
 
     fno = df[df["SEGMENT"] == "NSE_FNO"]
@@ -85,7 +78,6 @@ def on_message(instance, tick):
     if price > 0:
         ticker_prices[sec_id] = price
         
-    # Explicitly check for our specific IDs to ensure the math is correct
     if SELECTED_CE_ID in ticker_prices and SELECTED_PE_ID in ticker_prices:
         ce_p = ticker_prices[SELECTED_CE_ID]
         pe_p = ticker_prices[SELECTED_PE_ID]
@@ -107,24 +99,24 @@ async def run_feed():
         logger.error(f"Error selecting contracts: {e}")
         return
 
-    # Use credentials directly for v2.0.2
+    # Initialize directly without DhanContext to support v2.0+
     feed = MarketFeed(CLIENT_ID, ACCESS_TOKEN, version='v2')
     feed.on_message = on_message
     
     await feed.connect()
     
-    # --- FIX HERE ---
-    # We use '1' for NSE_FNO (Options) and '15' for Ticker Data
+    # 1 = NSE_FNO, 15 = Full/Ticker mode
     subscription = [
         (1, SELECTED_CE_ID, 15), 
         (1, SELECTED_PE_ID, 15)
     ]
     
     await feed.subscribe_symbols(subscription)
-    logger.info("🚀 Subscription successful!")
+    logger.info("🚀 WebSocket Subscription Active!")
     
     while True:
         await asyncio.sleep(1)
+
 def start_engine():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -140,6 +132,9 @@ def home():
 @app.route('/api/health')
 def health():
     return "OK", 200
+
+# Required for Gunicorn to find the app instance
+application = app
 
 if __name__ == '__main__':
     threading.Thread(target=start_engine, daemon=True).start()
