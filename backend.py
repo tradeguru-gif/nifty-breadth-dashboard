@@ -12,7 +12,7 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from dhanhq import dhanhq marketfeed
+from dhanhq import dhanhq, marketfeed
 
 # ------------------------------------------------------------
 # Logging
@@ -31,18 +31,13 @@ CORS(app)
 # ------------------------------------------------------------
 # Environment Variables
 # ------------------------------------------------------------
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-CORS(app)
-
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
+
+CURRENT_NIFTY = float(
+    os.getenv("CURRENT_NIFTY", "24000")
+)
 
 # ------------------------------------------------------------
 # Initialize Dhan Client
