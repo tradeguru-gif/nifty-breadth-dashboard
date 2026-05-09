@@ -1,6 +1,7 @@
 # backend.py - Nifty Options Signal Engine (Fully Corrected)
 
 import os
+import asyncio
 import threading
 import logging
 import time
@@ -354,10 +355,18 @@ def on_message(instance, tick):
 # ------------------------------------------------------------
 # WebSocket Feed Runner
 # ------------------------------------------------------------
+
 def run_feed():
 
     global SELECTED_CE_ID
     global SELECTED_PE_ID
+
+    # ------------------------------------------------
+    # CREATE EVENT LOOP FOR THIS THREAD
+    # ------------------------------------------------
+    asyncio.set_event_loop(
+        asyncio.new_event_loop()
+    )
 
     while True:
 
@@ -367,9 +376,6 @@ def run_feed():
                 "Selecting option contracts..."
             )
 
-            # ------------------------------------------------
-            # Get contracts
-            # ------------------------------------------------
             get_option_contracts(
                 CURRENT_NIFTY
             )
@@ -394,7 +400,7 @@ def run_feed():
             )
 
             # ------------------------------------------------
-            # Create websocket
+            # CREATE FEED
             # ------------------------------------------------
             feed = marketfeed.DhanFeed(
 
@@ -422,7 +428,7 @@ def run_feed():
             )
 
             # ------------------------------------------------
-            # Connect websocket
+            # START FEED
             # ------------------------------------------------
             feed.run_forever()
 
@@ -433,7 +439,6 @@ def run_feed():
             )
 
             time.sleep(10)
-
 # ------------------------------------------------------------
 # Flask Routes
 # ------------------------------------------------------------
