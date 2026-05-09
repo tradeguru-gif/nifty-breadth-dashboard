@@ -38,6 +38,13 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 CURRENT_NIFTY = float(
     os.getenv("CURRENT_NIFTY", "24000")
 )
+# ------------------------------------------------------------
+# Initialize Dhan Client
+# ------------------------------------------------------------
+dhan = dhanhq(
+    CLIENT_ID,
+    ACCESS_TOKEN
+)
 
 # ------------------------------------------------------------
 # Initialize Dhan Client
