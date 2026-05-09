@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Corrected column names)
+# backend.py - Nifty Options Signal Engine (Corrected Expiry Column)
 
 import os
 import threading
@@ -13,7 +13,7 @@ from flask_cors import CORS
 from dhanhq import dhanhq, marketfeed
 
 # ------------------------------------------------------------
-# Helper functions
+# Helper functions (RSI, MACD, PCR)
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -94,7 +94,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Dynamic Option Contract Selection (correct column names)
+# Dynamic Option Contract Selection (Correct column: SM_EXPIRY_DATE)
 # ------------------------------------------------------------
 def get_option_contracts(nifty_spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -105,8 +105,18 @@ def get_option_contracts(nifty_spot):
         df = dhan.fetch_security_list("detailed")
         fno = df[df["SEGMENT"] == "NSE_FNO"]
         opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
-        # Use correct expiry column: SM_EXPIRY_DATE
-        opts["EXPIRY_DT"] = pd.to_datetime(opts["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
+        # Use the correct expiry column name
+        expiry_col = "SM_EXPIRY_DATE"
+        if expiry_col not in opts.columns:
+            # Fallback: try to find any column with 'EXPIRY'
+            for col in opts.columns:
+                if 'EXPIRY' in col.upper():
+                    expiry_col = col
+                    break
+            else:
+                raise KeyError(f"No expiry column found. Columns: {opts.columns.tolist()}")
+        logger.info(f"Using expiry column: {expiry_col}")
+        opts["EXPIRY_DT"] = pd.to_datetime(opts[expiry_col], format="%d-%b-%Y", errors="coerce")
         opts = opts.dropna(subset=["EXPIRY_DT"])
         opts = opts.sort_values("EXPIRY_DT")
         nearest_expiry = opts["EXPIRY_DT"].iloc[0]
@@ -115,13 +125,13 @@ def get_option_contracts(nifty_spot):
         opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
         calls = opts_nearest[opts_nearest["OPTION_TYPE"] == "CE"]
         puts = opts_nearest[opts_nearest["OPTION_TYPE"] == "PE"]
-        # Call above spot
+        # Find call above spot
         calls_above = calls[calls["STRIKE"] >= nifty_spot]
         if not calls_above.empty:
             call_contract = calls_above.sort_values("STRIKE").iloc[0]
         else:
             call_contract = calls.iloc[(calls["STRIKE"] - nifty_spot).abs().argmin()]
-        # Put below spot
+        # Find put below spot
         puts_below = puts[puts["STRIKE"] <= nifty_spot]
         if not puts_below.empty:
             put_contract = puts_below.sort_values("STRIKE", ascending=False).iloc[0]
@@ -185,7 +195,7 @@ def on_message(instance, tick):
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket feed runner
+# WebSocket feed runner (auto-reconnect)
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
