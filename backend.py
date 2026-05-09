@@ -1,11 +1,11 @@
-# backend.py - Production Stable Dhan Options Engine
+# backend.py - Production Stable NIFTY Options Engine (FIXED)
 
 import os
 import time
 import threading
 import logging
-import requests
 import pandas as pd
+import requests
 
 from datetime import datetime
 from flask import Flask, jsonify
@@ -15,39 +15,39 @@ from collections import deque
 from dhanhq import dhanhq as DhanHQ
 from dhanhq import marketfeed
 
-# ----------------------------
-# Logging
-# ----------------------------
+# -----------------------------
+# LOGGING
+# -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend")
 
-# ----------------------------
-# Flask
-# ----------------------------
+# -----------------------------
+# FLASK
+# -----------------------------
 app = Flask(__name__)
 CORS(app)
 
-# ----------------------------
+# -----------------------------
 # ENV
-# ----------------------------
+# -----------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
 
-# ----------------------------
-# Dhan Init (FIXED)
-# ----------------------------
+# -----------------------------
+# DHAN INIT
+# -----------------------------
 dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
 
-# ----------------------------
-# Runtime State
-# ----------------------------
+# -----------------------------
+# STATE
+# -----------------------------
 latest_data = {
     "ce_price": 0,
     "pe_price": 0,
     "spread": 0,
-    "pcr": 1.0,
     "signal": "WAITING",
+    "pcr": 1.0,
     "timestamp": ""
 }
 
@@ -56,47 +56,38 @@ SELECTED_PE = None
 
 price_history = deque(maxlen=200)
 
-# ----------------------------
-# CACHE (PCR)
-# ----------------------------
-pcr_cache = {
-    "value": 1.0,
-    "timestamp": 0
-}
+# -----------------------------
+# PCR CACHE
+# -----------------------------
+pcr_cache = {"value": 1.0, "time": 0}
+PCR_TTL = 60
 
-PCR_CACHE_TTL = 60  # seconds
-
-# ----------------------------
-# SAFE PCR (NO SPAM NSE)
-# ----------------------------
-def get_pcr_cached():
+# -----------------------------
+# SAFE PCR (NO NSE SPAM)
+# -----------------------------
+def get_pcr():
     now = time.time()
 
-    if now - pcr_cache["timestamp"] < PCR_CACHE_TTL:
+    if now - pcr_cache["time"] < PCR_TTL:
         return pcr_cache["value"]
 
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=headers, timeout=5)
 
-        res = session.get(url, headers=headers, timeout=5)
+        res = s.get(url, headers=headers, timeout=5)
         data = res.json()
 
-        ce, pe = 0, 0
-
-        for i in data["records"]["data"]:
-            if "CE" in i:
-                ce += i["CE"]["openInterest"]
-            if "PE" in i:
-                pe += i["PE"]["openInterest"]
+        ce = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
+        pe = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
 
         value = ce / pe if pe else 1.0
 
         pcr_cache["value"] = value
-        pcr_cache["timestamp"] = now
+        pcr_cache["time"] = now
 
         return value
 
@@ -104,15 +95,17 @@ def get_pcr_cached():
         logger.error(f"PCR error: {e}")
         return pcr_cache["value"]
 
-
-# ----------------------------
-# SAFE INSTRUMENT LOAD (NO BREAK)
-# ----------------------------
+# -----------------------------
+# LOAD INSTRUMENTS (FIXED)
+# -----------------------------
 def load_instruments():
     try:
-        df = dhan.get_instrument_list()
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        df = pd.read_csv(url, low_memory=False)
 
         df.columns = df.columns.str.upper()
+
+        logger.info(f"Instruments loaded: {len(df)} rows")
 
         return df
 
@@ -120,38 +113,30 @@ def load_instruments():
         logger.error(f"Instrument load failed: {e}")
         return pd.DataFrame()
 
-
-# ----------------------------
-# SMART ATM + IV STYLE SELECTION (SIMPLIFIED)
-# ----------------------------
+# -----------------------------
+# SMART CONTRACT SELECTOR
+# -----------------------------
 def select_contracts(spot):
     global SELECTED_CE, SELECTED_PE
 
     df = load_instruments()
 
     if df.empty:
-        logger.error("Instrument master empty")
         return []
 
     try:
-        # SAFE FILTER
-        df = df[df["SEM_INSTRUMENT_NAME"].astype(str).str.contains("OPTIDX")]
-
-        df = df[df["SEM_TRADING_SYMBOL"].astype(str).str.contains("NIFTY")]
+        df = df[df["SEM_INSTRUMENT_NAME"].astype(str).str.contains("OPTIDX", na=False)]
+        df = df[df["SEM_TRADING_SYMBOL"].astype(str).str.contains("NIFTY", na=False)]
 
         df["STRIKE"] = df["SEM_STRIKE_PRICE"].astype(float)
-
         df["EXPIRY"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce")
 
         df = df.dropna(subset=["EXPIRY"])
 
         expiry = df["EXPIRY"].min()
-
         df = df[df["EXPIRY"] == expiry]
 
-        # SMART ATM (nearest strike)
         strikes = sorted(df["STRIKE"].unique())
-
         atm = min(strikes, key=lambda x: abs(x - spot))
 
         ce = df[(df["SEM_OPTION_TYPE"] == "CE") & (df["STRIKE"] == atm)]
@@ -168,13 +153,12 @@ def select_contracts(spot):
         return [SELECTED_CE, SELECTED_PE]
 
     except Exception as e:
-        logger.error(f"Contract error: {e}")
+        logger.error(f"Contract selection failed: {e}")
         return []
 
-
-# ----------------------------
+# -----------------------------
 # SIGNAL ENGINE
-# ----------------------------
+# -----------------------------
 def update_signal():
     ce = latest_data["ce_price"]
     pe = latest_data["pe_price"]
@@ -187,23 +171,22 @@ def update_signal():
 
     price_history.append(ce)
 
-    pcr = get_pcr_cached()
+    pcr = get_pcr()
     latest_data["pcr"] = pcr
 
     if spread > 5 and pcr < 0.8:
-        signal = "BULLISH"
+        sig = "BULLISH"
     elif spread < -5 and pcr > 1.2:
-        signal = "BEARISH"
+        sig = "BEARISH"
     else:
-        signal = "NEUTRAL"
+        sig = "NEUTRAL"
 
-    latest_data["signal"] = signal
+    latest_data["signal"] = sig
     latest_data["timestamp"] = datetime.now().strftime("%H:%M:%S")
 
-
-# ----------------------------
-# WEBSOCKET (RECONNECT SAFE)
-# ----------------------------
+# -----------------------------
+# WEBSOCKET LOOP (RENDER SAFE)
+# -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -213,7 +196,7 @@ def run_feed():
 
             if not SELECTED_CE or not SELECTED_PE:
                 logger.error("No contracts, retrying...")
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
             feed = marketfeed.DhanFeed(
@@ -226,17 +209,16 @@ def run_feed():
                 on_message=on_message
             )
 
-            logger.info("Feed started")
+            logger.info("WebSocket started")
             feed.run_forever()
 
         except Exception as e:
-            logger.error(f"Feed restart: {e}")
+            logger.error(f"Feed crash: {e}")
             time.sleep(5)
 
-
-# ----------------------------
+# -----------------------------
 # CALLBACK
-# ----------------------------
+# -----------------------------
 def on_message(instance, tick):
     try:
         sid = str(tick.get("security_id"))
@@ -252,10 +234,9 @@ def on_message(instance, tick):
     except Exception as e:
         logger.error(f"Message error: {e}")
 
-
-# ----------------------------
+# -----------------------------
 # ROUTES
-# ----------------------------
+# -----------------------------
 @app.route("/")
 def home():
     return jsonify(latest_data)
@@ -264,10 +245,9 @@ def home():
 def health():
     return "OK", 200
 
-
-# ----------------------------
-# START
-# ----------------------------
+# -----------------------------
+# START BACKGROUND THREAD
+# -----------------------------
 threading.Thread(target=run_feed, daemon=True).start()
 
 application = app
