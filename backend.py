@@ -1,10 +1,15 @@
 import os
 import threading
 import logging
-from datetime import datetime # Added missing import
+from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import DhanHQ, marketfeed 
+
+# This is the modern way to import for version 2.1.0
+from dhanhq import dhanhq as DhanHQ
+from dhanhq import marketfeed
+
+# ... rest of your code ...
 
 # Setup
 logging.basicConfig(level=logging.INFO)
