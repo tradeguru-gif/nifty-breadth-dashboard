@@ -102,23 +102,24 @@ async def run_feed():
         logger.error(f"Error selecting contracts: {e}")
         return
 
-    # Updated for dhanhq v2.0.2 - pass credentials directly to MarketFeed
+    # Use credentials directly for v2.0.2
     feed = MarketFeed(CLIENT_ID, ACCESS_TOKEN, version='v2')
     feed.on_message = on_message
     
     await feed.connect()
     
-    # 1 = NSE_FNO, 15 = Full/Ticker Mode
+    # --- FIX HERE ---
+    # We use '1' for NSE_FNO (Options) and '15' for Ticker Data
     subscription = [
         (1, SELECTED_CE_ID, 15), 
         (1, SELECTED_PE_ID, 15)
     ]
     
     await feed.subscribe_symbols(subscription)
+    logger.info("🚀 Subscription successful!")
     
     while True:
         await asyncio.sleep(1)
-
 def start_engine():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
