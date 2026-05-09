@@ -73,7 +73,7 @@ CORS(app)
 
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-CURRENT_NIFTY = int(os.getenv("CURRENT_NIFTY", "24000"))
+CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
 
 latest_data = {
     "signal": "WAITING",
@@ -98,54 +98,141 @@ SPREAD_THRESHOLD = 5.0
 # ------------------------------------------------------------
 def get_option_contracts(nifty_spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
+
     try:
         import pandas as pd
-        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        logger.info("Fetching instrument master...")
-        df = dhan.fetch_security_list("detailed")
-        fno = df[df["SEGMENT"] == "NSE_FNO"]
-        opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
-        # Use the correct expiry column name
-        expiry_col = "SM_EXPIRY_DATE"
-        if expiry_col not in opts.columns:
-            # Fallback: try to find any column with 'EXPIRY'
-            for col in opts.columns:
-                if 'EXPIRY' in col.upper():
-                    expiry_col = col
-                    break
-            else:
-                raise KeyError(f"No expiry column found. Columns: {opts.columns.tolist()}")
-        logger.info(f"Using expiry column: {expiry_col}")
-        opts["EXPIRY_DT"] = pd.to_datetime(opts[expiry_col], format="%d-%b-%Y", errors="coerce")
-        opts = opts.dropna(subset=["EXPIRY_DT"])
-        opts = opts.sort_values("EXPIRY_DT")
-        nearest_expiry = opts["EXPIRY_DT"].iloc[0]
-        opts_nearest = opts[opts["EXPIRY_DT"] == nearest_expiry]
-        opts_nearest["STRIKE"] = pd.to_numeric(opts_nearest["STRIKE_PRICE"], errors="coerce")
-        opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
-        calls = opts_nearest[opts_nearest["OPTION_TYPE"] == "CE"]
-        puts = opts_nearest[opts_nearest["OPTION_TYPE"] == "PE"]
-        # Find call above spot
-        calls_above = calls[calls["STRIKE"] >= nifty_spot]
-        if not calls_above.empty:
-            call_contract = calls_above.sort_values("STRIKE").iloc[0]
-        else:
-            call_contract = calls.iloc[(calls["STRIKE"] - nifty_spot).abs().argmin()]
-        # Find put below spot
-        puts_below = puts[puts["STRIKE"] <= nifty_spot]
-        if not puts_below.empty:
-            put_contract = puts_below.sort_values("STRIKE", ascending=False).iloc[0]
-        else:
-            put_contract = puts.iloc[(puts["STRIKE"] - nifty_spot).abs().argmin()]
-        SELECTED_CE_ID = str(call_contract["SECURITY_ID"])
-        SELECTED_PE_ID = str(put_contract["SECURITY_ID"])
-        logger.info(f"Selected CE ID: {SELECTED_CE_ID} (Strike: {call_contract['STRIKE']})")
-        logger.info(f"Selected PE ID: {SELECTED_PE_ID} (Strike: {put_contract['STRIKE']})")
-        return [SELECTED_CE_ID, SELECTED_PE_ID]
-    except Exception as e:
-        logger.error(f"Dynamic selection failed: {e}")
-        return []
 
+        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+
+        logger.info("Fetching instrument master...")
+
+        df = dhan.fetch_security_list("compact")
+
+        # ------------------------------------------------
+        # Filter NSE FNO options
+        # ------------------------------------------------
+        fno = df[df["SEGMENT"] == "NSE_FNO"]
+
+        opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
+
+        if opts.empty:
+            logger.error("No OPTIDX instruments found")
+            return []
+
+        # ------------------------------------------------
+        # Detect expiry column
+        # ------------------------------------------------
+        expiry_col = None
+
+        for col in opts.columns:
+            if "EXPIRY" in col.upper():
+                expiry_col = col
+                break
+
+        if not expiry_col:
+            logger.error(f"No expiry column found. Columns: {opts.columns.tolist()}")
+            return []
+
+        logger.info(f"Using expiry column: {expiry_col}")
+
+        # ------------------------------------------------
+        # SAFE expiry conversion
+        # ------------------------------------------------
+        opts["EXPIRY_DT"] = pd.to_datetime(
+            opts[expiry_col],
+            errors="coerce"
+        )
+
+        opts = opts.dropna(subset=["EXPIRY_DT"])
+
+        if opts.empty:
+            logger.error("All expiry dates became invalid after conversion")
+            return []
+
+        # ------------------------------------------------
+        # Sort expiries
+        # ------------------------------------------------
+        opts = opts.sort_values("EXPIRY_DT")
+
+        nearest_expiry = opts["EXPIRY_DT"].min()
+
+        logger.info(f"Nearest expiry: {nearest_expiry}")
+
+        opts_nearest = opts[
+            opts["EXPIRY_DT"] == nearest_expiry
+        ].copy()
+
+        if opts_nearest.empty:
+            logger.error("No options found for nearest expiry")
+            return []
+
+        # ------------------------------------------------
+        # Convert strike prices
+        # ------------------------------------------------
+        opts_nearest["STRIKE"] = pd.to_numeric(
+            opts_nearest["STRIKE_PRICE"],
+            errors="coerce"
+        )
+
+        opts_nearest = opts_nearest.dropna(subset=["STRIKE"])
+
+        if opts_nearest.empty:
+            logger.error("Strike conversion failed")
+            return []
+
+        # ------------------------------------------------
+        # Separate CE and PE
+        # ------------------------------------------------
+        calls = opts_nearest[
+            opts_nearest["OPTION_TYPE"] == "CE"
+        ].copy()
+
+        puts = opts_nearest[
+            opts_nearest["OPTION_TYPE"] == "PE"
+        ].copy()
+
+        if calls.empty:
+            logger.error("No CE contracts found")
+            return []
+
+        if puts.empty:
+            logger.error("No PE contracts found")
+            return []
+
+        # ------------------------------------------------
+        # Find nearest CE strike
+        # ------------------------------------------------
+        calls["DIFF"] = (calls["STRIKE"] - nifty_spot).abs()
+
+        call_contract = calls.sort_values("DIFF").iloc[0]
+
+        # ------------------------------------------------
+        # Find nearest PE strike
+        # ------------------------------------------------
+        puts["DIFF"] = (puts["STRIKE"] - nifty_spot).abs()
+
+        put_contract = puts.sort_values("DIFF").iloc[0]
+
+        # ------------------------------------------------
+        # Security IDs
+        # ------------------------------------------------
+        SELECTED_CE_ID = str(call_contract["SECURITY_ID"])
+
+        SELECTED_PE_ID = str(put_contract["SECURITY_ID"])
+
+        logger.info(
+            f"Selected CE -> {SELECTED_CE_ID} | Strike: {call_contract['STRIKE']}"
+        )
+
+        logger.info(
+            f"Selected PE -> {SELECTED_PE_ID} | Strike: {put_contract['STRIKE']}"
+        )
+
+        return [SELECTED_CE_ID, SELECTED_PE_ID]
+
+    except Exception as e:
+        logger.exception(f"Dynamic selection failed: {e}")
+        return []
 # ------------------------------------------------------------
 # Signal update logic
 # ------------------------------------------------------------
