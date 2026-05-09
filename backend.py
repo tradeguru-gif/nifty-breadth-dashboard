@@ -50,6 +50,20 @@ dhan = DhanHQ(
 
 logger.info("Dhan client initialized successfully")
 
+#-----------------------------------------------------
+INSTRUMENT METER
+#---------------------------------------------------------
+
+import pandas as pd
+
+def load_instruments():
+
+    url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+    df = pd.read_csv(url)
+
+    return df
+
 # ------------------------------------------------------------
 # Global Variables
 # ------------------------------------------------------------
@@ -189,28 +203,92 @@ def get_nifty_pcr():
 # ------------------------------------------------------------
 # Dynamically select nearest NIFTY CE/PE contracts
 # ------------------------------------------------------------
-def get_option_contracts(nifty_spot):
+
+def get_option_contracts(nifty_price):
 
     global SELECTED_CE_ID
     global SELECTED_PE_ID
 
     try:
 
-        logger.info("Using static NIFTY option contracts")
+        logger.info("Loading Dhan instrument master...")
 
-        # ------------------------------------------------
-        # REPLACE THESE WITH REAL LIVE SECURITY IDS
-        # ------------------------------------------------
-        SELECTED_CE_ID = "54321"
+        df = load_instruments()
 
-        SELECTED_PE_ID = "54322"
+        # Only NIFTY option contracts
+        nifty_opts = df[
+            (df["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
+            (df["SM_SYMBOL_NAME"] == "NIFTY")
+        ].copy()
+
+        logger.info(f"NIFTY option rows: {len(nifty_opts)}")
+
+        # Convert strike price
+        nifty_opts["SEM_STRIKE_PRICE"] = (
+            nifty_opts["SEM_STRIKE_PRICE"]
+            .astype(float)
+        )
+
+        # Convert expiry
+        nifty_opts["SEM_EXPIRY_DATE"] = pd.to_datetime(
+            nifty_opts["SEM_EXPIRY_DATE"],
+            errors="coerce"
+        )
+
+        # Get nearest expiry
+        nearest_expiry = nifty_opts[
+            "SEM_EXPIRY_DATE"
+        ].min()
+
+        nifty_opts = nifty_opts[
+            nifty_opts["SEM_EXPIRY_DATE"] == nearest_expiry
+        ]
+
+        logger.info(f"Nearest expiry: {nearest_expiry}")
+
+        # ATM Strike
+        atm = round(nifty_price / 50) * 50
+
+        logger.info(f"ATM Strike: {atm}")
+
+        # CE
+        ce_df = nifty_opts[
+            (nifty_opts["SEM_OPTION_TYPE"] == "CE") &
+            (nifty_opts["SEM_STRIKE_PRICE"] == atm)
+        ]
+
+        # PE
+        pe_df = nifty_opts[
+            (nifty_opts["SEM_OPTION_TYPE"] == "PE") &
+            (nifty_opts["SEM_STRIKE_PRICE"] == atm)
+        ]
+
+        if ce_df.empty:
+            raise Exception("No CE found")
+
+        if pe_df.empty:
+            raise Exception("No PE found")
+
+        ce_row = ce_df.iloc[0]
+        pe_row = pe_df.iloc[0]
+
+        SELECTED_CE_ID = str(
+            ce_row["SEM_SMST_SECURITY_ID"]
+        )
+
+        SELECTED_PE_ID = str(
+            pe_row["SEM_SMST_SECURITY_ID"]
+        )
+
+        logger.info(f"CE ID: {SELECTED_CE_ID}")
+        logger.info(f"PE ID: {SELECTED_PE_ID}")
 
         logger.info(
-            f"Selected CE: {SELECTED_CE_ID}"
+            f"CE SYMBOL: {ce_row['SEM_TRADING_SYMBOL']}"
         )
 
         logger.info(
-            f"Selected PE: {SELECTED_PE_ID}"
+            f"PE SYMBOL: {pe_row['SEM_TRADING_SYMBOL']}"
         )
 
         return [
@@ -220,12 +298,7 @@ def get_option_contracts(nifty_spot):
 
     except Exception as e:
 
-        logger.exception(
-            f"Contract selection failed: {e}"
-        )
-
-        SELECTED_CE_ID = None
-        SELECTED_PE_ID = None
+        logger.exception(f"Contract selection failed: {e}")
 
         return []
 # ------------------------------------------------------------
