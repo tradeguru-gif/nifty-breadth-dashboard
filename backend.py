@@ -107,6 +107,9 @@ async def run_feed():
     
     # 1 = NSE_FNO, 15 = Full/Ticker mode
    # Use '1' for NSE_FNO and '15' for the data mode
+# This is what is causing your crash
+# 1 = NSE_FNO, 15 = Ticker Mode
+# This cannot throw an "AttributeError" because it uses plain numbers
 subscription = [(1, SELECTED_CE_ID, 15), (1, SELECTED_PE_ID, 15)]
     ]
     
