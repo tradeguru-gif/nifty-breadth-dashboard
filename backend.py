@@ -106,9 +106,8 @@ async def run_feed():
     await feed.connect()
     
     # 1 = NSE_FNO, 15 = Full/Ticker mode
-    subscription = [
-        (1, SELECTED_CE_ID, 15), 
-        (1, SELECTED_PE_ID, 15)
+   # Use '1' for NSE_FNO and '15' for the data mode
+subscription = [(1, SELECTED_CE_ID, 15), (1, SELECTED_PE_ID, 15)]
     ]
     
     await feed.subscribe_symbols(subscription)
