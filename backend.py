@@ -106,7 +106,7 @@ def get_option_contracts(nifty_spot):
 
         logger.info("Fetching instrument master...")
 
-        df = dhan.fetch_security_list("compact")
+        df = dhan.fetch_security_list("detailed")
 
         # ------------------------------------------------
         # Filter NSE FNO options
@@ -184,20 +184,18 @@ def get_option_contracts(nifty_spot):
         # Separate CE and PE
         # ------------------------------------------------
         calls = opts_nearest[
-            opts_nearest["OPTION_TYPE"] == "CE"
-        ].copy()
+    opts_nearest["OPTION_TYPE"]
+    .astype(str)
+    .str.upper()
+    .str.contains("C")
+].copy()
 
-        puts = opts_nearest[
-            opts_nearest["OPTION_TYPE"] == "PE"
-        ].copy()
-
-        if calls.empty:
-            logger.error("No CE contracts found")
-            return []
-
-        if puts.empty:
-            logger.error("No PE contracts found")
-            return []
+puts = opts_nearest[
+    opts_nearest["OPTION_TYPE"]
+    .astype(str)
+    .str.upper()
+    .str.contains("P")
+].copy()
 
         # ------------------------------------------------
         # Find nearest CE strike
