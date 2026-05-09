@@ -174,164 +174,178 @@ def get_nifty_pcr():
 # ------------------------------------------------------------
 # Dynamic Option Contract Selection
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Dynamically select nearest NIFTY CE/PE contracts
+# ------------------------------------------------------------
 def get_option_contracts(nifty_price):
-
-    global SELECTED_CE_ID
-    global SELECTED_PE_ID
+    global SELECTED_CE_ID, SELECTED_PE_ID
 
     try:
+        logger.info("Fetching instrument master...")
 
-        logger.info("Downloading Dhan instrument master...")
+        # ------------------------------------------------
+        # Fetch instrument master
+        # ------------------------------------------------
+        df = dhan.get_instrument_list()
 
-        url = (
-            "https://images.dhan.co/api-data/"
-            "api-scrip-master.csv"
-        )
-
-        df = pd.read_csv(url)
-
-        # ----------------------------------------------------
         # Normalize columns
-        # ----------------------------------------------------
-        df.columns = (
-            df.columns
-            .str.strip()
-            .str.upper()
-        )
+        df.columns = df.columns.str.strip().str.upper()
 
         logger.info(f"Columns: {df.columns.tolist()}")
 
-        # ----------------------------------------------------
-        # Filter NSE_FNO
-        # ----------------------------------------------------
-        fno = df[
-            df["SEM_SEGMENT"]
+        # ------------------------------------------------
+        # REQUIRED COLUMNS
+        # ------------------------------------------------
+        security_col = "SEM_SMST_SECURITY_ID"
+        symbol_col = "SEM_TRADING_SYMBOL"
+        strike_col = "SEM_STRIKE_PRICE"
+        option_col = "SEM_OPTION_TYPE"
+        expiry_col = "SEM_EXPIRY_DATE"
+        instrument_col = "SEM_INSTRUMENT_NAME"
+
+        # ------------------------------------------------
+        # FILTER ONLY NIFTY OPTIONS
+        # ------------------------------------------------
+        opts = df[
+            df[instrument_col]
             .astype(str)
-            .str.contains("NSE_FNO", na=False)
+            .str.upper()
+            .str.contains("OPTIDX", na=False)
         ].copy()
 
-        logger.info(f"NSE_FNO rows: {len(fno)}")
+        logger.info(f"OPTION rows: {len(opts)}")
 
-        # ----------------------------------------------------
+        # ------------------------------------------------
+        # FILTER NIFTY ONLY
+        # ------------------------------------------------
+        opts = opts[
+            df[symbol_col]
+            .astype(str)
+            .str.upper()
+            .str.contains("NIFTY", na=False)
+        ].copy()
+
+        logger.info(f"NIFTY option rows: {len(opts)}")
+
+        # ------------------------------------------------
+        # CONVERT STRIKE
+        # ------------------------------------------------
+        opts[strike_col] = (
+            opts[strike_col]
+            .astype(str)
+            .str.replace(",", "")
+            .astype(float)
+        )
+
+        # ------------------------------------------------
+        # CONVERT EXPIRY
+        # ------------------------------------------------
+        opts[expiry_col] = pd.to_datetime(
+            opts[expiry_col],
+            errors="coerce"
+        )
+
+        opts = opts.dropna(subset=[expiry_col])
+
+        if opts.empty:
+            raise Exception("No valid expiry rows")
+
+        # ------------------------------------------------
+        # NEAREST EXPIRY
+        # ------------------------------------------------
+        nearest_expiry = opts[expiry_col].min()
+
+        logger.info(f"Nearest expiry: {nearest_expiry}")
+
+        opts_nearest = opts[
+            opts[expiry_col] == nearest_expiry
+        ].copy()
+
+        logger.info(f"Nearest expiry rows: {len(opts_nearest)}")
+
+        # ------------------------------------------------
         # ATM STRIKE
-        # ----------------------------------------------------
+        # ------------------------------------------------
         atm = round(nifty_price / 50) * 50
 
         logger.info(f"NIFTY PRICE: {nifty_price}")
-
         logger.info(f"ATM STRIKE: {atm}")
 
-        # ----------------------------------------------------
-        # Only NIFTY contracts
-        # ----------------------------------------------------
-        nifty_opts = fno[
-            fno["SEM_TRADING_SYMBOL"]
+        # ------------------------------------------------
+        # CE CONTRACTS
+        # ------------------------------------------------
+        ce_df = opts_nearest[
+            opts_nearest[option_col]
             .astype(str)
-            .str.contains("NIFTY", case=False, na=False)
+            .str.upper()
+            .str.contains("CE", na=False)
         ].copy()
 
-        logger.info(
-            f"NIFTY option rows: {len(nifty_opts)}"
-        )
-
-        # ----------------------------------------------------
-        # CE contracts
-        # ----------------------------------------------------
-        ce_df = nifty_opts[
-            nifty_opts["SEM_TRADING_SYMBOL"]
+        # ------------------------------------------------
+        # PE CONTRACTS
+        # ------------------------------------------------
+        pe_df = opts_nearest[
+            opts_nearest[option_col]
             .astype(str)
-            .str.contains(f"{atm}", na=False)
-            &
-            nifty_opts["SEM_TRADING_SYMBOL"]
-            .astype(str)
-            .str.endswith("CE", na=False)
-        ].copy()
-
-        # ----------------------------------------------------
-        # PE contracts
-        # ----------------------------------------------------
-        pe_df = nifty_opts[
-            nifty_opts["SEM_TRADING_SYMBOL"]
-            .astype(str)
-            .str.contains(f"{atm}", na=False)
-            &
-            nifty_opts["SEM_TRADING_SYMBOL"]
-            .astype(str)
-            .str.endswith("PE", na=False)
+            .str.upper()
+            .str.contains("PE", na=False)
         ].copy()
 
         logger.info(f"CE contracts found: {len(ce_df)}")
-
         logger.info(f"PE contracts found: {len(pe_df)}")
 
-        # ----------------------------------------------------
-        # Validate
-        # ----------------------------------------------------
         if ce_df.empty:
             raise Exception("No CE contract found")
 
         if pe_df.empty:
             raise Exception("No PE contract found")
 
-        # ----------------------------------------------------
-        # Sort by expiry
-        # ----------------------------------------------------
-        if "SEM_EXPIRY_DATE" in ce_df.columns:
+        # ------------------------------------------------
+        # FIND NEAREST CE STRIKE
+        # ------------------------------------------------
+        ce_df["DIFF"] = (
+            ce_df[strike_col] - atm
+        ).abs()
 
-            ce_df = ce_df.sort_values(
-                "SEM_EXPIRY_DATE"
-            )
+        ce_row = ce_df.sort_values("DIFF").iloc[0]
 
-            pe_df = pe_df.sort_values(
-                "SEM_EXPIRY_DATE"
-            )
+        # ------------------------------------------------
+        # FIND NEAREST PE STRIKE
+        # ------------------------------------------------
+        pe_df["DIFF"] = (
+            pe_df[strike_col] - atm
+        ).abs()
 
-        # ----------------------------------------------------
-        # Select nearest expiry
-        # ----------------------------------------------------
-        ce_row = ce_df.iloc[0]
+        pe_row = pe_df.sort_values("DIFF").iloc[0]
 
-        pe_row = pe_df.iloc[0]
+        # ------------------------------------------------
+        # SAVE IDS
+        # ------------------------------------------------
+        SELECTED_CE_ID = str(ce_row[security_col])
 
-        # ----------------------------------------------------
-        # Security IDs
-        # ----------------------------------------------------
-        SELECTED_CE_ID = str(
-            ce_row["SEM_SMST_SECURITY_ID"]
-        )
+        SELECTED_PE_ID = str(pe_row[security_col])
 
-        SELECTED_PE_ID = str(
-            pe_row["SEM_SMST_SECURITY_ID"]
+        logger.info(
+            f"Selected CE: {SELECTED_CE_ID} | "
+            f"{ce_row[symbol_col]}"
         )
 
         logger.info(
-            f"SELECTED CE: "
-            f"{ce_row['SEM_TRADING_SYMBOL']}"
+            f"Selected PE: {SELECTED_PE_ID} | "
+            f"{pe_row[symbol_col]}"
         )
 
-        logger.info(
-            f"SELECTED PE: "
-            f"{pe_row['SEM_TRADING_SYMBOL']}"
-        )
-
-        logger.info(
-            f"CE ID: {SELECTED_CE_ID}"
-        )
-
-        logger.info(
-            f"PE ID: {SELECTED_PE_ID}"
-        )
+        return [SELECTED_CE_ID, SELECTED_PE_ID]
 
     except Exception as e:
-
         logger.exception(
             f"Dynamic contract selection failed: {e}"
         )
 
         SELECTED_CE_ID = None
-
         SELECTED_PE_ID = None
 
+        return []
 # ------------------------------------------------------------
 # Signal Logic
 # ------------------------------------------------------------
