@@ -49,6 +49,31 @@ dhan = DhanHQ(
 )
 
 logger.info("Dhan client initialized successfully")
+#--------------------------------------------
+#SHARES FYNCTION
+#------------------------------------------
+def get_instrument_master():
+    url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+    df = get_instrument_master()(url, low_memory=False)
+
+    df.columns = df.columns.str.strip()
+
+    df["SEM_INSTRUMENT_NAME"] = (
+        df["SEM_INSTRUMENT_NAME"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    df["SM_SYMBOL_NAME"] = (
+        df["SM_SYMBOL_NAME"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    return df
 
 #-----------------------------------------------------
 # INSTRUMENT METER
@@ -60,7 +85,7 @@ def load_instruments():
 
     url = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-    df = pd.read_csv(url)
+    df = get_instrument_master()
 
     return df
 
@@ -215,8 +240,7 @@ def get_option_contracts(nifty_price):
 
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-        df = pd.read_csv(
-    url,
+        df = get_instrument_master()
     low_memory=False
 )
 
