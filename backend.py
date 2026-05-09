@@ -189,9 +189,12 @@ def get_nifty_pcr():
 # Dynamically select nearest NIFTY CE/PE contracts
 # ------------------------------------------------------------
 def get_option_contracts(nifty_price):
-    global SELECTED_CE_ID, SELECTED_PE_ID
+
+    global SELECTED_CE_ID
+    global SELECTED_PE_ID
 
     try:
+
         logger.info("Fetching instrument master...")
 
         # ------------------------------------------------
@@ -215,26 +218,27 @@ def get_option_contracts(nifty_price):
         instrument_col = "SEM_INSTRUMENT_NAME"
 
         # ------------------------------------------------
-        # FILTER ONLY NIFTY OPTIONS
+        # FILTER ONLY OPTIONS
         # ------------------------------------------------
-opts = opts[
-    opts[symbol_col]
-    .astype(str)
-    .str.upper()
-    .str.contains("NIFTY", na=False)
-].copy()
+        opts = df[
+            df[instrument_col]
+            .astype(str)
+            .str.upper()
+            .str.contains("OPTIDX", na=False)
+        ].copy()
 
-logger.info(f"NIFTY option rows: {len(opts)}")       
+        logger.info(f"OPTION rows: {len(opts)}")
 
         # ------------------------------------------------
         # FILTER NIFTY ONLY
         # ------------------------------------------------
-       opts = opts[
-    opts[symbol_col]
-    .astype(str)
-    .str.upper()
-    .str.contains("NIFTY", na=False)
-].copy()
+        opts = opts[
+            opts[symbol_col]
+            .astype(str)
+            .str.upper()
+            .str.contains("NIFTY", na=False)
+        ].copy()
+
         logger.info(f"NIFTY option rows: {len(opts)}")
 
         # ------------------------------------------------
@@ -311,7 +315,7 @@ logger.info(f"NIFTY option rows: {len(opts)}")
             raise Exception("No PE contract found")
 
         # ------------------------------------------------
-        # FIND NEAREST CE STRIKE
+        # FIND NEAREST CE
         # ------------------------------------------------
         ce_df["DIFF"] = (
             ce_df[strike_col] - atm
@@ -320,7 +324,7 @@ logger.info(f"NIFTY option rows: {len(opts)}")
         ce_row = ce_df.sort_values("DIFF").iloc[0]
 
         # ------------------------------------------------
-        # FIND NEAREST PE STRIKE
+        # FIND NEAREST PE
         # ------------------------------------------------
         pe_df["DIFF"] = (
             pe_df[strike_col] - atm
@@ -336,18 +340,20 @@ logger.info(f"NIFTY option rows: {len(opts)}")
         SELECTED_PE_ID = str(pe_row[security_col])
 
         logger.info(
-            f"Selected CE: {SELECTED_CE_ID} | "
-            f"{ce_row[symbol_col]}"
+            f"Selected CE: {SELECTED_CE_ID}"
         )
 
         logger.info(
-            f"Selected PE: {SELECTED_PE_ID} | "
-            f"{pe_row[symbol_col]}"
+            f"Selected PE: {SELECTED_PE_ID}"
         )
 
-        return [SELECTED_CE_ID, SELECTED_PE_ID]
+        return [
+            SELECTED_CE_ID,
+            SELECTED_PE_ID
+        ]
 
     except Exception as e:
+
         logger.exception(
             f"Dynamic contract selection failed: {e}"
         )
