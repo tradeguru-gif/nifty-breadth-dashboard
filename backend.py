@@ -31,30 +31,19 @@ CORS(app)
 # ------------------------------------------------------------
 # Environment Variables
 # ------------------------------------------------------------
+
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-CURRENT_NIFTY = float(
-    os.getenv("CURRENT_NIFTY", "24000")
-)
+CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
+
 # ------------------------------------------------------------
 # Initialize Dhan Client
 # ------------------------------------------------------------
 dhan = dhanhq(
     CLIENT_ID,
     ACCESS_TOKEN
-)
-
-# ------------------------------------------------------------
-# Initialize Dhan Client
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# Initialize Dhan Client
-# ------------------------------------------------------------
-dhan = dhanhq(
-    client_id=CLIENT_ID,
-    access_token=ACCESS_TOKEN
 )
 
 logger.info("Dhan client initialized successfully")
