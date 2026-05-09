@@ -1,8 +1,8 @@
-Flask==2.3.3
+flask==2.3.3
 flask-cors==4.0.1
 pandas==2.2.2
 numpy==1.26.4
-dhanhq==2.1.0
+dhanhq==2.0.2
 gunicorn==23.0.0
 requests==2.32.3
 websockets==13.0.1
