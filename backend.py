@@ -13,7 +13,8 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from collections import deque
 
-from dhanhq import dhanhq
+import dhanhq
+from dhanhq import DhanContext
 from dhanhq.marketfeed import MarketFeed
 # -----------------------------
 # LOGGING
@@ -785,19 +786,23 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-            # CREATE FEED
-            feed = MarketFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments,
-                "v2"
-            )
+            # CREATE DHAN CONTEXT
+dhan_context = DhanContext(
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN
+)
 
-            logger.info("Connecting to Dhan websocket...")
+# CREATE FEED
+feed = MarketFeed(
+    dhan_context,
+    instruments
+)
 
-            feed.run_forever()
+logger.info("Connecting to Dhan websocket...")
 
-            logger.info("Websocket connected")
+feed.run_forever()
+
+logger.info("Websocket connected")
 
             while True:
 
