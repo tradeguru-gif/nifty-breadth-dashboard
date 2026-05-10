@@ -143,6 +143,9 @@ def load_instruments():
 # -----------------------------
 # SMART CONTRACT SELECTOR
 # -----------------------------
+# -----------------------------
+# SMART CONTRACT SELECTOR
+# -----------------------------
 def select_contracts(spot):
     global SELECTED_CE, SELECTED_PE
 
@@ -166,14 +169,21 @@ def select_contracts(spot):
         strikes = sorted(df["STRIKE"].unique())
         atm = min(strikes, key=lambda x: abs(x - spot))
 
-        ce = df[(df["SEM_OPTION_TYPE"] == "CE") & (df["STRIKE"] == atm)]
-        pe = df[(df["SEM_OPTION_TYPE"] == "PE") & (df["STRIKE"] == atm)]
+        ce = df[
+            (df["SEM_OPTION_TYPE"] == "CE") &
+            (df["STRIKE"] == atm)
+        ]
 
-               if ce.empty or pe.empty:
+        pe = df[
+            (df["SEM_OPTION_TYPE"] == "PE") &
+            (df["STRIKE"] == atm)
+        ]
+
+        if ce.empty or pe.empty:
             raise Exception("No ATM contracts found")
 
-        SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-        SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_CE = int(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_PE = int(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
 
         logger.info(f"CE={SELECTED_CE} PE={SELECTED_PE}")
 
