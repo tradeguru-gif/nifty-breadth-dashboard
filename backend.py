@@ -718,6 +718,9 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP
 # -----------------------------
+# -----------------------------
+# WEBSOCKET LOOP
+# -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -740,14 +743,17 @@ def run_feed():
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
-    CLIENT_ID,
-    ACCESS_TOKEN,
-    instruments
-)
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments
+            )
 
-feed.on_message = on_message
+            # CALLBACK BIND
+            feed.on_message = on_message
 
-feed.run_forever()
+            logger.info("Connecting websocket...")
+
+            feed.run_forever()
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
