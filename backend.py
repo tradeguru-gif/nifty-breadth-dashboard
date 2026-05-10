@@ -218,7 +218,8 @@ def update_signal():
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
-    asyncio.set_event_loop(asyncio.new_event_loop())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     while True:
         try:
@@ -226,7 +227,7 @@ def run_feed():
             select_contracts(spot)
 
             if not SELECTED_CE or not SELECTED_PE:
-                logger.error("No contracts, retrying...")
+                logger.error("No contracts selected")
                 time.sleep(5)
                 continue
 
@@ -241,12 +242,12 @@ def run_feed():
                 instruments
             )
 
-            feed.connect()
+            loop.run_until_complete(feed.connect())
 
             logger.info("WebSocket connected")
 
             while True:
-                data = feed.get_data()
+                data = loop.run_until_complete(feed.get_data())
 
                 if data:
                     on_message(None, data)
