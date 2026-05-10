@@ -6,6 +6,8 @@ import threading
 import logging
 import pandas as pd
 import requests
+import websocket
+websocket.enableTrace(False)
 
 from datetime import datetime
 from flask import Flask, jsonify
@@ -32,8 +34,7 @@ CORS(app)
 # -----------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
-
+DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
 # -----------------------------
 # DHAN INIT
 # -----------------------------
@@ -84,7 +85,7 @@ def get_pcr():
         ce = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
         pe = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
 
-        value = ce / pe if pe else 1.0
+        value = pe / ce if ce else 1.0
 
         pcr_cache["value"] = value
         pcr_cache["time"] = now
@@ -94,6 +95,29 @@ def get_pcr():
     except Exception as e:
         logger.error(f"PCR error: {e}")
         return pcr_cache["value"]
+
+# -----------------------------
+# LIVE NIFTY SPOT
+# -----------------------------
+def get_nifty_spot():
+    try:
+        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=headers, timeout=5)
+
+        res = s.get(url, headers=headers, timeout=5)
+        data = res.json()
+
+        return float(data["data"][0]["lastPrice"])
+
+    except Exception as e:
+        logger.error(f"NIFTY spot error: {e}")
+        return DEFAULT_NIFTY_SPOT
 
 # -----------------------------
 # LOAD INSTRUMENTS (FIXED)
@@ -192,25 +216,35 @@ def run_feed():
 
     while True:
         try:
-            select_contracts(NIFTY_SPOT)
+            spot = get_nifty_spot()
+select_contracts(spot)
 
             if not SELECTED_CE or not SELECTED_PE:
                 logger.error("No contracts, retrying...")
                 time.sleep(5)
                 continue
 
-            feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=[
-                    (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
-                ],
-                on_message=on_message
-            )
+            instruments = [
+                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
+                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
+            ]
 
-            logger.info("WebSocket started")
-            feed.run_forever()
+
+            feed = marketfeed.DhanFeed(
+    CLIENT_ID,
+    ACCESS_TOKEN,
+    instruments
+)
+
+feed.connect()
+
+logger.info("WebSocket connected")
+
+while True:
+    data = feed.get_data()
+
+                if data:
+                    on_message(None, data)
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
@@ -248,7 +282,8 @@ def health():
 # -----------------------------
 # START BACKGROUND THREAD
 # -----------------------------
-threading.Thread(target=run_feed, daemon=True).start()
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+    threading.Thread(target=run_feed, daemon=True).start()
 
 application = app
 
