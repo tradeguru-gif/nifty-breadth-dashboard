@@ -770,11 +770,12 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-            feed = MarketFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments
-            )
+           dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
+
+feed = MarketFeed(
+    dhan,
+    instruments
+)
 
             logger.info("Connecting to Dhan websocket...")
 
