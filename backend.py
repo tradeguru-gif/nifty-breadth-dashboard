@@ -170,8 +170,8 @@ def select_contracts(spot):
         if ce.empty or pe.empty:
             raise Exception("No ATM contracts found")
 
-        SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-        SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_CE = int(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_PE = int(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
 
         logger.info(f"CE={SELECTED_CE} PE={SELECTED_PE}")
 
@@ -236,11 +236,11 @@ def run_feed():
                 (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
             ]
 
-            feed = marketfeed.DhanFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments
-            )
+           feed = marketfeed.DhanFeed(
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN,
+    instruments=instruments
+)
 
             loop.run_until_complete(feed.connect())
 
