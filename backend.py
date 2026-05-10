@@ -1,7 +1,5 @@
 # backend.py - Production Stable NIFTY Options Engine (FIXED)
 
-import dhanhq
-from dhanhq.marketfeed import MarketFeed
 import os
 import time
 import threading
@@ -9,13 +7,14 @@ import logging
 import pandas as pd
 import requests
 import websocket
-websocket.enableTrace(False)
 
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 from collections import deque
 
+from dhanhq import dhanhq
+from dhanhq.marketfeed import MarketFeed
 # -----------------------------
 # LOGGING
 # -----------------------------
@@ -783,16 +782,17 @@ def run_feed():
             logger.info(f"Instruments={instruments}")
 
             # CREATE DHAN CLIENT
-         dhan = dhanhq.dhanhq(
-              CLIENT_ID,
-              ACCESS_TOKEN
-         )
+        # CREATE DHAN CLIENT
+dhan = dhanhq(
+    CLIENT_ID,
+    ACCESS_TOKEN
+)
 
-            # CREATE MARKET FEED
-            feed = MarketFeed(
-                dhan,
-                instruments
-            )
+# CREATE MARKET FEED
+feed = MarketFeed(
+    dhan,
+    instruments
+)
 
             logger.info("Connecting to Dhan websocket...")
 
