@@ -760,8 +760,8 @@ async def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.FULL),
-                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.FULL)
+                ("NSE_FNO", str(SELECTED_CE), marketfeed.FULL)
+                ("NSE_FNO", str(SELECTED_PE), marketfeed.FULL)
             ]
 
             logger.info(f"Instruments={instruments}")
