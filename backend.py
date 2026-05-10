@@ -703,16 +703,9 @@ def institutional_analysis():
     except Exception as e:
         logger.error(f"Institutional engine error: {e}")
 
-
 # -----------------------------
-# WEBSOCKET LOOP (RENDER SAFE)
+# WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
-# -----------------------------
-# WEBSOCKET LOOP (RENDER SAFE)
-# -----------------------------
-logger.info(f"Using CLIENT_ID={CLIENT_ID}")
-logger.info(f"Token exists={bool(ACCESS_TOKEN)}")
-
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -722,6 +715,7 @@ def run_feed():
     while True:
         try:
             spot = get_nifty_spot()
+
             select_contracts(spot)
 
             if not SELECTED_CE or not SELECTED_PE:
@@ -730,16 +724,18 @@ def run_feed():
                 continue
 
             instruments = [
-    (marketfeed.NSE_FNO, SELECTED_CE, 15),
-    (marketfeed.NSE_FNO, SELECTED_PE, 15)
-]
+                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
+                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
+            ]
+
+            logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=instruments
             )
-            logger.info(f"Instruments={instruments}")
+
             loop.run_until_complete(feed.connect())
 
             logger.info("WebSocket connected")
@@ -747,12 +743,12 @@ def run_feed():
             while True:
                 data = loop.run_until_complete(feed.get_data())
 
-               if data:
-    on_message(None, data)
+                if data:
+                    on_message(None, data)
 
-    advanced_market_analysis()
+                    advanced_market_analysis()
 
-    institutional_analysis()
+                    institutional_analysis()
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
