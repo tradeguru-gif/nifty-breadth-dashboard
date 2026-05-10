@@ -15,7 +15,7 @@ from flask_cors import CORS
 from collections import deque
 
 from dhanhq import dhanhq as DhanHQ
-from dhanhq import marketfeed
+from dhanhq.marketfeed import MarketFeed
 
 # -----------------------------
 # LOGGING
@@ -145,7 +145,7 @@ def load_instruments():
 # SMART CONTRACT SELECTOR
 # -----------------------------
 # -----------------------------
-# SMART CONTRACT SELECTOR
+# SMART CONTRACT RUN FEED
 # -----------------------------
 def select_contracts(spot):
     global SELECTED_CE, SELECTED_PE
@@ -742,7 +742,11 @@ def on_close(instance):
 def on_error(instance, error):
     logger.error(f"WebSocket error: {error}")
 
-async def run_feed():
+
+# -----------------------------
+# RUN FEED FINAL
+# -----------------------------
+def run_feed():
 
     global SELECTED_CE, SELECTED_PE
 
@@ -756,46 +760,36 @@ async def run_feed():
 
             if not SELECTED_CE or not SELECTED_PE:
                 logger.error("No contracts selected")
-                await asyncio.sleep(5)
+                time.sleep(5)
                 continue
 
             instruments = [
-           (2, str(SELECTED_CE), 15),
-           (2, str(SELECTED_PE), 15)
-          ]
+                (2, str(SELECTED_CE), 15),
+                (2, str(SELECTED_PE), 15)
+            ]
 
             logger.info(f"Instruments={instruments}")
 
-            feed = marketfeed.DhanFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments,
-                version="v2"
-            )
+            feed = MarketFeed(
+    CLIENT_ID,
+    ACCESS_TOKEN,
+    instruments
+)
 
-            # CALLBACKS
-            feed.on_connect = on_connect
-            feed.on_message = on_message
-            feed.on_close = on_close
-            feed.on_error = on_error
+logger.info("Connecting to Dhan websocket...")
 
-            logger.info("Connecting to Dhan websocket...")
+feed.run_forever()
 
-            await feed.connect()
+while True:
 
-            logger.info("Connected successfully")
+    data = feed.get_data()
 
-            logger.info("Subscribed successfully")
-
-            while True:
-                await asyncio.sleep(1)
+    if data:
+        on_message(None, data)
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
-            await asyncio.sleep(5)
-# -----------------------------
-# CALLBACK
-# -----------------------------
+            time.sleep(5)
 # -----------------------------
 # MESSAGE CALLBACK
 # -----------------------------
