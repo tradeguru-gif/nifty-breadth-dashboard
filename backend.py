@@ -24,6 +24,11 @@ from dhanhq import marketfeed
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend")
 
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+
+logger.info(f"CLIENT_ID={CLIENT_ID}")
+logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
 # -----------------------------
 # FLASK
 # -----------------------------
