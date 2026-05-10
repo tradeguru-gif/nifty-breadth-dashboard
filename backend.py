@@ -324,49 +324,51 @@ def update_all_analysis():
 # -----------------------------
 # 7. WEBSOCKET FEED HANDLER
 # -----------------------------
-def on_message(_, tick):
-    """Callback that receives ticks from the WebSocket."""
-    try:
-        sid = tick.get('security_id')
-        ltp = tick.get('ltp', 0)
-        if sid == SELECTED_CE:
-            latest_data["ce_price"] = float(ltp)
-        elif sid == SELECTED_PE:
-            latest_data["pe_price"] = float(ltp)
-        update_all_analysis()
-    except Exception as e:
-        logger.error(f"Message handler error: {e}")
-
 def run_feed():
-    """Main feed loop with auto-reconnect and dynamic contract selection."""
     global SELECTED_CE, SELECTED_PE
-    while True:
-        try:
-            # Get current NIFTY spot and select ATM contracts
-            spot = get_nifty_spot()
-            if not select_contracts(spot):
-                logger.error("Contract selection failed, retrying...")
-                time.sleep(30)
-                continue
 
-            logger.info(f"Subscribing to CE={SELECTED_CE} PE={SELECTED_PE}")
-            feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=[
-                    (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
-                ],
-                on_message=on_message,
-                on_connect=lambda _: logger.info("✅ WebSocket connected"),
-                on_error=lambda _, err: logger.error(f"WebSocket error: {err}"),
-                on_close=lambda _: logger.warning("WebSocket closed, reconnecting...")
-            )
-            # This blocks until the feed disconnects
-            feed.run_forever()
-        except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in 10 seconds")
-            time.sleep(10)
+    # Get the current ATM option security IDs (you already have a function for this)
+    if not SELECTED_CE or not SELECTED_PE:
+        spot = get_nifty_spot()
+        if not select_contracts(spot):
+            print("❌ Could not select contracts. Retrying later.")
+            return
+
+    instruments = [
+        (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
+        (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
+    ]
+    print(f"🔧 Subscribing to {instruments}")
+
+    feed = marketfeed.DhanFeed(
+        client_id=CLIENT_ID,
+        access_token=ACCESS_TOKEN,
+        instruments=instruments,
+        version="v2"
+    )
+
+    def on_connect(instance):
+        print("✅ WebSocket connected and authorized.")
+
+    def on_error(instance, error):
+        print(f"❌ WebSocket error: {error}")
+
+    def on_close(instance):
+        print("🔌 WebSocket closed – will restart thread.")
+
+    def on_message(instance, tick):
+        # Process the tick (store price, update signals, etc.)
+        print(f"📦 Received: {tick}")
+
+    feed.on_connect = on_connect
+    feed.on_error = on_error
+    feed.on_close = on_close
+    feed.on_message = on_message
+
+    try:
+        feed.run_forever()   # Blocks – runs the WebSocket
+    except Exception as e:
+        print(f"❌ Feed crashed: {e}")
 
 # -----------------------------
 # 8. FLASK ENDPOINTS
