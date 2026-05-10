@@ -4,7 +4,6 @@ import os
 import time
 import threading
 import logging
-import asyncio
 import pandas as pd
 import requests
 import websocket
@@ -173,8 +172,8 @@ def select_contracts(spot):
         if ce.empty or pe.empty:
             raise Exception("No ATM contracts found")
 
-        SELECTED_CE = int(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-        SELECTED_PE = int(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+       SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
+       SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
 
         logger.info(f"CE={SELECTED_CE} PE={SELECTED_PE}")
 
@@ -709,9 +708,6 @@ def institutional_analysis():
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     while True:
         try:
             spot = get_nifty_spot()
@@ -724,24 +720,22 @@ def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
-                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
+                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
+                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
             ]
 
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=instruments
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments
             )
 
-            loop.run_until_complete(feed.connect())
-
-            logger.info("WebSocket connected")
+            logger.info("WebSocket started")
 
             while True:
-                data = loop.run_until_complete(feed.get_data())
+                data = feed.get_data()
 
                 if data:
                     on_message(None, data)
