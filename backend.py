@@ -215,6 +215,9 @@ def update_signal():
 # -----------------------------
 # WEBSOCKET LOOP (RENDER SAFE)
 # -----------------------------
+logger.info(f"Using CLIENT_ID={CLIENT_ID}")
+logger.info(f"Token exists={bool(ACCESS_TOKEN)}")
+
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -254,7 +257,9 @@ def run_feed():
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
-            time.sleep(5)# -----------------------------
+            time.sleep(5)
+
+# -----------------------------
 # CALLBACK
 # -----------------------------
 def on_message(instance, tick):
