@@ -782,11 +782,12 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-           feed = MarketFeed(
-    CLIENT_ID,
-    ACCESS_TOKEN,
-    instruments
-)
+            feed = MarketFeed(
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments
+            )
+
             logger.info("Connecting to Dhan websocket...")
 
             feed.run_forever()
@@ -807,7 +808,6 @@ def run_feed():
             logger.error(f"Feed crash: {e}")
 
             time.sleep(5)
-
 # -----------------------------
 # MESSAGE CALLBACK
 # -----------------------------
