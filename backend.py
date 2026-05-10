@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import logging
+import asyncio
 import pandas as pd
 import requests
 import websocket
@@ -216,6 +217,8 @@ def update_signal():
 # -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
     while True:
         try:
