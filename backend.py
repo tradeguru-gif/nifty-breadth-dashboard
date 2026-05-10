@@ -36,6 +36,8 @@ CORS(app)
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
+logger.info(f"CLIENT_ID={CLIENT_ID}")
+logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
 # -----------------------------
 # DHAN INIT
 # -----------------------------
