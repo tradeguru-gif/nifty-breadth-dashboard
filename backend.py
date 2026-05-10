@@ -103,24 +103,49 @@ def get_pcr():
 # -----------------------------
 # LIVE NIFTY SPOT
 # -----------------------------
-def get_nifty_spot():
+
+   def get_nifty_spot():
+
     try:
+
         url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
 
         headers = {
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.nseindia.com/"
         }
 
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=5)
+        session = requests.Session()
 
-        res = s.get(url, headers=headers, timeout=5)
+        session.get(
+            "https://www.nseindia.com",
+            headers=headers,
+            timeout=10
+        )
+
+        res = session.get(
+            url,
+            headers=headers,
+            timeout=10
+        )
+
+        if res.status_code != 200:
+            logger.error(f"NSE status={res.status_code}")
+            return DEFAULT_NIFTY_SPOT
+
+        if not res.text.strip():
+            logger.error("NSE empty response")
+            return DEFAULT_NIFTY_SPOT
+
         data = res.json()
 
         return float(data["data"][0]["lastPrice"])
 
     except Exception as e:
+
         logger.error(f"NIFTY spot error: {e}")
+
         return DEFAULT_NIFTY_SPOT
 
 # -----------------------------
@@ -716,6 +741,7 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
+
 def on_connect(instance):
     logger.info("WebSocket connected")
 
@@ -727,11 +753,6 @@ def on_error(instance, error):
 # -----------------------------
 # WEBSOCKET LOOP
 # -----------------------------
-
-# -----------------------------
-# WEBSOCKET LOOP
-# -----------------------------
-import asyncio
 
 def on_connect(instance):
     logger.info("WebSocket connected")
@@ -746,11 +767,17 @@ def on_error(instance, error):
 # -----------------------------
 # RUN FEED FINAL
 # -----------------------------
+# -----------------------------
+# RUN FEED FINAL
+# -----------------------------
 def run_feed():
+
     global SELECTED_CE, SELECTED_PE
 
     while True:
+
         try:
+
             spot = get_nifty_spot()
 
             select_contracts(spot)
@@ -767,11 +794,13 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-     dhan = dhanhq.dhanhq(
-    CLIENT_ID,
-    ACCESS_TOKEN
-)
+            # CREATE DHAN OBJECT
+             dhan = dhanhq.dhanhq(CLIENT_ID)
 
+            # SET ACCESS TOKEN
+            dhan.set_access_token(ACCESS_TOKEN)
+
+            # CREATE MARKET FEED
             feed = MarketFeed(
                 dhan,
                 instruments
@@ -781,14 +810,21 @@ def run_feed():
 
             feed.run_forever()
 
+            logger.info("Websocket connected")
+
             while True:
+
                 data = feed.get_data()
 
                 if data:
                     on_message(None, data)
 
+                time.sleep(0.1)
+
         except Exception as e:
+
             logger.error(f"Feed crash: {e}")
+
             time.sleep(5)
 # -----------------------------
 # MESSAGE CALLBACK
@@ -834,7 +870,7 @@ def health():
 # -----------------------------
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
     threading.Thread(
-    target=lambda: asyncio.run(run_feed()),
+    target=run_feed,
     daemon=True
 ).start()
 
