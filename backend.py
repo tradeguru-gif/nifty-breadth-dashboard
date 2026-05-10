@@ -757,6 +757,10 @@ def on_error(instance, error):
 # -----------------------------
 # RUN FEED FINAL
 # -----------------------------
+
+# -----------------------------
+# RUN FEED FINAL
+# -----------------------------
 def run_feed():
 
     global SELECTED_CE, SELECTED_PE
@@ -781,18 +785,13 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-        
-        # CREATE DHAN CLIENT
-dhan = dhanhq(
-    CLIENT_ID,
-    ACCESS_TOKEN
-)
-
-# CREATE MARKET FEED
-feed = MarketFeed(
-    dhan,
-    instruments
-)
+            # CREATE FEED
+            feed = MarketFeed(
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments,
+                version="v2"
+            )
 
             logger.info("Connecting to Dhan websocket...")
 
@@ -814,6 +813,7 @@ feed = MarketFeed(
             logger.error(f"Feed crash: {e}")
 
             time.sleep(5)
+
 # -----------------------------
 # MESSAGE CALLBACK
 # -----------------------------
