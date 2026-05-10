@@ -745,10 +745,9 @@ def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
-                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
-            ]
-
+             (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
+             (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
+           ]
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
@@ -782,13 +781,13 @@ def on_message(instance, message):
     try:
         logger.info(f"TICK={message}")
 
-        sid = str(message.get("security_id"))
+        sid = int(message.get("security_id"))
         price = float(message.get("LTP", 0))
 
         if sid == str(SELECTED_CE):
             latest_data["ce_price"] = price
 
-        elif sid == str(SELECTED_PE):
+            elif sid == SELECTED_PE:
             latest_data["pe_price"] = price
 
         update_signal()
