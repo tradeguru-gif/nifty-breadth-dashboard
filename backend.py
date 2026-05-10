@@ -211,6 +211,9 @@ def update_signal():
 # -----------------------------
 # WEBSOCKET LOOP (RENDER SAFE)
 # -----------------------------
+# -----------------------------
+# WEBSOCKET LOOP (RENDER SAFE)
+# -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -248,7 +251,6 @@ def run_feed():
         except Exception as e:
             logger.error(f"Feed crash: {e}")
             time.sleep(5)
-
 # -----------------------------
 # CALLBACK
 # -----------------------------
