@@ -43,6 +43,7 @@ DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
 
 logger.info(f"CLIENT_ID={CLIENT_ID}")
 logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
+
 # -----------------------------
 # STATE
 # -----------------------------
