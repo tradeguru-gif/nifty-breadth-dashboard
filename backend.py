@@ -727,7 +727,20 @@ def on_error(instance, error):
 # -----------------------------
 # WEBSOCKET LOOP
 # -----------------------------
+
+# -----------------------------
+# WEBSOCKET LOOP
+# -----------------------------
 import asyncio
+
+def on_connect(instance):
+    logger.info("WebSocket connected")
+
+def on_close(instance):
+    logger.info("WebSocket closed")
+
+def on_error(instance, error):
+    logger.error(f"WebSocket error: {error}")
 
 async def run_feed():
 
@@ -757,7 +770,7 @@ async def run_feed():
                 CLIENT_ID,
                 ACCESS_TOKEN,
                 instruments,
-                "v2"
+                version="v2"
             )
 
             # CALLBACKS
@@ -772,11 +785,7 @@ async def run_feed():
 
             logger.info("Connected successfully")
 
-            await feed.subscribe_symbols(instruments)
-
-            await feed.subscribe_instruments()
-
-            logger.info("Subscriptions completed")
+            logger.info("Subscribed successfully")
 
             while True:
                 await asyncio.sleep(1)
