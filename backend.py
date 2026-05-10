@@ -4,7 +4,6 @@ import os
 import time
 import threading
 import logging
-import asyncio
 import pandas as pd
 import requests
 import websocket
@@ -717,17 +716,10 @@ def institutional_analysis():
 # WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
 # -----------------------------
-# WEBSOCKET LOOP (RUN FEED)
-# -----------------------------
-# -----------------------------
-# WEBSOCKET LOOP (RUN FEED)
+# WEBSOCKET LOOP
 # -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
-
-    # CREATE EVENT LOOP FOR THREAD
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     while True:
         try:
@@ -741,58 +733,50 @@ def run_feed():
                 continue
 
             instruments = [
-    (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
-    (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
-]
+                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
+                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
+            ]
 
-            logger.info(f"CLIENT_ID={CLIENT_ID}")
-            logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments
-            )
+    CLIENT_ID,
+    ACCESS_TOKEN,
+    instruments
+)
 
-            # CONNECT WEBSOCKET
-            loop.run_until_complete(feed.connect())
+feed.on_message = on_message
 
-            logger.info("WebSocket connected")
-
-            while True:
-                data = loop.run_until_complete(feed.get_data())
-
-                if data:
-                    on_message(None, data)
-
-                    advanced_market_analysis()
-
-                    institutional_analysis()
+feed.run_forever()
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
             time.sleep(5)
-
 # -----------------------------
 # CALLBACK
 # -----------------------------
-def on_message(instance, tick):
+# -----------------------------
+# MESSAGE CALLBACK
+# -----------------------------
+def on_message(instance, message):
     try:
-        sid = int(tick.get("security_id"))
-        price = tick.get("ltp", 0)
+        logger.info(f"TICK={message}")
 
-        if sid == SELECTED_CE:
+        sid = str(message.get("security_id"))
+        price = float(message.get("LTP", 0))
+
+        if sid == str(SELECTED_CE):
             latest_data["ce_price"] = price
 
-        elif sid == SELECTED_PE:
+        elif sid == str(SELECTED_PE):
             latest_data["pe_price"] = price
 
         update_signal()
+        advanced_market_analysis()
+        institutional_analysis()
 
     except Exception as e:
         logger.error(f"Message error: {e}")
-
 
 
 # -----------------------------
