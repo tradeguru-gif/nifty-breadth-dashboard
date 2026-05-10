@@ -14,7 +14,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from collections import deque
 
-from dhanhq import dhanhq as DhanHQ
+import dhanhq
 from dhanhq.marketfeed import MarketFeed
 
 # -----------------------------
@@ -767,7 +767,10 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-            dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
+     dhan = dhanhq.dhanhq(
+    CLIENT_ID,
+    ACCESS_TOKEN
+)
 
             feed = MarketFeed(
                 dhan,
