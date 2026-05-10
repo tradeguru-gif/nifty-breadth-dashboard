@@ -770,20 +770,20 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-        feed = MarketFeed(
-    CLIENT_ID,
-    ACCESS_TOKEN,
-    instruments
-)
+            feed = MarketFeed(
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments
+            )
 
-logger.info("Connecting to Dhan websocket...")
+            logger.info("Connecting to Dhan websocket...")
 
-while True:
+            while True:
 
-    data = feed.get_data()
+                data = feed.get_data()
 
-    if data:
-        on_message(None, data)           
+                if data:
+                    on_message(None, data)
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
