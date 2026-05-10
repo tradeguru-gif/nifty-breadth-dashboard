@@ -715,6 +715,9 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
+# -----------------------------
+# WEBSOCKET LOOP (RUN FEED)
+# -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
 
@@ -730,10 +733,12 @@ def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.Ticker),
-                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.Ticker)
+                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Quote),
+                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Quote)
             ]
 
+            logger.info(f"CLIENT_ID={CLIENT_ID}")
+            logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
@@ -742,7 +747,9 @@ def run_feed():
                 instruments
             )
 
-            logger.info("WebSocket started")
+            feed.run_forever()
+
+            logger.info("WebSocket connected")
 
             while True:
                 data = feed.get_data()
@@ -768,6 +775,7 @@ def on_message(instance, tick):
 
         if sid == SELECTED_CE:
             latest_data["ce_price"] = price
+
         elif sid == SELECTED_PE:
             latest_data["pe_price"] = price
 
