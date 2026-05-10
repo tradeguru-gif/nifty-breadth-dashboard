@@ -721,8 +721,17 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP
 # -----------------------------
+
+# -----------------------------
+# WEBSOCKET LOOP
+# -----------------------------
+import asyncio
+
 def run_feed():
     global SELECTED_CE, SELECTED_PE
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     while True:
         try:
@@ -748,12 +757,17 @@ def run_feed():
                 instruments
             )
 
-            # CALLBACK BIND
-            feed.on_message = on_message
+            logger.info("Connecting to Dhan websocket...")
 
-            logger.info("Connecting websocket...")
+            loop.run_until_complete(feed.connect())
 
-            feed.run_forever()
+            logger.info("WebSocket connected successfully")
+
+            while True:
+                data = loop.run_until_complete(feed.get_data())
+
+                if data:
+                    on_message(None, data)
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
