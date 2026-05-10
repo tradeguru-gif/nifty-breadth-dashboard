@@ -716,62 +716,74 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
-# -----------------------------
-# WEBSOCKET LOOP
-# -----------------------------
-# -----------------------------
-# WEBSOCKET LOOP
-# -----------------------------
+def on_connect(instance):
+    logger.info("WebSocket connected")
 
+def on_close(instance):
+    logger.info("WebSocket closed")
+
+def on_error(instance, error):
+    logger.error(f"WebSocket error: {error}")
 # -----------------------------
 # WEBSOCKET LOOP
 # -----------------------------
 import asyncio
 
-def run_feed():
+async def run_feed():
+
     global SELECTED_CE, SELECTED_PE
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     while True:
+
         try:
+
             spot = get_nifty_spot()
 
             select_contracts(spot)
 
             if not SELECTED_CE or not SELECTED_PE:
                 logger.error("No contracts selected")
-                time.sleep(5)
+                await asyncio.sleep(5)
                 continue
 
             instruments = [
-             (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
-             (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
-           ]
+                (marketfeed.NSE_FNO, str(SELECTED_CE), marketfeed.FULL),
+                (marketfeed.NSE_FNO, str(SELECTED_PE), marketfeed.FULL)
+            ]
+
             logger.info(f"Instruments={instruments}")
 
             feed = marketfeed.DhanFeed(
                 CLIENT_ID,
                 ACCESS_TOKEN,
-                instruments
+                instruments,
+                "v2"
             )
+
+            # CALLBACKS
+            feed.on_connect = on_connect
+            feed.on_message = on_message
+            feed.on_close = on_close
+            feed.on_error = on_error
 
             logger.info("Connecting to Dhan websocket...")
 
-            loop.run_until_complete(feed.connect())
+            await feed.connect()
 
-            logger.info("WebSocket connected successfully")
+            logger.info("Connected successfully")
+
+            await feed.subscribe_symbols(instruments)
+
+            await feed.subscribe_instruments()
+
+            logger.info("Subscriptions completed")
 
             while True:
-                data = loop.run_until_complete(feed.get_data())
-
-                if data:
-                    on_message(None, data)
+                await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
-            time.sleep(5)
+            await asyncio.sleep(5)
 # -----------------------------
 # CALLBACK
 # -----------------------------
@@ -818,7 +830,10 @@ def health():
 # START BACKGROUND THREAD
 # -----------------------------
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
-    threading.Thread(target=run_feed, daemon=True).start()
+    threading.Thread(
+    target=lambda: asyncio.run(run_feed()),
+    daemon=True
+).start()
 
 application = app
 
