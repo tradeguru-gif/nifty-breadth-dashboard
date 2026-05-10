@@ -766,7 +766,8 @@ def run_feed():
         try:
 
             # CREATE EVENT LOOP
-            asyncio.set_event_loop(asyncio.new_event_loop())
+           loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
             spot = get_nifty_spot()
 
@@ -792,9 +793,10 @@ def run_feed():
 
             # MARKET FEED
             feed = MarketFeed(
-                dhan_context,
-                instruments
-            )
+    instruments,
+    version="v2",
+    dhan_context=dhan_context
+)
 
             logger.info("Connecting to Dhan websocket...")
 
