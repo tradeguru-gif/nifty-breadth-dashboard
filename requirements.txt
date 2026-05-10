@@ -6,3 +6,4 @@ dhanhq==2.0.2
 gunicorn==23.0.0
 requests==2.32.3
 websockets==13.0.1
+websocket-client==1.8.0
