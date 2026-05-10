@@ -2,6 +2,7 @@
 
 import os
 import time
+import asyncio
 import threading
 import logging
 import pandas as pd
@@ -15,22 +16,12 @@ from collections import deque
 
 from dhanhq import DhanContext
 from dhanhq.marketfeed import MarketFeed
+
 # -----------------------------
 # LOGGING
 # -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend")
-
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-logger.info(f"CLIENT_ID={CLIENT_ID}")
-logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
-# -----------------------------
-# FLASK
-# -----------------------------
-app = Flask(__name__)
-CORS(app)
 
 # -----------------------------
 # ENV
@@ -42,6 +33,11 @@ DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
 logger.info(f"CLIENT_ID={CLIENT_ID}")
 logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
 
+# -----------------------------
+# FLASK
+# -----------------------------
+app = Flask(__name__)
+CORS(app)
 # -----------------------------
 # STATE
 # -----------------------------
@@ -769,6 +765,9 @@ def run_feed():
 
         try:
 
+            # CREATE EVENT LOOP
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
             spot = get_nifty_spot()
 
             select_contracts(spot)
@@ -785,13 +784,13 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-            # CREATE DHAN CONTEXT
+            # DHAN CONTEXT
             dhan_context = DhanContext(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN
             )
 
-            # CREATE FEED
+            # MARKET FEED
             feed = MarketFeed(
                 dhan_context,
                 instruments
@@ -817,7 +816,6 @@ def run_feed():
             logger.error(f"Feed crash: {e}")
 
             time.sleep(5)
-
 # -----------------------------
 # MESSAGE CALLBACK
 # -----------------------------
