@@ -747,13 +747,10 @@ def on_error(instance, error):
 # RUN FEED FINAL
 # -----------------------------
 def run_feed():
-
     global SELECTED_CE, SELECTED_PE
 
     while True:
-
         try:
-
             spot = get_nifty_spot()
 
             select_contracts(spot)
@@ -770,17 +767,18 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-           dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
+            dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
 
-feed = MarketFeed(
-    dhan,
-    instruments
-)
+            feed = MarketFeed(
+                dhan,
+                instruments
+            )
 
             logger.info("Connecting to Dhan websocket...")
 
-            while True:
+            feed.run_forever()
 
+            while True:
                 data = feed.get_data()
 
                 if data:
