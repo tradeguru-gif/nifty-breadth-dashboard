@@ -41,13 +41,9 @@ CORS(app)
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
+
 logger.info(f"CLIENT_ID={CLIENT_ID}")
 logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
-# -----------------------------
-# DHAN INIT
-# -----------------------------
-dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
-
 # -----------------------------
 # STATE
 # -----------------------------
@@ -242,9 +238,9 @@ def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
-                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
-            ]
+    (marketfeed.NSE_FNO, SELECTED_CE, 15),
+    (marketfeed.NSE_FNO, SELECTED_PE, 15)
+]
 
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
@@ -271,7 +267,7 @@ def run_feed():
 # -----------------------------
 def on_message(instance, tick):
     try:
-        sid = str(tick.get("security_id"))
+        sid = int(tick.get("security_id"))
         price = tick.get("ltp", 0)
 
         if sid == SELECTED_CE:
