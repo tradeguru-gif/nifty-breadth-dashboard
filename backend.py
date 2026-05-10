@@ -759,7 +759,7 @@ def on_error(instance, error):
 # -----------------------------
 
 # -----------------------------
-# RUN FEED FINAL
+# RUN FEED FINAL fake
 # -----------------------------
 def run_feed():
 
@@ -790,7 +790,7 @@ def run_feed():
                 CLIENT_ID,
                 ACCESS_TOKEN,
                 instruments,
-                version="v2"
+                "v2"
             )
 
             logger.info("Connecting to Dhan websocket...")
