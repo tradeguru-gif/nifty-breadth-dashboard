@@ -169,11 +169,11 @@ def select_contracts(spot):
         ce = df[(df["SEM_OPTION_TYPE"] == "CE") & (df["STRIKE"] == atm)]
         pe = df[(df["SEM_OPTION_TYPE"] == "PE") & (df["STRIKE"] == atm)]
 
-        if ce.empty or pe.empty:
+               if ce.empty or pe.empty:
             raise Exception("No ATM contracts found")
 
-       SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-       SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_CE = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
+        SELECTED_PE = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
 
         logger.info(f"CE={SELECTED_CE} PE={SELECTED_PE}")
 
