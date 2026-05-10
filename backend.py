@@ -782,19 +782,11 @@ def run_feed():
 
             logger.info(f"Instruments={instruments}")
 
-            # CREATE DHAN OBJECT
-            dhan = dhanhq.dhanhq(CLIENT_ID)
-
-            # SET ACCESS TOKEN
-            dhan.set_access_token(ACCESS_TOKEN)
-
-            # CREATE MARKET FEED
-            feed = MarketFeed(
-                dhan,
-                instruments,
-                version="v2"
-            )
-
+           feed = MarketFeed(
+    CLIENT_ID,
+    ACCESS_TOKEN,
+    instruments
+)
             logger.info("Connecting to Dhan websocket...")
 
             feed.run_forever()
