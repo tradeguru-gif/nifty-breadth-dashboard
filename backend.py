@@ -236,11 +236,11 @@ def run_feed():
                 (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
             ]
 
-           feed = marketfeed.DhanFeed(
-    client_id=CLIENT_ID,
-    access_token=ACCESS_TOKEN,
-    instruments=instruments
-)
+            feed = marketfeed.DhanFeed(
+                client_id=CLIENT_ID,
+                access_token=ACCESS_TOKEN,
+                instruments=instruments
+            )
 
             loop.run_until_complete(feed.connect())
 
@@ -254,8 +254,7 @@ def run_feed():
 
         except Exception as e:
             logger.error(f"Feed crash: {e}")
-            time.sleep(5)
-# -----------------------------
+            time.sleep(5)# -----------------------------
 # CALLBACK
 # -----------------------------
 def on_message(instance, tick):
