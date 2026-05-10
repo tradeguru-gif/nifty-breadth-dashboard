@@ -777,6 +777,9 @@ def run_feed():
 # -----------------------------
 # MESSAGE CALLBACK
 # -----------------------------
+# -----------------------------
+# MESSAGE CALLBACK
+# -----------------------------
 def on_message(instance, message):
     try:
         logger.info(f"TICK={message}")
@@ -784,10 +787,10 @@ def on_message(instance, message):
         sid = int(message.get("security_id"))
         price = float(message.get("LTP", 0))
 
-        if sid == str(SELECTED_CE):
+        if sid == SELECTED_CE:
             latest_data["ce_price"] = price
 
-            elif sid == SELECTED_PE:
+        elif sid == SELECTED_PE:
             latest_data["pe_price"] = price
 
         update_signal()
@@ -796,8 +799,6 @@ def on_message(instance, message):
 
     except Exception as e:
         logger.error(f"Message error: {e}")
-
-
 # -----------------------------
 # ROUTES
 # -----------------------------
