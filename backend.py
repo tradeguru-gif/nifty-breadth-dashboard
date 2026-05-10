@@ -103,7 +103,6 @@ def get_pcr():
 # -----------------------------
 # LIVE NIFTY SPOT
 # -----------------------------
-
    def get_nifty_spot():
 
     try:
@@ -750,19 +749,6 @@ def on_close(instance):
 
 def on_error(instance, error):
     logger.error(f"WebSocket error: {error}")
-# -----------------------------
-# WEBSOCKET LOOP
-# -----------------------------
-
-def on_connect(instance):
-    logger.info("WebSocket connected")
-
-def on_close(instance):
-    logger.info("WebSocket closed")
-
-def on_error(instance, error):
-    logger.error(f"WebSocket error: {error}")
-
 
 # -----------------------------
 # RUN FEED FINAL
@@ -795,12 +781,12 @@ def run_feed():
             logger.info(f"Instruments={instruments}")
 
             # CREATE DHAN OBJECT
-             dhan = dhanhq.dhanhq(CLIENT_ID)
+            dhan = dhanhq.dhanhq(CLIENT_ID)
 
-            # SET ACCESS TOKEN
-            dhan.set_access_token(ACCESS_TOKEN)
+            # ADD TOKEN
+            dhan.access_token = ACCESS_TOKEN
 
-            # CREATE MARKET FEED
+            # CREATE FEED
             feed = MarketFeed(
                 dhan,
                 instruments
