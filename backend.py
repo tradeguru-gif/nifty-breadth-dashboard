@@ -14,7 +14,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from collections import deque
 
-import dhanhq
+from dhanhq.marketfeed import MarketFeed
 
 
 # -----------------------------
@@ -780,30 +780,28 @@ def run_feed():
                 (2, str(SELECTED_PE), 15)
             ]
 
-            logger.info(f"Instruments={instruments}")
+           logger.info(f"Instruments={instruments}")
 
-            feed = MarketFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                instruments
-            )
+feed = MarketFeed(
+    CLIENT_ID,
+    ACCESS_TOKEN,
+    instruments
+)
 
-            logger.info("Connecting to Dhan websocket...")
+logger.info("Connecting to Dhan websocket...")
 
-            feed.run_forever()
+feed.run_forever()
 
-            logger.info("Websocket connected")
+logger.info("Websocket connected")
 
-            while True:
+while True:
 
-                data = feed.get_data()
+    data = feed.get_data()
 
-                if data:
-                    on_message(None, data)
+    if data:
+        on_message(None, data)
 
-                time.sleep(0.1)
-
-        except Exception as e:
+    time.sleep(0.1)        except Exception as e:
 
             logger.error(f"Feed crash: {e}")
 
