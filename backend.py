@@ -756,6 +756,7 @@ def on_error(instance, error):
 # RUN FEED FINAL
 # -----------------------------
 # -----------------------------
+# -----------------------------
 # RUN FEED FINAL
 # -----------------------------
 def run_feed():
@@ -780,28 +781,36 @@ def run_feed():
                 (2, str(SELECTED_PE), 15)
             ]
 
-           logger.info(f"Instruments={instruments}")
+            logger.info(f"Instruments={instruments}")
 
-feed = MarketFeed(
-    CLIENT_ID,
-    ACCESS_TOKEN,
-    instruments
-)
+            # CREATE DHAN CLIENT
+            dhan = dhanhq.dhanhq(
+                CLIENT_ID,
+                ACCESS_TOKEN
+            )
 
-logger.info("Connecting to Dhan websocket...")
+            # CREATE MARKET FEED
+            feed = MarketFeed(
+                dhan,
+                instruments
+            )
 
-feed.run_forever()
+            logger.info("Connecting to Dhan websocket...")
 
-logger.info("Websocket connected")
+            feed.run_forever()
 
-while True:
+            logger.info("Websocket connected")
 
-    data = feed.get_data()
+            while True:
 
-    if data:
-        on_message(None, data)
+                data = feed.get_data()
 
-    time.sleep(0.1)        except Exception as e:
+                if data:
+                    on_message(None, data)
+
+                time.sleep(0.1)
+
+        except Exception as e:
 
             logger.error(f"Feed crash: {e}")
 
