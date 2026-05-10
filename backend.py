@@ -741,9 +741,9 @@ def run_feed():
                 continue
 
             instruments = [
-                (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Quote),
-                (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Quote)
-            ]
+    (marketfeed.NSE_FNO, SELECTED_CE, marketfeed.Ticker),
+    (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
+]
 
             logger.info(f"CLIENT_ID={CLIENT_ID}")
             logger.info(f"TOKEN_PRESENT={bool(ACCESS_TOKEN)}")
