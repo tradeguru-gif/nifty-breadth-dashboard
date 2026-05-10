@@ -783,16 +783,17 @@ def run_feed():
             logger.info(f"Instruments={instruments}")
 
             # CREATE DHAN CLIENT
-dhan = dhanhq.dhanhq(
-    CLIENT_ID,
-    ACCESS_TOKEN
-)
+         dhan = dhanhq.dhanhq(
+              CLIENT_ID,
+              ACCESS_TOKEN
+         )
 
-# CREATE MARKET FEED
-feed = MarketFeed(
-    dhan,
-    instruments
-)
+            # CREATE MARKET FEED
+            feed = MarketFeed(
+                dhan,
+                instruments
+            )
+
             logger.info("Connecting to Dhan websocket...")
 
             feed.run_forever()
