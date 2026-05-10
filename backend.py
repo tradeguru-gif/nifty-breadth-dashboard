@@ -103,7 +103,10 @@ def get_pcr():
 # -----------------------------
 # LIVE NIFTY SPOT
 # -----------------------------
-   def get_nifty_spot():
+   # -----------------------------
+# LIVE NIFTY SPOT
+# -----------------------------
+def get_nifty_spot():
 
     try:
 
@@ -146,7 +149,6 @@ def get_pcr():
         logger.error(f"NIFTY spot error: {e}")
 
         return DEFAULT_NIFTY_SPOT
-
 # -----------------------------
 # LOAD INSTRUMENTS (FIXED)
 # -----------------------------
