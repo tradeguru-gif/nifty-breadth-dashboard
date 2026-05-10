@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import logging
+import asyncio
 import pandas as pd
 import requests
 import websocket
@@ -718,8 +719,15 @@ def institutional_analysis():
 # -----------------------------
 # WEBSOCKET LOOP (RUN FEED)
 # -----------------------------
+# -----------------------------
+# WEBSOCKET LOOP (RUN FEED)
+# -----------------------------
 def run_feed():
     global SELECTED_CE, SELECTED_PE
+
+    # CREATE EVENT LOOP FOR THREAD
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     while True:
         try:
@@ -747,12 +755,13 @@ def run_feed():
                 instruments
             )
 
-            feed.run_forever()
+            # CONNECT WEBSOCKET
+            loop.run_until_complete(feed.connect())
 
             logger.info("WebSocket connected")
 
             while True:
-                data = feed.get_data()
+                data = loop.run_until_complete(feed.get_data())
 
                 if data:
                     on_message(None, data)
