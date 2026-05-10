@@ -100,6 +100,7 @@ def get_pcr():
    # -----------------------------
 # LIVE NIFTY SPOT
 # -----------------------------
+asyncio.set_event_loop(asyncio.new_event_loop())
 def get_nifty_spot():
 
     try:
@@ -786,16 +787,17 @@ asyncio.set_event_loop(loop)
             logger.info(f"Instruments={instruments}")
 
             # DHAN CONTEXT
-            dhan_context = DhanContext(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN
-            )
+            # CREATE DHAN CONTEXT
+dhan_context = DhanContext(
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN
+)
 
-            # MARKET FEED
-            feed = MarketFeed(
+# CREATE FEED
+feed = MarketFeed(
+    dhan_context,
     instruments,
-    version="v2",
-    dhan_context=dhan_context
+    "v2"
 )
 
             logger.info("Connecting to Dhan websocket...")
