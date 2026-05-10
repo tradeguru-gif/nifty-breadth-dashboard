@@ -15,7 +15,7 @@ from flask_cors import CORS
 from collections import deque
 
 import dhanhq
-from dhanhq.marketfeed import MarketFeed
+
 
 # -----------------------------
 # LOGGING
@@ -783,16 +783,17 @@ def run_feed():
             logger.info(f"Instruments={instruments}")
 
             # CREATE DHAN OBJECT
-            dhan = dhanhq.dhanhq(CLIENT_ID)
+dhan = dhanhq.dhanhq(CLIENT_ID)
 
-            # ADD TOKEN
-            dhan.access_token = ACCESS_TOKEN
+# SET TOKEN
+dhan.access_token = ACCESS_TOKEN
 
-            # CREATE FEED
-            feed = MarketFeed(
-                dhan,
-                instruments
-            )
+# CREATE MARKET FEED
+feed = MarketFeed(
+    dhan,
+    instruments,
+    version="v2"
+)
 
             logger.info("Connecting to Dhan websocket...")
 
