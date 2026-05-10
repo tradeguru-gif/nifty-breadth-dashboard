@@ -244,7 +244,7 @@ def run_feed():
                 access_token=ACCESS_TOKEN,
                 instruments=instruments
             )
-
+            logger.info(f"Instruments={instruments}")
             loop.run_until_complete(feed.connect())
 
             logger.info("WebSocket connected")
