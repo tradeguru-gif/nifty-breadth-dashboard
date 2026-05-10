@@ -217,7 +217,7 @@ def run_feed():
     while True:
         try:
             spot = get_nifty_spot()
-select_contracts(spot)
+            select_contracts(spot)
 
             if not SELECTED_CE or not SELECTED_PE:
                 logger.error("No contracts, retrying...")
@@ -229,19 +229,18 @@ select_contracts(spot)
                 (marketfeed.NSE_FNO, SELECTED_PE, marketfeed.Ticker)
             ]
 
-
             feed = marketfeed.DhanFeed(
-    CLIENT_ID,
-    ACCESS_TOKEN,
-    instruments
-)
+                CLIENT_ID,
+                ACCESS_TOKEN,
+                instruments
+            )
 
-feed.connect()
+            feed.connect()
 
-logger.info("WebSocket connected")
+            logger.info("WebSocket connected")
 
-while True:
-    data = feed.get_data()
+            while True:
+                data = feed.get_data()
 
                 if data:
                     on_message(None, data)
