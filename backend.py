@@ -439,32 +439,40 @@ def on_message(instance, tick):
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
-    asyncio.set_event_loop(asyncio.new_event_loop())
     while True:
         try:
-            logger.info("Selecting option contracts...")
-            get_option_contracts(CURRENT_NIFTY)
-            if not SELECTED_CE_ID or not SELECTED_PE_ID:
-                logger.error("No valid contracts found.")
-                time.sleep(30)
+            ce_id, pe_id = find_nifty_option_ids()
+            if not ce_id or not pe_id:
+                logger.error("Failed to get contract IDs, retrying in 60 seconds")
+                time.sleep(60)
                 continue
+
+            SELECTED_CE_ID = ce_id
+            SELECTED_PE_ID = pe_id
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
+
+            # Create the feed with version='v2' and callbacks
             feed = marketfeed.DhanFeed(
-                CLIENT_ID,
-                ACCESS_TOKEN,
-                [
+                client_id=CLIENT_ID,
+                access_token=ACCESS_TOKEN,
+                instruments=[
                     (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Ticker),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
-                ]
+                ],
+                version='v2'  # Explicitly set version to 'v2'
             )
-            # Attach the callback after creating the feed
+            # Attach callbacks
+            feed.on_connect = lambda instance: logger.info("✅ WebSocket connected")
+            feed.on_error = lambda instance, error: logger.error(f"WebSocket error: {error}")
+            feed.on_close = lambda instance: logger.warning("WebSocket closed, reconnecting...")
             feed.on_message = on_message
-            logger.info("✅ Dhan Feed Started")
-            feed.run_forever()
-        except Exception as e:
-            logger.exception(f"Feed crashed: {e}")
-            time.sleep(10)
 
+            logger.info("🚀 Dhan Feed Started")
+            feed.run_forever()
+
+        except Exception as e:
+            logger.exception(f"Feed crashed: {e}, reconnecting in 10 seconds")
+            time.sleep(10)
 # ------------------------------------------------------------
 # Flask Routes (Original format + extra fields)
 # ------------------------------------------------------------
