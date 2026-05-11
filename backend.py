@@ -98,7 +98,7 @@ institutional_state = {
 SELECTED_CE_ID = None
 SELECTED_PE_ID = None
 
-price_history = deque(maxlen=200)   # increased to 200 for smoother indicators
+price_history = deque(maxlen=200)
 update_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
@@ -133,7 +133,7 @@ def calculate_macd(prices, fast=12, slow=26):
     return ema_fast - ema_slow
 
 # ------------------------------------------------------------
-# PCR (Original, but with caching to avoid excessive calls)
+# PCR (with caching)
 # ------------------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -274,9 +274,6 @@ def multi_tf_confirmation(rsi):
 # Advanced Analysis Function (called inside update_signal)
 # ------------------------------------------------------------
 def run_advanced_analysis(ce_price, pe_price, spread, pcr, price_list):
-    """
-    Updates market_state and institutional_state based on latest data.
-    """
     global market_state, institutional_state
     if len(price_list) < 14:
         return
@@ -402,7 +399,7 @@ def update_signal(ce_price, pe_price):
     latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ------------------------------------------------------------
-# WebSocket Callback (Original, unchanged except it calls update_signal)
+# WebSocket Callback (Original, unchanged)
 # ------------------------------------------------------------
 def on_message(instance, tick):
     global latest_data
@@ -422,7 +419,7 @@ def on_message(instance, tick):
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket Feed Runner (Original)
+# WebSocket Feed Runner (EXACT original pattern, with callbacks attached after creation)
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -436,6 +433,7 @@ def run_feed():
                 time.sleep(30)
                 continue
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
+            # Create feed with only the three required arguments
             feed = marketfeed.DhanFeed(
                 CLIENT_ID,
                 ACCESS_TOKEN,
@@ -444,6 +442,9 @@ def run_feed():
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
                 ]
             )
+            # Attach callbacks the original way (as in your working code)
+            feed.on_message = on_message
+            # Optional: on_connect, on_error, on_close can be set if needed, but not required
             logger.info("✅ Dhan Feed Started")
             feed.run_forever()
         except Exception as e:
@@ -451,7 +452,7 @@ def run_feed():
             time.sleep(10)
 
 # ------------------------------------------------------------
-# Flask Routes (Modified to return ALL data)
+# Flask Routes (Return all data)
 # ------------------------------------------------------------
 @app.route("/")
 def home():
