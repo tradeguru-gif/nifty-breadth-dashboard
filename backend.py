@@ -1,5 +1,5 @@
 # backend.py - Nifty Weekly Options Institutional Signal Engine
-# Compatible with dhanhq==2.0.2 (no DhanContext)
+# Compatible with dhanhq==2.0.2
 
 import os
 import time
@@ -134,7 +134,7 @@ def calculate_atr(prices, period=14):
 def calculate_vwap(prices):
     if not prices:
         return 0
-    vol = [100] * len(prices)   # dummy volume
+    vol = [100] * len(prices)
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
     return round(pv / tv, 2) if tv else 0
@@ -196,7 +196,7 @@ def get_live_nifty_spot():
             return float(r.json()["data"][0]["lastPrice"])
     except Exception as e:
         logger.warning(f"Spot fetch failed: {e}")
-    return 24000.0   # fallback
+    return 24000.0
 
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -224,7 +224,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # ------------------------------------------------------------
-# Find Weekly Nifty Options (ATM, nearest expiry)
+# Weekly Nifty Options selection
 # ------------------------------------------------------------
 def get_weekly_option_contracts(spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -233,7 +233,6 @@ def get_weekly_option_contracts(spot):
         df = pd.read_csv(url, low_memory=False)
         df.columns = df.columns.str.upper()
 
-        # Filter: NSE F&O, Index Options, NIFTY, Weekly expiry
         filtered = df[
             (df["SEGMENT"] == "NSE_FNO") &
             (df["INSTRUMENT"] == "OPTIDX") &
@@ -244,14 +243,12 @@ def get_weekly_option_contracts(spot):
             logger.error("No weekly NIFTY options found")
             return False
 
-        # Parse expiry dates and take the nearest one
         filtered["EXPIRY_DT"] = pd.to_datetime(filtered["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
         filtered = filtered.dropna(subset=["EXPIRY_DT"])
         filtered = filtered.sort_values("EXPIRY_DT")
         nearest_expiry = filtered["EXPIRY_DT"].iloc[0]
         filtered = filtered[filtered["EXPIRY_DT"] == nearest_expiry]
 
-        # Strike and ATM
         filtered["STRIKE"] = pd.to_numeric(filtered["STRIKE_PRICE"], errors="coerce")
         filtered = filtered.dropna(subset=["STRIKE"])
         strikes = filtered["STRIKE"].unique()
@@ -274,7 +271,7 @@ def get_weekly_option_contracts(spot):
         return False
 
 # ------------------------------------------------------------
-# Advanced analysis (called from update_signal)
+# Advanced analysis
 # ------------------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -298,7 +295,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     smart_money = smart_money_analysis(spread, pcr)
     multi_tf = multi_tf_confirmation(rsi)
 
-    # Confidence scoring
     confidence = 0
     if ema_signal == "BULLISH": confidence += 15
     if rsi > 60: confidence += 15
@@ -349,7 +345,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # ------------------------------------------------------------
-# Signal update (called from WebSocket callback)
+# Signal update
 # ------------------------------------------------------------
 def update_signal(ce_price, pe_price):
     global latest_data, price_history, update_counter
@@ -379,7 +375,6 @@ def update_signal(ce_price, pe_price):
             signal = "NEUTRAL"
         latest_data["signal"] = signal
 
-        # Advanced analysis (populates market_state, institutional_state)
         run_advanced_analysis(ce_price, pe_price, spread, pcr, list(price_history))
 
     latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -405,7 +400,7 @@ def on_message(instance, tick):
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket feed runner (auto-reconnect)
+# WebSocket feed runner
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -426,7 +421,6 @@ def run_feed():
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
                 ]
             )
-            # Set callbacks
             feed.on_connect = lambda _: logger.info("✅ WebSocket connected")
             feed.on_error = lambda _, err: logger.error(f"WebSocket error: {err}")
             feed.on_close = lambda _: logger.warning("WebSocket closed, reconnecting...")
@@ -459,8 +453,5 @@ def health():
 threading.Thread(target=run_feed, daemon=True).start()
 logger.info("Background signal engine started")
 
-# ------------------------------------------------------------
-# Main (for local testing)
-# ------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
