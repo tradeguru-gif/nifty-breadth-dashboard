@@ -1,5 +1,3 @@
-# backend.py - Nifty Weekly Options Signal Engine (Fully Corrected)
-
 import os
 import time
 import threading
@@ -11,18 +9,18 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
+# Correct Imports for dhanhq v2.2.0+
 from dhanhq import dhanhq as DhanHQ
 from dhanhq import marketfeed
 
 # ------------------------------------------------------------
-# Logging & Flask
+# Logging & Flask Setup
 # ------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-application = app
 
 # ------------------------------------------------------------
 # Environment variables
@@ -33,106 +31,77 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-logger.info("Dhan client initialised")
+# Initialize the main Dhan object (New Syntax)
+dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
+logger.info("Dhan client initialized successfully")
 
 # ------------------------------------------------------------
-# Global state
+# Global State Management
 # ------------------------------------------------------------
 latest_data = {
-    "signal": "WAITING",
-    "ce_price": 0,
-    "pe_price": 0,
-    "spread": 0,
-    "rsi": 50,
-    "macd": 0,
-    "pcr": 1.0,
-    "timestamp": ""
+    "signal": "WAITING", "ce_price": 0, "pe_price": 0,
+    "spread": 0, "rsi": 50, "macd": 0, "pcr": 1.0, "timestamp": ""
 }
 
 market_state = {
-    "rsi": 50,
-    "momentum": "NEUTRAL",
-    "strength": "LOW",
-    "trend": "SIDEWAYS",
-    "action": "HOLD",
-    "confidence": 0,
-    "volatility": "NORMAL",
-    "alert": "NONE"
+    "rsi": 50, "momentum": "NEUTRAL", "strength": "LOW",
+    "trend": "SIDEWAYS", "action": "HOLD", "confidence": 0,
+    "volatility": "NORMAL", "alert": "NONE"
 }
 
 institutional_state = {
-    "vwap": 0,
-    "ema_fast": 0,
-    "ema_slow": 0,
-    "ema_signal": "NEUTRAL",
-    "atr": 0,
-    "oi_buildup": "NEUTRAL",
-    "iv_state": "NORMAL",
-    "candle_structure": "SIDEWAYS",
-    "market_breadth": "BALANCED",
-    "volume_profile": "NORMAL",
-    "smart_money_flow": "NEUTRAL",
-    "delta": 0,
-    "gamma": 0,
-    "theta": 0,
-    "vega": 0,
-    "institutional_signal": "HOLD",
-    "institutional_confidence": 0
+    "vwap": 0, "ema_fast": 0, "ema_slow": 0, "ema_signal": "NEUTRAL",
+    "atr": 0, "oi_buildup": "NEUTRAL", "iv_state": "NORMAL",
+    "candle_structure": "SIDEWAYS", "market_breadth": "BALANCED",
+    "volume_profile": "NORMAL", "smart_money_flow": "NEUTRAL",
+    "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+    "institutional_signal": "HOLD", "institutional_confidence": 0
 }
 
 SELECTED_CE_ID = None
 SELECTED_PE_ID = None
-
 price_history = deque(maxlen=200)
 update_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Technical indicators (all defined)
+# Technical Indicators (Consolidated)
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return 50.0
+    if len(prices) < period + 1: return 50.0
     deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    if avg_loss == 0:
-        return 100.0
+    if avg_loss == 0: return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def calculate_macd(prices, fast=12, slow=26):
-    if len(prices) < slow:
-        return 0.0
+    if len(prices) < slow: return 0.0
     def ema(data, period):
         alpha = 2 / (period + 1)
         value = data[0]
-        for p in data[1:]:
-            value = alpha * p + (1 - alpha) * value
+        for p in data[1:]: value = alpha * p + (1 - alpha) * value
         return value
     return ema(prices, fast) - ema(prices, slow)
 
 def calculate_ema(prices, period):
-    if len(prices) < period:
-        return prices[-1] if prices else 0
+    if len(prices) < period: return prices[-1] if prices else 0
     alpha = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = alpha * p + (1 - alpha) * ema
-    return round(ema, 2)
+    e_val = prices[0]
+    for p in prices[1:]: e_val = alpha * p + (1 - alpha) * e_val
+    return round(e_val, 2)
 
 def calculate_atr(prices, period=14):
-    if len(prices) < period + 1:
-        return 0
+    if len(prices) < period + 1: return 0
     trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
     return round(sum(trs[-period:]) / period, 2)
 
 def calculate_vwap(prices):
-    if not prices:
-        return 0
+    if not prices: return 0
     vol = [100] * len(prices)
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
@@ -145,44 +114,8 @@ def estimate_greeks(ce, pe):
     vega = round((ce + pe) / 500, 2)
     return delta, gamma, theta, vega
 
-def analyze_oi_buildup(pcr):
-    if pcr < 0.8: return "LONG BUILDUP"
-    if pcr > 1.2: return "SHORT BUILDUP"
-    return "NEUTRAL"
-
-def detect_iv_crush(spread):
-    if abs(spread) < 5: return "IV CRUSH"
-    if abs(spread) > 20: return "HIGH IV"
-    return "NORMAL"
-
-def detect_candle_structure(prices):
-    if len(prices) < 5: return "SIDEWAYS"
-    if prices[-1] > prices[-5]: return "BULLISH"
-    if prices[-1] < prices[-5]: return "BEARISH"
-    return "SIDEWAYS"
-
-def market_breadth_analysis(pcr):
-    if pcr < 0.9: return "BULLISH"
-    if pcr > 1.1: return "BEARISH"
-    return "BALANCED"
-
-def volume_profile_analysis(prices):
-    if len(prices) < 10: return "NORMAL"
-    volatility = max(prices[-10:]) - min(prices[-10:])
-    return "HIGH" if volatility > 20 else "LOW"
-
-def smart_money_analysis(spread, pcr):
-    if spread > 10 and pcr < 0.8: return "SMART MONEY BUYING"
-    if spread < -10 and pcr > 1.2: return "SMART MONEY SELLING"
-    return "NEUTRAL"
-
-def multi_tf_confirmation(rsi):
-    if rsi > 60: return "BULLISH CONFIRMATION"
-    if rsi < 40: return "BEARISH CONFIRMATION"
-    return "NO CONFIRMATION"
-
 # ------------------------------------------------------------
-# Live Nifty spot & PCR
+# Data Fetching (NSE Live)
 # ------------------------------------------------------------
 def get_live_nifty_spot():
     try:
@@ -191,766 +124,99 @@ def get_live_nifty_spot():
         s = requests.Session()
         s.get("https://www.nseindia.com", headers=headers, timeout=5)
         r = s.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            return float(r.json()["data"][0]["lastPrice"])
-    except Exception as e:
-        logger.warning(f"Spot fetch failed: {e}")
-    return 24000.0
-
-pcr_cache = {"value": 1.0, "time": 0}
-PCR_TTL = 60
+        return float(r.json()["data"][0]["lastPrice"])
+    except: return 24100.0 # Safety fallback to recent levels
 
 def get_nifty_pcr():
-    now = time.time()
-    if now - pcr_cache["time"] < PCR_TTL:
-        return pcr_cache["value"]
     url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         s = requests.Session()
         s.get("https://www.nseindia.com", headers=headers)
-        time.sleep(0.5)
         r = s.get(url, headers=headers)
         data = r.json()
         ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
         pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
-        value = pe_oi / ce_oi if ce_oi else 1.0
-        pcr_cache["value"] = value
-        pcr_cache["time"] = now
-        return value
-    except Exception as e:
-        logger.error(f"PCR error: {e}")
-        return pcr_cache["value"]
+        return pe_oi / ce_oi if ce_oi else 1.0
+    except: return 1.0
 
 # ------------------------------------------------------------
-# Weekly Nifty Options selection (CORRECT FUNCTION NAME)
+# Contract Selection Logic
 # ------------------------------------------------------------
 def get_weekly_option_contracts(spot):
-    global SELECTED_CE_ID, SELECTED_PE_ID
-    # Use previously known working monthly IDs (adjust expiry as needed)
-#------------------------------------------------------------------------
-#------------------------------------------------------------------------
-#----------------------------------------------------------------------
-    SELECTED_CE_ID = "63719"   ## backend.py - Nifty Weekly/Monthly Options Signal Engine (Fully Corrected)
-
-import os
-import time
-import threading
-import logging
-import requests
-import pandas as pd
-from collections import deque
-from datetime import datetime
-from flask import Flask, jsonify
-from flask_cors import CORS
-
-from dhanhq import DhanContext, MarketFeed
-
-# ------------------------------------------------------------
-# Logging & Flask
-# ------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-CORS(app)
-application = app
-
-# ------------------------------------------------------------
-# Environment variables
-# ------------------------------------------------------------
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-if not CLIENT_ID or not ACCESS_TOKEN:
-    raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
-
-logger.info("Dhan client initialised")
-
-# ------------------------------------------------------------
-# Global state
-# ------------------------------------------------------------
-latest_data = {
-    "signal": "WAITING",
-    "ce_price": 0,
-    "pe_price": 0,
-    "spread": 0,
-    "rsi": 50,
-    "macd": 0,
-    "pcr": 1.0,
-    "timestamp": ""
-}
-
-market_state = {
-    "rsi": 50,
-    "momentum": "NEUTRAL",
-    "strength": "LOW",
-    "trend": "SIDEWAYS",
-    "action": "HOLD",
-    "confidence": 0,
-    "volatility": "NORMAL",
-    "alert": "NONE"
-}
-
-institutional_state = {
-    "vwap": 0,
-    "ema_fast": 0,
-    "ema_slow": 0,
-    "ema_signal": "NEUTRAL",
-    "atr": 0,
-    "oi_buildup": "NEUTRAL",
-    "iv_state": "NORMAL",
-    "candle_structure": "SIDEWAYS",
-    "market_breadth": "BALANCED",
-    "volume_profile": "NORMAL",
-    "smart_money_flow": "NEUTRAL",
-    "delta": 0,
-    "gamma": 0,
-    "theta": 0,
-    "vega": 0,
-    "institutional_signal": "HOLD",
-    "institutional_confidence": 0
-}
-
-SELECTED_CE_ID = None
-SELECTED_PE_ID = None
-
-price_history = deque(maxlen=200)
-update_counter = 0
-UPDATE_INTERVAL = 10
-SPREAD_THRESHOLD = 5.0
-
-# ------------------------------------------------------------
-# Technical indicators (all defined)
-# ------------------------------------------------------------
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return 50.0
-    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [-d if d < 0 else 0 for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(prices, fast=12, slow=26):
-    if len(prices) < slow:
-        return 0.0
-    def ema(data, period):
-        alpha = 2 / (period + 1)
-        value = data[0]
-        for p in data[1:]:
-            value = alpha * p + (1 - alpha) * value
-        return value
-    return ema(prices, fast) - ema(prices, slow)
-
-def calculate_ema(prices, period):
-    if len(prices) < period:
-        return prices[-1] if prices else 0
-    alpha = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = alpha * p + (1 - alpha) * ema
-    return round(ema, 2)
-
-def calculate_atr(prices, period=14):
-    if len(prices) < period + 1:
-        return 0
-    trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    return round(sum(trs[-period:]) / period, 2)
-
-def calculate_vwap(prices):
-    if not prices:
-        return 0
-    vol = [100] * len(prices)
-    pv = sum(p * v for p, v in zip(prices, vol))
-    tv = sum(vol)
-    return round(pv / tv, 2) if tv else 0
-
-def estimate_greeks(ce, pe):
-    delta = round((ce - pe) / 100, 2)
-    gamma = round(abs(delta) / 10, 2)
-    theta = round(-(ce + pe) / 1000, 2)
-    vega = round((ce + pe) / 500, 2)
-    return delta, gamma, theta, vega
-
-def analyze_oi_buildup(pcr):
-    if pcr < 0.8: return "LONG BUILDUP"
-    if pcr > 1.2: return "SHORT BUILDUP"
-    return "NEUTRAL"
-
-def detect_iv_crush(spread):
-    if abs(spread) < 5: return "IV CRUSH"
-    if abs(spread) > 20: return "HIGH IV"
-    return "NORMAL"
-
-def detect_candle_structure(prices):
-    if len(prices) < 5: return "SIDEWAYS"
-    if prices[-1] > prices[-5]: return "BULLISH"
-    if prices[-1] < prices[-5]: return "BEARISH"
-    return "SIDEWAYS"
-
-def market_breadth_analysis(pcr):
-    if pcr < 0.9: return "BULLISH"
-    if pcr > 1.1: return "BEARISH"
-    return "BALANCED"
-
-def volume_profile_analysis(prices):
-    if len(prices) < 10: return "NORMAL"
-    volatility = max(prices[-10:]) - min(prices[-10:])
-    return "HIGH" if volatility > 20 else "LOW"
-
-def smart_money_analysis(spread, pcr):
-    if spread > 10 and pcr < 0.8: return "SMART MONEY BUYING"
-    if spread < -10 and pcr > 1.2: return "SMART MONEY SELLING"
-    return "NEUTRAL"
-
-def multi_tf_confirmation(rsi):
-    if rsi > 60: return "BULLISH CONFIRMATION"
-    if rsi < 40: return "BEARISH CONFIRMATION"
-    return "NO CONFIRMATION"
-
-# ------------------------------------------------------------
-# Live Nifty spot & PCR
-# ------------------------------------------------------------
-def get_live_nifty_spot():
-    try:
-        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=5)
-        r = s.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            return float(r.json()["data"][0]["lastPrice"])
-    except Exception as e:
-        logger.warning(f"Spot fetch failed: {e}")
-    return 24000.0
-
-pcr_cache = {"value": 1.0, "time": 0}
-PCR_TTL = 60
-
-def get_nifty_pcr():
-    now = time.time()
-    if now - pcr_cache["time"] < PCR_TTL:
-        return pcr_cache["value"]
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers)
-        time.sleep(0.5)
-        r = s.get(url, headers=headers)
-        data = r.json()
-        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
-        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
-        value = pe_oi / ce_oi if ce_oi else 1.0
-        pcr_cache["value"] = value
-        pcr_cache["time"] = now
-        return value
-    except Exception as e:
-        logger.error(f"PCR error: {e}")
-        return pcr_cache["value"]
-
-# ------------------------------------------------------------
-# Option Contract Selection (Weekly with Monthly Fallback)
-# ------------------------------------------------------------
-def get_option_contracts(spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
         df = pd.read_csv(url, low_memory=False)
         df.columns = df.columns.str.upper()
 
-        # Determine expiry flag column name
-        flag_col = None
-        for col in df.columns:
-            if col == 'SEM_EXPIRY_FLAG' or col == 'EXPIRY_FLAG':
-                flag_col = col
-                break
-
-        if not flag_col:
-            logger.warning("Expiry flag column not found. Falling back to nearest monthly expiry.")
-            flag_col = None
-
-        # Try to fetch weekly expiry contracts first
-        weekly_df = df[
-            (df["SEGMENT"] == "NSE_FNO") &
-            (df["INSTRUMENT"] == "OPTIDX") &
-            (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))
-        ].copy()
+        # Filter for Nifty Options
+        fno = df[(df["SEGMENT"] == "NSE_FNO") & (df["INSTRUMENT"] == "OPTIDX") & (df["SYMBOL_NAME"] == "NIFTY")]
         
-        if flag_col:
-            weekly_df = weekly_df[weekly_df[flag_col] == "W"]
+        # Determine nearest expiry
+        fno["EXP_DT"] = pd.to_datetime(fno["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors='coerce')
+        fno = fno.dropna(subset=["EXP_DT"]).sort_values("EXP_DT")
+        nearest_expiry = fno["EXP_DT"].iloc[0]
         
-        if not weekly_df.empty:
-            logger.info("Weekly expiry contracts found. Selecting nearest weekly expiry.")
-            weekly_df["EXPIRY_DT"] = pd.to_datetime(weekly_df["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
-            weekly_df = weekly_df.dropna(subset=["EXPIRY_DT"])
-            weekly_df = weekly_df.sort_values("EXPIRY_DT")
-            nearest_expiry = weekly_df["EXPIRY_DT"].iloc[0]
-            filtered = weekly_df[weekly_df["EXPIRY_DT"] == nearest_expiry]
-        else:
-            logger.info("No weekly expiry contracts found. Falling back to nearest monthly expiry.")
-            monthly_df = df[
-                (df["SEGMENT"] == "NSE_FNO") &
-                (df["INSTRUMENT"] == "OPTIDX") &
-                (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))
-            ].copy()
-            monthly_df["EXPIRY_DT"] = pd.to_datetime(monthly_df["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
-            monthly_df = monthly_df.dropna(subset=["EXPIRY_DT"])
-            monthly_df = monthly_df.sort_values("EXPIRY_DT")
-            nearest_expiry = monthly_df["EXPIRY_DT"].iloc[0]
-            filtered = monthly_df[monthly_df["EXPIRY_DT"] == nearest_expiry]
-
+        filtered = fno[fno["EXP_DT"] == nearest_expiry].copy()
+        filtered["STRIKE"] = pd.to_numeric(filtered["STRIKE_PRICE"])
+        
         # Find ATM strike
-        filtered["STRIKE"] = pd.to_numeric(filtered["STRIKE_PRICE"], errors="coerce")
-        filtered = filtered.dropna(subset=["STRIKE"])
-        strikes = filtered["STRIKE"].unique()
-        atm_strike = strikes[(abs(strikes - spot)).argmin()]
-
-        # Extract CE & PE security IDs
-        ce_row = filtered[(filtered["OPTION_TYPE"] == "CE") & (filtered["STRIKE"] == atm_strike)]
-        pe_row = filtered[(filtered["OPTION_TYPE"] == "PE") & (filtered["STRIKE"] == atm_strike)]
-
-        if ce_row.empty or pe_row.empty:
-            logger.error(f"ATM CE/PE not found for strike {atm_strike}")
-            return False
-
-        SELECTED_CE_ID = str(int(ce_row.iloc[0]["SECURITY_ID"]))
-        SELECTED_PE_ID = str(int(pe_row.iloc[0]["SECURITY_ID"]))
-
-        expiry_date = nearest_expiry.strftime("%d-%b-%Y")
-        logger.info(f"Selected CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} | Expiry: {expiry_date} | Strike: {atm_strike}")
+        atm_strike = filtered["STRIKE"].iloc[(filtered["STRIKE"] - spot).abs().argsort()[:1]].values[0]
+        
+        ce_id = filtered[(filtered["OPTION_TYPE"] == "CE") & (filtered["STRIKE"] == atm_strike)]["SECURITY_ID"].iloc[0]
+        pe_id = filtered[(filtered["OPTION_TYPE"] == "PE") & (filtered["STRIKE"] == atm_strike)]["SECURITY_ID"].iloc[0]
+        
+        SELECTED_CE_ID = str(int(ce_id))
+        SELECTED_PE_ID = str(int(pe_id))
+        logger.info(f"Selected ATM {atm_strike} | CE: {SELECTED_CE_ID} | PE: {SELECTED_PE_ID}")
         return True
     except Exception as e:
-        logger.exception("Contract selection error")
+        logger.error(f"Contract Selection Error: {e}")
         return False
 
 # ------------------------------------------------------------
-# Advanced, Signal & WebSocket Logic (as before, using the above selection)
-# ------------------------------------------------------------
-def run_advanced_analysis(ce, pe, spread, pcr, price_list):
-    global market_state, institutional_state
-    if len(price_list) < 14:
-        return
-
-    rsi = calculate_rsi(price_list)
-    macd = calculate_macd(price_list)
-    vwap = calculate_vwap(price_list)
-    ema_fast = calculate_ema(price_list, 9)
-    ema_slow = calculate_ema(price_list, 21)
-    ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
-    atr = calculate_atr(price_list)
-    delta, gamma, theta, vega = estimate_greeks(ce, pe)
-
-    oi = analyze_oi_buildup(pcr)
-    iv = detect_iv_crush(spread)
-    candle = detect_candle_structure(price_list)
-    breadth = market_breadth_analysis(pcr)
-    vol_profile = volume_profile_analysis(price_list)
-    smart_money = smart_money_analysis(spread, pcr)
-    multi_tf = multi_tf_confirmation(rsi)
-
-    confidence = 0
-    if ema_signal == "BULLISH": confidence += 15
-    if rsi > 60: confidence += 15
-    if smart_money == "SMART MONEY BUYING": confidence += 20
-    if breadth == "BULLISH": confidence += 15
-    if candle == "BULLISH": confidence += 10
-    if vol_profile == "HIGH": confidence += 10
-    if multi_tf == "BULLISH CONFIRMATION": confidence += 15
-
-    if confidence >= 70:
-        action = "STRONG BUY CE"
-    elif confidence >= 50:
-        action = "BUY CE"
-    elif confidence <= 25:
-        action = "EXIT"
-    else:
-        action = "HOLD"
-
-    market_state.update({
-        "rsi": round(rsi, 2),
-        "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
-        "strength": "HIGH" if confidence > 60 else "LOW",
-        "trend": ema_signal,
-        "action": action,
-        "confidence": confidence,
-        "volatility": "HIGH" if abs(spread) > 20 else "NORMAL",
-        "alert": "BUY" if action in ("BUY CE", "STRONG BUY CE") else "EXIT" if action == "EXIT" else "HOLD"
-    })
-
-    institutional_state.update({
-        "vwap": vwap,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "ema_signal": ema_signal,
-        "atr": atr,
-        "oi_buildup": oi,
-        "iv_state": iv,
-        "candle_structure": candle,
-        "market_breadth": breadth,
-        "volume_profile": vol_profile,
-        "smart_money_flow": smart_money,
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta,
-        "vega": vega,
-        "institutional_signal": action,
-        "institutional_confidence": confidence
-    })
-
-def update_signal(ce_price, pe_price):
-    global latest_data, price_history, update_counter
-
-    spread = ce_price - pe_price
-    latest_data["spread"] = round(spread, 2)
-
-    if ce_price > 0:
-        price_history.append(ce_price)
-
-    update_counter += 1
-    if update_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
-        update_counter = 0
-        rsi = calculate_rsi(list(price_history))
-        macd = calculate_macd(list(price_history))
-        pcr = get_nifty_pcr()
-
-        latest_data["rsi"] = round(rsi, 2)
-        latest_data["macd"] = round(macd, 2)
-        latest_data["pcr"] = round(pcr, 2)
-
-        if spread > SPREAD_THRESHOLD and rsi < 70 and macd > 0 and pcr < 0.8:
-            signal = "LONG SPREAD (Bullish)"
-        elif spread < -SPREAD_THRESHOLD and rsi > 30 and macd < 0 and pcr > 1.2:
-            signal = "SHORT SPREAD (Bearish)"
-        else:
-            signal = "NEUTRAL"
-        latest_data["signal"] = signal
-
-        run_advanced_analysis(ce_price, pe_price, spread, pcr, list(price_history))
-
-    latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def on_message(instance, tick):
-    global latest_data
-    try:
-        sec_id = str(tick.get("security_id"))
-        price = tick.get("ltp", 0)
-        if sec_id == SELECTED_CE_ID:
-            latest_data["ce_price"] = price
-        elif sec_id == SELECTED_PE_ID:
-            latest_data["pe_price"] = price
-
-        if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
-            update_signal(latest_data["ce_price"], latest_data["pe_price"])
-        else:
-            latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception as e:
-        logger.error(f"on_message error: {e}")
-
-def run_feed():
-    global SELECTED_CE_ID, SELECTED_PE_ID
-    dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-    while True:
-        try:
-            spot = get_live_nifty_spot()
-            if not get_option_contracts(spot):
-                logger.error("No contracts found, retrying in 60s")
-                time.sleep(60)
-                continue
-
-            logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
-            instruments = [
-                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
-                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
-            ]
-            feed = MarketFeed(dhan_context, instruments, version="v2")
-            feed.on_connect = lambda _: logger.info("✅ WebSocket connected")
-            feed.on_error = lambda _, err: logger.error(f"WebSocket error: {err}")
-            feed.on_close = lambda _: logger.warning("WebSocket closed, reconnecting...")
-            feed.on_message = on_message
-
-            feed.run_forever()
-        except Exception as e:
-            logger.exception(f"Feed crashed: {e}, reconnecting in 10s")
-            time.sleep(10)
-
-# ------------------------------------------------------------
-# Flask routes
-# ------------------------------------------------------------
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "active",
-        "data": latest_data,
-        "market": market_state,
-        "institutional": institutional_state
-    })
-
-@app.route("/api/health")
-def health():
-    return "OK", 200
-
-# ------------------------------------------------------------
-# Start background thread
-# ------------------------------------------------------------
-threading.Thread(target=run_feed, daemon=True).start()
-logger.info("Background signal engine started")
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))Replace with actual CE ID for near-month
-    SELECTED_PE_ID = "63720"   # Replace with actual PE ID
-#------------------------------------------------------------------------
-#------------------------------------------------------------------------
-#----------------------------------------------------------------------
-    logger.info(f"Using static IDs: CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
-    return True
-
-        # First try: Weekly expiry
-        weekly = df[
-            (df["SEGMENT"] == "NSE_FNO") &
-            (df["INSTRUMENT"] == "OPTIDX") &
-            (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))
-        ]
-        # Determine expiry flag column (it could be 'EXPIRY_FLAG' or 'SEM_EXPIRY_FLAG')
-        flag_col = None
-        for col in df.columns:
-            if 'EXPIRY_FLAG' in col:
-                flag_col = col
-                break
-        if flag_col:
-            weekly = weekly[weekly[flag_col] == "W"]
-        else:
-            logger.warning("No expiry flag column found, falling back to nearest monthly")
-
-        if weekly.empty:
-            logger.info("No weekly contracts found, falling back to monthly expiry")
-            # Fallback: nearest monthly expiry (any expiry, not filtered by flag)
-            monthly = df[
-                (df["SEGMENT"] == "NSE_FNO") &
-                (df["INSTRUMENT"] == "OPTIDX") &
-                (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))
-            ].copy()
-            monthly["EXPIRY_DT"] = pd.to_datetime(monthly["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
-            monthly = monthly.dropna(subset=["EXPIRY_DT"])
-            monthly = monthly.sort_values("EXPIRY_DT")
-            nearest_expiry = monthly["EXPIRY_DT"].iloc[0]
-            filtered = monthly[monthly["EXPIRY_DT"] == nearest_expiry]
-        else:
-            # Process weekly as before
-            weekly["EXPIRY_DT"] = pd.to_datetime(weekly["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
-            weekly = weekly.dropna(subset=["EXPIRY_DT"])
-            weekly = weekly.sort_values("EXPIRY_DT")
-            nearest_expiry = weekly["EXPIRY_DT"].iloc[0]
-            filtered = weekly[weekly["EXPIRY_DT"] == nearest_expiry]
-
-        # Rest of the code (extract strike, CE/PE IDs) remains the same as before
-        filtered["STRIKE"] = pd.to_numeric(filtered["STRIKE_PRICE"], errors="coerce")
-        filtered = filtered.dropna(subset=["STRIKE"])
-        strikes = filtered["STRIKE"].unique()
-        atm_strike = strikes[(abs(strikes - spot)).argmin()]
-
-        ce_row = filtered[(filtered["OPTION_TYPE"] == "CE") & (filtered["STRIKE"] == atm_strike)]
-        pe_row = filtered[(filtered["OPTION_TYPE"] == "PE") & (filtered["STRIKE"] == atm_strike)]
-
-        if ce_row.empty or pe_row.empty:
-            logger.error(f"ATM CE/PE not found for strike {atm_strike}")
-            return False
-
-        SELECTED_CE_ID = str(int(ce_row.iloc[0]["SECURITY_ID"]))
-        SELECTED_PE_ID = str(int(pe_row.iloc[0]["SECURITY_ID"]))
-
-        logger.info(f"Selected CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} | Expiry: {nearest_expiry.date()} | Strike: {atm_strike}")
-        return True
-    except Exception as e:
-        logger.exception("Contract selection error")
-        return False
-# ------------------------------------------------------------
-# Advanced analysis
-# ------------------------------------------------------------
-def run_advanced_analysis(ce, pe, spread, pcr, price_list):
-    global market_state, institutional_state
-    if len(price_list) < 14:
-        return
-
-    rsi = calculate_rsi(price_list)
-    macd = calculate_macd(price_list)
-    vwap = calculate_vwap(price_list)
-    ema_fast = calculate_ema(price_list, 9)
-    ema_slow = calculate_ema(price_list, 21)
-    ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
-    atr = calculate_atr(price_list)
-    delta, gamma, theta, vega = estimate_greeks(ce, pe)
-
-    oi = analyze_oi_buildup(pcr)
-    iv = detect_iv_crush(spread)
-    candle = detect_candle_structure(price_list)
-    breadth = market_breadth_analysis(pcr)
-    vol_profile = volume_profile_analysis(price_list)
-    smart_money = smart_money_analysis(spread, pcr)
-    multi_tf = multi_tf_confirmation(rsi)
-
-    confidence = 0
-    if ema_signal == "BULLISH": confidence += 15
-    if rsi > 60: confidence += 15
-    if smart_money == "SMART MONEY BUYING": confidence += 20
-    if breadth == "BULLISH": confidence += 15
-    if candle == "BULLISH": confidence += 10
-    if vol_profile == "HIGH": confidence += 10
-    if multi_tf == "BULLISH CONFIRMATION": confidence += 15
-
-    if confidence >= 70:
-        action = "STRONG BUY CE"
-    elif confidence >= 50:
-        action = "BUY CE"
-    elif confidence <= 25:
-        action = "EXIT"
-    else:
-        action = "HOLD"
-
-    market_state.update({
-        "rsi": round(rsi, 2),
-        "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
-        "strength": "HIGH" if confidence > 60 else "LOW",
-        "trend": ema_signal,
-        "action": action,
-        "confidence": confidence,
-        "volatility": "HIGH" if abs(spread) > 20 else "NORMAL",
-        "alert": "BUY" if action in ("BUY CE", "STRONG BUY CE") else "EXIT" if action == "EXIT" else "HOLD"
-    })
-
-    institutional_state.update({
-        "vwap": vwap,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "ema_signal": ema_signal,
-        "atr": atr,
-        "oi_buildup": oi,
-        "iv_state": iv,
-        "candle_structure": candle,
-        "market_breadth": breadth,
-        "volume_profile": vol_profile,
-        "smart_money_flow": smart_money,
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta,
-        "vega": vega,
-        "institutional_signal": action,
-        "institutional_confidence": confidence
-    })
-
-# ------------------------------------------------------------
-# Signal update
-# ------------------------------------------------------------
-def update_signal(ce_price, pe_price):
-    global latest_data, price_history, update_counter
-
-    spread = ce_price - pe_price
-    latest_data["spread"] = round(spread, 2)
-
-    if ce_price > 0:
-        price_history.append(ce_price)
-
-    update_counter += 1
-    if update_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
-        update_counter = 0
-        rsi = calculate_rsi(list(price_history))
-        macd = calculate_macd(list(price_history))
-        pcr = get_nifty_pcr()
-
-        latest_data["rsi"] = round(rsi, 2)
-        latest_data["macd"] = round(macd, 2)
-        latest_data["pcr"] = round(pcr, 2)
-
-        if spread > SPREAD_THRESHOLD and rsi < 70 and macd > 0 and pcr < 0.8:
-            signal = "LONG SPREAD (Bullish)"
-        elif spread < -SPREAD_THRESHOLD and rsi > 30 and macd < 0 and pcr > 1.2:
-            signal = "SHORT SPREAD (Bearish)"
-        else:
-            signal = "NEUTRAL"
-        latest_data["signal"] = signal
-
-        run_advanced_analysis(ce_price, pe_price, spread, pcr, list(price_history))
-
-    latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-# ------------------------------------------------------------
-# WebSocket callback
+# Signal Engine & WebSocket
 # ------------------------------------------------------------
 def on_message(instance, tick):
     global latest_data
     try:
         sec_id = str(tick.get("security_id"))
         price = tick.get("ltp", 0)
-        if sec_id == SELECTED_CE_ID:
-            latest_data["ce_price"] = price
-        elif sec_id == SELECTED_PE_ID:
-            latest_data["pe_price"] = price
+        if sec_id == SELECTED_CE_ID: latest_data["ce_price"] = price
+        elif sec_id == SELECTED_PE_ID: latest_data["pe_price"] = price
 
         if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
-            update_signal(latest_data["ce_price"], latest_data["pe_price"])
-        else:
-            latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception as e:
-        logger.error(f"on_message error: {e}")
+            latest_data["spread"] = round(latest_data["ce_price"] - latest_data["pe_price"], 2)
+            latest_data["timestamp"] = datetime.now().strftime("%H:%M:%S")
+    except Exception as e: logger.error(f"Feed error: {e}")
 
-# ------------------------------------------------------------
-# WebSocket feed runner
-# ------------------------------------------------------------
 def run_feed():
-    global SELECTED_CE_ID, SELECTED_PE_ID
     while True:
         try:
             spot = get_live_nifty_spot()
-            if not get_weekly_option_contracts(spot):
-                logger.error("No weekly contracts found, retrying in 60s")
-                time.sleep(60)
-                continue
-
-            logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
-            feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=[
-                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
+            if get_weekly_option_contracts(spot):
+                # New Dhan v2 WebSocket setup
+                instruments = [
+                    (marketfeed.NSE_FNO, SELECTED_CE_ID, marketfeed.Ticker),
+                    (marketfeed.NSE_FNO, SELECTED_PE_ID, marketfeed.Ticker)
                 ]
-            )
-            feed.on_connect = lambda _: logger.info("✅ WebSocket connected")
-            feed.on_error = lambda _, err: logger.error(f"WebSocket error: {err}")
-            feed.on_close = lambda _: logger.warning("WebSocket closed, reconnecting...")
-            feed.on_message = on_message
-
-            feed.run_forever()
+                feed = marketfeed.DhanFeed(CLIENT_ID, ACCESS_TOKEN, instruments, version="v2")
+                feed.on_message = on_message
+                feed.run_forever()
+            time.sleep(10)
         except Exception as e:
-            logger.exception(f"Feed crashed: {e}, reconnecting in 10s")
+            logger.error(f"Restarting feed: {e}")
             time.sleep(10)
 
 # ------------------------------------------------------------
-# Flask routes
+# API Endpoints
 # ------------------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({
-        "status": "active",
-        "data": latest_data,
-        "market": market_state,
-        "institutional": institutional_state
-    })
+    return jsonify({"status": "running", "data": latest_data})
 
-@app.route("/api/health")
-def health():
-    return "OK", 200
-
-# ------------------------------------------------------------
-# Start background thread
-# ------------------------------------------------------------
 threading.Thread(target=run_feed, daemon=True).start()
-logger.info("Background signal engine started")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
