@@ -1,5 +1,4 @@
-# backend.py - Nifty Weekly Options Institutional Signal Engine
-# Compatible with dhanhq==2.0.2
+# backend.py - Nifty Weekly Options Signal Engine (Fully Corrected)
 
 import os
 import time
@@ -90,7 +89,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Technical indicators
+# Technical indicators (all defined)
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -224,7 +223,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # ------------------------------------------------------------
-# Weekly Nifty Options selection
+# Weekly Nifty Options selection (CORRECT FUNCTION NAME)
 # ------------------------------------------------------------
 def get_weekly_option_contracts(spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
