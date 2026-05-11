@@ -1,4 +1,4 @@
-# backend.py - Advanced NIFTY Options Signal Engine (Production Ready)
+# backend.py - Nifty Options Signal Engine (Working WebSocket + Advanced Analytics)
 
 import os
 import time
@@ -32,19 +32,19 @@ application = app
 # ------------------------------------------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-DEFAULT_NIFTY_SPOT = float(os.getenv("CURRENT_NIFTY", "24000"))
+CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # ------------------------------------------------------------
-# Dhan Client
+# Dhan Client (not strictly needed for WebSocket, but kept)
 # ------------------------------------------------------------
 dhan = DhanHQ(CLIENT_ID, ACCESS_TOKEN)
 logger.info("Dhan client initialized")
 
 # ------------------------------------------------------------
-# Global State
+# Global State (Preserved from your working version)
 # ------------------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -57,7 +57,7 @@ latest_data = {
     "timestamp": ""
 }
 
-# Advanced market state (from your second script)
+# ---------- Advanced State (new, does not affect WebSocket) ----------
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -93,10 +93,10 @@ institutional_state = {
     "institutional_confidence": 0
 }
 
-SELECTED_CE_ID = None
-SELECTED_PE_ID = None
-
-price_history = deque(maxlen=200)   # for RSI, EMA, ATR
+# ---------- Original working variables ----------
+SELECTED_CE_ID = "54321"   # <--- REPLACE WITH YOUR REAL CE SECURITY ID
+SELECTED_PE_ID = "54322"   # <--- REPLACE WITH YOUR REAL PE SECURITY ID
+price_history = deque(maxlen=200)
 update_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
@@ -108,20 +108,6 @@ PCR_TTL = 60
 # ------------------------------------------------------------
 # Helper Functions (Indicators)
 # ------------------------------------------------------------
-def get_nifty_spot():
-    """Live NIFTY spot from NSE (fallback to DEFAULT_NIFTY_SPOT)."""
-    try:
-        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        res = session.get(url, headers=headers, timeout=5)
-        if res.status_code == 200 and res.text.strip():
-            return float(res.json()["data"][0]["lastPrice"])
-    except Exception as e:
-        logger.error(f"NIFTY spot error: {e}")
-    return DEFAULT_NIFTY_SPOT
-
 def get_pcr():
     """Cached Put‑Call Ratio from NSE."""
     now = time.time()
@@ -200,37 +186,7 @@ def estimate_greeks(ce, pe):
     return delta, gamma, theta, vega
 
 # ------------------------------------------------------------
-# Dynamic Contract Selection (replaces static IDs)
-# ------------------------------------------------------------
-def select_contracts(spot):
-    global SELECTED_CE_ID, SELECTED_PE_ID
-    try:
-        url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = df.columns.str.upper()
-        fno = df[df["SEGMENT"] == "NSE_FNO"]
-        opts = fno[fno["INSTRUMENT"] == "OPTIDX"].copy()
-        opts["EXPIRY"] = pd.to_datetime(opts["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
-        opts = opts.dropna(subset=["EXPIRY"])
-        nearest = opts["EXPIRY"].min()
-        opts = opts[opts["EXPIRY"] == nearest]
-        opts["STRIKE"] = pd.to_numeric(opts["STRIKE_PRICE"], errors="coerce")
-        opts = opts.dropna(subset=["STRIKE"])
-        atm_strike = opts.iloc[(opts["STRIKE"] - spot).abs().argmin()]["STRIKE"]
-        ce = opts[(opts["OPTION_TYPE"] == "CE") & (opts["STRIKE"] == atm_strike)]
-        pe = opts[(opts["OPTION_TYPE"] == "PE") & (opts["STRIKE"] == atm_strike)]
-        if ce.empty or pe.empty:
-            raise ValueError("No ATM CE/PE found")
-        SELECTED_CE_ID = str(ce.iloc[0]["SEM_SMST_SECURITY_ID"])
-        SELECTED_PE_ID = str(pe.iloc[0]["SEM_SMST_SECURITY_ID"])
-        logger.info(f"Dynamic contracts: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} (strike={atm_strike})")
-        return True
-    except Exception as e:
-        logger.error(f"Contract selection failed: {e}")
-        return False
-
-# ------------------------------------------------------------
-# Advanced Analysis (runs on every tick)
+# Advanced Analysis (runs on every tick, does not alter WebSocket)
 # ------------------------------------------------------------
 def advanced_analysis():
     global market_state, institutional_state, latest_data
@@ -239,12 +195,14 @@ def advanced_analysis():
     if ce == 0 or pe == 0:
         return
     spread = ce - pe
-    pcr = get_pcr()
+    pcr = latest_data["pcr"]  # already computed in on_message
     prices = list(price_history)
 
-    # Basic technicals
-    rsi = calculate_rsi(prices) if len(prices) >= 14 else 50
-    macd = calculate_macd(prices) if len(prices) >= 26 else 0
+    if len(prices) < 14:
+        return
+
+    rsi = calculate_rsi(prices)
+    macd = calculate_macd(prices)
     vwap = calculate_vwap(prices)
     ema_fast = calculate_ema(prices, 9)
     ema_slow = calculate_ema(prices, 21)
@@ -263,7 +221,7 @@ def advanced_analysis():
     smart_money = "SMART MONEY BUYING" if spread > 10 and pcr < 0.8 else "SMART MONEY SELLING" if spread < -10 and pcr > 1.2 else "NEUTRAL"
     multi_tf = "BULLISH CONFIRMATION" if rsi > 60 else "BEARISH CONFIRMATION" if rsi < 40 else "NO CONFIRMATION"
 
-    # Confidence scoring (institutional)
+    # Confidence scoring
     confidence = 0
     if ema_signal == "BULLISH":
         confidence += 15
@@ -327,7 +285,7 @@ def advanced_analysis():
     })
 
 # ------------------------------------------------------------
-# WebSocket Callback (same as your working version, with added analysis)
+# Original WebSocket Callback (Preserved, with extra analysis)
 # ------------------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, update_counter
@@ -340,18 +298,16 @@ def on_message(instance, tick):
             latest_data["pe_price"] = price
 
         if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
-            # Calculate spread and basic signal (same as before)
             ce = latest_data["ce_price"]
             pe = latest_data["pe_price"]
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
             price_history.append(ce)
 
-            # PCR and simple signal (for latest_data)
+            # PCR and simple signal (same as original)
             pcr = get_pcr()
             latest_data["pcr"] = round(pcr, 2)
 
-            # Simple signal (kept for compatibility)
             if spread > SPREAD_THRESHOLD and pcr < 0.8:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD and pcr > 1.2:
@@ -359,34 +315,27 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Advanced analysis (calls market_state, institutional_state)
-            advanced_analysis()
-
-            # Also compute RSI/MACD for latest_data (optional)
+            # RSI/MACD for latest_data (optional)
             if len(price_history) >= 20:
-                rsi = calculate_rsi(list(price_history))
-                macd = calculate_macd(list(price_history))
-                latest_data["rsi"] = round(rsi, 2)
-                latest_data["macd"] = round(macd, 2)
+                rsi_val = calculate_rsi(list(price_history))
+                macd_val = calculate_macd(list(price_history))
+                latest_data["rsi"] = round(rsi_val, 2)
+                latest_data["macd"] = round(macd_val, 2)
+
+            # Call advanced analysis (populates market_state & institutional_state)
+            advanced_analysis()
 
         latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket Feed Runner (exactly as in your working version)
+# Original WebSocket Feed Runner (exactly as working)
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
     while True:
         try:
-            # Dynamic contract selection
-            spot = get_nifty_spot()
-            if not select_contracts(spot):
-                logger.error("Contract selection failed, retrying in 30s")
-                time.sleep(30)
-                continue
-
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
@@ -406,7 +355,7 @@ def run_feed():
             time.sleep(10)
 
 # ------------------------------------------------------------
-# Flask Routes
+# Flask Routes (Enhanced to include advanced analytics)
 # ------------------------------------------------------------
 @app.route("/")
 def home():
