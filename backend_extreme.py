@@ -21,10 +21,16 @@ CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
-
+#-----------------------------------------------------------
+#---------------------------------------------------------
+#--------------------------------------------------------
 # Static Security IDs (replace with active near‑month ATM IDs)
-CE_ID = "63719"   # Change if expired
-PE_ID = "63720"   # Change if expired
+CE_ID = 1100808  # Change if expired
+PE_ID = 1100863   # Change if expired
+#-----------------------------------------------------------
+#---------------------------------------------------------
+#--------------------------------------------------------
+
 
 # Global state for WordPress
 latest_data = {
