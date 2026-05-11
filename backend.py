@@ -1,5 +1,3 @@
-# backend.py - Complete Nifty Options Signal Engine (WebSocket + Analytics)
-
 import os
 import time
 import threading
@@ -89,7 +87,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # ------------------------------------------------------------
-# Technical indicators (all defined)
+# Technical indicators
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -228,9 +226,8 @@ def get_nifty_pcr():
 def get_option_contracts(spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
     # --- REPLACE THESE WITH ACTIVE NEAR-MONTH SECURITY IDs ---
-    # You can find them from the CSV (nearest expiry, ATM strike)
-    SELECTED_CE_ID = "63719"   # Example CE ID (change to actual)
-    SELECTED_PE_ID = "63720"   # Example PE ID (change to actual)
+    SELECTED_CE_ID = "63719"   # Replace with your CE ID
+    SELECTED_PE_ID = "63720"   # Replace with your PE ID
     logger.info(f"Using static contracts: CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
     return True
 
@@ -394,7 +391,6 @@ def run_feed():
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
                 ]
             )
-            # Attach callbacks
             feed.on_connect = on_connect
             feed.on_error = on_error
             feed.on_close = on_close
