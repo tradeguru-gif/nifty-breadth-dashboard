@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Fully Corrected + Institutional Analytics)
+# backend.py - Nifty Options Signal Engine (Working WebSocket + Full Institutional Analytics)
 
 import os
 import asyncio
@@ -58,7 +58,7 @@ latest_data = {
     "timestamp": ""
 }
 
-# New: Advanced market state
+# Advanced state (new)
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -74,7 +74,6 @@ market_state = {
     "market_sentiment": "NEUTRAL"
 }
 
-# New: Institutional intelligence
 institutional_state = {
     "vwap": 0,
     "ema_fast": 0,
@@ -98,7 +97,7 @@ institutional_state = {
 SELECTED_CE_ID = None
 SELECTED_PE_ID = None
 
-price_history = deque(maxlen=200)
+price_history = deque(maxlen=200)   # for smoother indicators
 update_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
@@ -133,7 +132,7 @@ def calculate_macd(prices, fast=12, slow=26):
     return ema_fast - ema_slow
 
 # ------------------------------------------------------------
-# PCR (with caching)
+# PCR with caching (original but with cache)
 # ------------------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -166,15 +165,18 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # ------------------------------------------------------------
-# Dynamic Option Contract Selection (Original – using static IDs)
+# Dynamic Option Contract Selection (static IDs – REPLACE WITH YOUR REAL IDs)
 # ------------------------------------------------------------
 def get_option_contracts(nifty_spot):
     global SELECTED_CE_ID, SELECTED_PE_ID
     try:
         logger.info("Using static NIFTY option contracts")
-        # REPLACE THESE WITH YOUR REAL SECURITY IDS
-        SELECTED_CE_ID = "54321"
-        SELECTED_PE_ID = "54322"
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # REPLACE THESE WITH YOUR ACTUAL CE AND PE SECURITY IDS
+        # (e.g., the ones that worked before: 41762 and 41763)
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        SELECTED_CE_ID = "54321"   # CHANGE THIS
+        SELECTED_PE_ID = "54322"   # CHANGE THIS
         logger.info(f"Selected CE: {SELECTED_CE_ID}")
         logger.info(f"Selected PE: {SELECTED_PE_ID}")
         return [SELECTED_CE_ID, SELECTED_PE_ID]
@@ -274,6 +276,7 @@ def multi_tf_confirmation(rsi):
 # Advanced Analysis Function (called inside update_signal)
 # ------------------------------------------------------------
 def run_advanced_analysis(ce_price, pe_price, spread, pcr, price_list):
+    """Updates market_state and institutional_state."""
     global market_state, institutional_state
     if len(price_list) < 14:
         return
@@ -360,7 +363,7 @@ def run_advanced_analysis(ce_price, pe_price, spread, pcr, price_list):
     })
 
 # ------------------------------------------------------------
-# Signal Logic (Original, but extended with advanced analysis)
+# Signal Logic (original, extended with advanced analysis)
 # ------------------------------------------------------------
 def update_signal(ce_price, pe_price):
     global latest_data, price_history, update_counter
@@ -393,13 +396,13 @@ def update_signal(ce_price, pe_price):
             signal = "NEUTRAL"
         latest_data["signal"] = signal
 
-        # Advanced analysis (using same data)
+        # Advanced analysis (populates market_state, institutional_state)
         run_advanced_analysis(ce_price, pe_price, spread, pcr, list(price_history))
 
     latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ------------------------------------------------------------
-# WebSocket Callback (Original, unchanged)
+# WebSocket Callback (original - uses on_message with DhanFeed)
 # ------------------------------------------------------------
 def on_message(instance, tick):
     global latest_data
@@ -419,7 +422,7 @@ def on_message(instance, tick):
         logger.error(f"on_message error: {e}")
 
 # ------------------------------------------------------------
-# WebSocket Feed Runner (EXACT original pattern, with callbacks attached after creation)
+# WebSocket Feed Runner (original working code - NO extra arguments)
 # ------------------------------------------------------------
 def run_feed():
     global SELECTED_CE_ID, SELECTED_PE_ID
@@ -433,7 +436,6 @@ def run_feed():
                 time.sleep(30)
                 continue
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
-            # Create feed with only the three required arguments
             feed = marketfeed.DhanFeed(
                 CLIENT_ID,
                 ACCESS_TOKEN,
@@ -442,9 +444,8 @@ def run_feed():
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
                 ]
             )
-            # Attach callbacks the original way (as in your working code)
+            # Attach the callback after creating the feed
             feed.on_message = on_message
-            # Optional: on_connect, on_error, on_close can be set if needed, but not required
             logger.info("✅ Dhan Feed Started")
             feed.run_forever()
         except Exception as e:
@@ -452,14 +453,15 @@ def run_feed():
             time.sleep(10)
 
 # ------------------------------------------------------------
-# Flask Routes (Return all data)
+# Flask Routes (Original format + extra fields)
 # ------------------------------------------------------------
 @app.route("/")
 def home():
+    # Return original 'data' field to keep WordPress happy
     return jsonify({
         "status": "active",
-        "latest": latest_data,
-        "market": market_state,
+        "data": latest_data,               # WordPress expects this
+        "market": market_state,            # additional data
         "institutional": institutional_state
     })
 
