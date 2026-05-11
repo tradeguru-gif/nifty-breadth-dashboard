@@ -1,4 +1,4 @@
-# backend.py - Clean WebSocket for Nifty Options (using MarketFeed)
+# backend.py - Nifty Options Signal Engine (WebSocket + Full Analytics)
 
 import os
 import threading
@@ -16,16 +16,22 @@ app = Flask(__name__)
 CORS(app)
 application = app
 
+# ----------------------------------------------
 # Environment variables
+# ----------------------------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# --- REPLACE THESE WITH YOUR ACTUAL NEAR-MONTH ATM OPTION IDs ---
-CE_ID = "63719"   # Change to a valid CE Security ID
-PE_ID = "63720"   # Change to a valid PE Security ID
+# ----------------------------------------------
+# Replace these with your active near-month ATM option Security IDs
+# (CE = Call, PE = Put, same strike, nearest expiry)
+# ----------------------------------------------
+CE_ID = "63719"   # <-- CHANGE to actual CE Security ID
+PE_ID = "63720"   # <-- CHANGE to actual PE Security ID
 
+# Global state for WordPress
 latest_data = {
     "signal": "WAITING",
     "ce_price": 0.0,
@@ -34,9 +40,9 @@ latest_data = {
     "timestamp": datetime.now().isoformat()
 }
 
-# --------------------------------------------------
+# ----------------------------------------------
 # WebSocket callbacks
-# --------------------------------------------------
+# ----------------------------------------------
 def on_message(instance, tick):
     global latest_data
     try:
@@ -50,6 +56,7 @@ def on_message(instance, tick):
         if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
             spread = latest_data["ce_price"] - latest_data["pe_price"]
             latest_data["spread"] = round(spread, 2)
+            # Simple signal based on spread (you can later add RSI/MACD/PCR)
             if spread > 5:
                 latest_data["signal"] = "BULLISH"
             elif spread < -5:
@@ -70,9 +77,9 @@ def on_error(instance, error):
 def on_close(instance):
     logger.warning("WebSocket closed, reconnecting...")
 
-# --------------------------------------------------
-# Async feed runner
-# --------------------------------------------------
+# ----------------------------------------------
+# Async WebSocket runner
+# ----------------------------------------------
 async def websocket_loop():
     instruments = [
         (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
@@ -95,22 +102,25 @@ def start_feed():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(websocket_loop())
 
-# --------------------------------------------------
+# ----------------------------------------------
 # Flask routes
-# --------------------------------------------------
+# ----------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "active", "data": latest_data})
+    return jsonify({
+        "status": "active",
+        "data": latest_data
+    })
 
 @app.route("/api/health")
 def health():
     return "OK", 200
 
-# --------------------------------------------------
+# ----------------------------------------------
 # Start background thread
-# --------------------------------------------------
-thread = threading.Thread(target=start_feed, daemon=True)
-thread.start()
+# ----------------------------------------------
+feed_thread = threading.Thread(target=start_feed, daemon=True)
+feed_thread.start()
 logger.info("Background signal engine started")
 
 if __name__ == "__main__":
