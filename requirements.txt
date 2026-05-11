@@ -3,3 +3,4 @@ flask-cors==4.0.1
 pandas==2.0.3
 requests==2.31.0
 dhanhq==2.0.2
+gunicorn==21.2.0
