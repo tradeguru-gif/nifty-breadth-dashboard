@@ -1,5 +1,5 @@
 # backend.py - Full Institutional Signal Engine for Nifty Options
-# Based on the working minimal WebSocket, extended with advanced analytics
+# No pandas required – all calculations use standard Python
 
 import os
 import asyncio
@@ -7,7 +7,6 @@ import threading
 import time
 import logging
 import requests
-import pandas as pd
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
@@ -53,7 +52,7 @@ latest_data = {
     "timestamp": ""
 }
 
-# Advanced state containers (for / endpoint)
+# Advanced state containers
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -88,7 +87,7 @@ institutional_state = {
 # Price history for technical indicators
 price_history = deque(maxlen=200)
 update_counter = 0
-UPDATE_INTERVAL = 10          # Recompute advanced signals every N ticks
+UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
@@ -213,7 +212,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis runner (called periodically)
+# Advanced analysis runner
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -256,7 +255,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     else:
         action = "HOLD"
 
-    # Update market_state (trading decisions)
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
@@ -268,7 +266,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
         "alert": "BUY" if action in ("BUY CE", "STRONG BUY CE") else "EXIT" if action == "EXIT" else "HOLD"
     })
 
-    # Update institutional_state (detailed analytics)
     institutional_state.update({
         "vwap": vwap,
         "ema_fast": ema_fast,
@@ -290,7 +287,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callbacks (original minimal plus advanced logic)
+# WebSocket callbacks
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, update_counter
@@ -308,10 +305,10 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            # Store price for technical indicators (using CE price)
+            # Store price for technical indicators
             price_history.append(ce)
 
-            # Update simple signal (spread based)
+            # Simple signal (spread based)
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -319,11 +316,10 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Every UPDATE_INTERVAL ticks, compute advanced indicators
+            # Periodically compute advanced indicators
             update_counter += 1
             if update_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 update_counter = 0
-                # Compute basic indicators for latest_data
                 rsi_val = calculate_rsi(list(price_history))
                 macd_val = calculate_macd(list(price_history))
                 pcr_val = get_nifty_pcr()
@@ -331,12 +327,10 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                # Run full institutional analysis (updates market_state, institutional_state)
+                # Run full institutional analysis
                 run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional: print tick debug (can be removed later)
-            # logger.info(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
     except Exception as e:
         logger.error(f"on_message error: {e}")
 
@@ -382,11 +376,10 @@ thread.start()
 logger.info("Background signal engine started")
 
 # --------------------------------------------------
-# Flask routes (original + extra fields for advanced data)
+# Flask routes
 # --------------------------------------------------
 @app.route("/")
 def home():
-    # Return all three datasets
     return jsonify({
         "status": "active",
         "data": latest_data,
@@ -400,10 +393,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Running full institutional signal engine (with MarketFeed)"
+    return "Running full institutional signal engine (no pandas)"
 
-# --------------------------------------------------
-# Main (for local testing)
-# --------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
