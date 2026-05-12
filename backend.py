@@ -5,8 +5,9 @@
 
 # backend.py - Institutional Nifty Options Signal Engine (Event Loop Safe)
 
+# backend.py - Nifty Options Signal Engine (Stable, using dhanhq==2.0.2)
+
 import os
-import asyncio
 import threading
 import time
 import logging
@@ -15,10 +16,10 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import DhanContext, MarketFeed
+from dhanhq import marketfeed
 
 # --------------------------------------------------
-# Logging
+# Logging & Flask
 # --------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Replace with your active Security IDs
+# Replace with your actual active Security IDs (CE = Call, PE = Put)
 # --------------------------------------------------
 CE_ID = "35000"   # <-- CHANGE
 PE_ID = "35001"   # <-- CHANGE
@@ -136,7 +137,7 @@ def calculate_atr(prices, period=14):
 def calculate_vwap(prices):
     if not prices:
         return 0
-    vol = [100] * len(prices)
+    vol = [100] * len(prices)   # dummy volume
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
     return round(pv / tv, 2) if tv else 0
@@ -213,7 +214,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis (synchronous, called periodically)
+# Advanced analysis (called periodically from on_message)
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -237,7 +238,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     smart_money = smart_money_analysis(spread, pcr)
     multi_tf = multi_tf_confirmation(rsi)
 
-    # Confidence scoring
     confidence = 0
     if ema_signal == "BULLISH": confidence += 15
     if rsi > 60: confidence += 15
@@ -288,7 +288,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callbacks (identical to minimal working version)
+# WebSocket callback (exactly as minimal working version, plus analytics)
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, tick_counter
@@ -306,10 +306,9 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            # Store for technical analysis
             price_history.append(ce)
 
-            # Simple signal (spread based)
+            # Simple signal
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -317,7 +316,7 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Periodic advanced calculations
+            # Periodic advanced analysis
             tick_counter += 1
             if tick_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 tick_counter = 0
@@ -331,8 +330,8 @@ def on_message(instance, tick):
                 run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional print for debugging
-            print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
+            # Optional debug print
+            # print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -346,32 +345,33 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Async WebSocket runner – using asyncio.run() in thread
+# Feed runner (synchronous, uses DhanFeed)
 # --------------------------------------------------
-def run_websocket():
-    async def websocket_loop():
-        instruments = [
-            (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
-            (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
-        ]
-        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        feed = MarketFeed(ctx, instruments, version="v2")
-        feed.on_connect = on_connect
-        feed.on_error = on_error
-        feed.on_close = on_close
-        feed.on_message = on_message
-
-        await feed.connect()
-        await feed.subscribe_instruments()
-        print("Subscribed, waiting for ticks...")
-        feed.run_forever()
-
-    asyncio.run(websocket_loop())
+def run_feed():
+    while True:
+        try:
+            print(f"Subscribing to CE={CE_ID}, PE={PE_ID} (using DhanFeed)")
+            feed = marketfeed.DhanFeed(
+                client_id=CLIENT_ID,
+                access_token=ACCESS_TOKEN,
+                instruments=[
+                    (marketfeed.NSE_FNO, str(CE_ID), marketfeed.Ticker),
+                    (marketfeed.NSE_FNO, str(PE_ID), marketfeed.Ticker)
+                ]
+            )
+            feed.on_connect = on_connect
+            feed.on_error = on_error
+            feed.on_close = on_close
+            feed.on_message = on_message
+            feed.run_forever()
+        except Exception as e:
+            print(f"Feed crashed: {e}, reconnecting in 10s")
+            time.sleep(10)
 
 # --------------------------------------------------
-# Start background thread (using asyncio.run, safe)
+# Start background thread
 # --------------------------------------------------
-thread = threading.Thread(target=run_websocket, daemon=True)
+thread = threading.Thread(target=run_feed, daemon=True)
 thread.start()
 print("Background signal engine started")
 
@@ -393,7 +393,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Running full institutional signal engine (event loop safe)"
+    return "Stable version with dhanhq==2.0.2 and full analytics"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
