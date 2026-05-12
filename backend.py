@@ -4,7 +4,7 @@
 #PE_ID = "35001"   # <-- CHANGE
 
 # backend.py - Nifty Options Signal Engine (Stable, using dhanhq==2.0.2)
-# Includes full institutional analytics – WebSocket part untouched.
+# Security IDs: CE=35000, PE=35001 (expiry 2026-05-26, strike 65400)
 
 import os
 import threading
@@ -36,10 +36,10 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# YOUR CORRECT SECURITY IDs (from diagnostic script)
+# YOUR SECURITY IDs (from diagnostic output)
 # --------------------------------------------------
-CE_ID = "35012"   # Call option, strike 22150, expiry 2026-05-26
-PE_ID = "35013"   # Put option, strike 22150, expiry 2026-05-26
+CE_ID = "35000"   # Call option, strike 65400, expiry 2026-05-26
+PE_ID = "35001"   # Put option, strike 65400, expiry 2026-05-26
 
 # --------------------------------------------------
 # Global state
@@ -287,7 +287,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callback (same as minimal working version, plus analytics)
+# WebSocket callback
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, tick_counter
@@ -307,7 +307,6 @@ def on_message(instance, tick):
 
             price_history.append(ce)
 
-            # Simple signal (spread based)
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -315,7 +314,6 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Periodic advanced analysis
             tick_counter += 1
             if tick_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 tick_counter = 0
@@ -392,7 +390,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Stable version with dhanhq==2.0.2 and correct IDs (35012, 35013)"
+    return "Stable version with dhanhq==2.0.2 and correct IDs (35000, 35001)"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
