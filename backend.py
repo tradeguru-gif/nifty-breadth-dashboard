@@ -26,7 +26,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 application = app
-
+#-----------------------------------------
+#Proxy QUOTAGUARD Endpoint
+#---------------------------------------
+@app.route('/debug/static-ip')
+def debug_my_ip():
+    import requests
+    proxy_url = os.getenv("QUOTAGUARDSTATIC_URL")
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
+    if r.status_code == 200:
+        return r.text   # this is your public static IP
+    return "Failed", 500
 # --------------------------------------------------
 # Environment variables
 # --------------------------------------------------
