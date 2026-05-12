@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Based on your minimal working WebSocket, extended with full analytics
+# Based on your minimal working WebSocket – no event loop changes
 
 import os
 import asyncio
@@ -14,7 +14,7 @@ from flask_cors import CORS
 from dhanhq import DhanContext, MarketFeed
 
 # --------------------------------------------------
-# Logging setup
+# Logging
 # --------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,13 +32,13 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Replace these with your actual active Security IDs
+# Replace with your active Security IDs
 # --------------------------------------------------
-CE_ID = "35000"   # <-- CHANGE to your CE Security ID
-PE_ID = "35001"   # <-- CHANGE to your PE Security ID
+CE_ID = "35000"   # <-- CHANGE
+PE_ID = "35001"   # <-- CHANGE
 
 # --------------------------------------------------
-# Global state for WordPress (unchanged structure)
+# Global state (original + advanced)
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -51,9 +51,6 @@ latest_data = {
     "timestamp": ""
 }
 
-# --------------------------------------------------
-# Advanced state containers (new)
-# --------------------------------------------------
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -85,16 +82,13 @@ institutional_state = {
     "institutional_confidence": 0
 }
 
-# --------------------------------------------------
-# Price history & control variables
-# --------------------------------------------------
-price_history = deque(maxlen=200)      # stores CE prices
+price_history = deque(maxlen=200)
 tick_counter = 0
-UPDATE_INTERVAL = 10                   # recompute advanced signals every N ticks
+UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (pure Python, no pandas)
+# Technical indicators (same as before)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -138,7 +132,7 @@ def calculate_atr(prices, period=14):
 def calculate_vwap(prices):
     if not prices:
         return 0
-    vol = [100] * len(prices)   # dummy volume (real volume not available)
+    vol = [100] * len(prices)
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
     return round(pv / tv, 2) if tv else 0
@@ -187,7 +181,7 @@ def multi_tf_confirmation(rsi):
     return "NO CONFIRMATION"
 
 # --------------------------------------------------
-# PCR fetching (cached)
+# PCR caching
 # --------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -215,7 +209,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis runner (called periodically)
+# Advanced analysis (called periodically)
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -239,7 +233,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     smart_money = smart_money_analysis(spread, pcr)
     multi_tf = multi_tf_confirmation(rsi)
 
-    # Confidence scoring
     confidence = 0
     if ema_signal == "BULLISH": confidence += 15
     if rsi > 60: confidence += 15
@@ -258,7 +251,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     else:
         action = "HOLD"
 
-    # Update market_state (trading decisions)
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
@@ -270,7 +262,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
         "alert": "BUY" if action in ("BUY CE", "STRONG BUY CE") else "EXIT" if action == "EXIT" else "HOLD"
     })
 
-    # Update institutional_state (detailed analytics)
     institutional_state.update({
         "vwap": vwap,
         "ema_fast": ema_fast,
@@ -292,7 +283,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callback (extended with analytics)
+# WebSocket callbacks (exactly as in the minimal version, but with analytics)
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, tick_counter
@@ -310,10 +301,10 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            # Store CE price for technical analysis
+            # Store price for indicators
             price_history.append(ce)
 
-            # Simple signal (spread based) – keeps WordPress happy
+            # Simple signal (keeps WordPress working)
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -321,7 +312,7 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Periodic advanced analysis
+            # Periodic advanced calculations
             tick_counter += 1
             if tick_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 tick_counter = 0
@@ -332,11 +323,10 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                # Run full institutional analysis
                 run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional: keep the print for debugging (can be removed later)
+            # Optional: print for debugging (can be removed later)
             print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
     except Exception as e:
         print(f"on_message error: {e}")
@@ -351,7 +341,7 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Async WebSocket runner (unchanged)
+# Async WebSocket runner (identical to minimal version)
 # --------------------------------------------------
 async def websocket_loop():
     instruments = [
@@ -376,7 +366,7 @@ def start_feed():
     loop.run_until_complete(websocket_loop())
 
 # --------------------------------------------------
-# Start background thread
+# Start background thread (exactly as minimal version)
 # --------------------------------------------------
 thread = threading.Thread(target=start_feed, daemon=True)
 thread.start()
