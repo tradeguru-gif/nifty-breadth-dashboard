@@ -39,8 +39,8 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 # --------------------------------------------------
 # Replace with your actual active Security IDs (CE = Call, PE = Put)
 # --------------------------------------------------
-CE_ID = "35000"   # <-- CHANGE
-PE_ID = "35001"   # <-- CHANGE
+CE_ID = "13"   # <-- CHANGE
+PE_ID = "13"   # <-- CHANGE
 
 # --------------------------------------------------
 # Global state (original + advanced)
