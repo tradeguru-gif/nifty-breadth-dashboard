@@ -1,5 +1,9 @@
 # backend.py - Institutional Nifty Options Signal Engine
 # Based on your minimal working WebSocket – no event loop changes
+#CE_ID = "35000"   # <-- CHANGE
+#PE_ID = "35001"   # <-- CHANGE
+
+# backend.py - Institutional Nifty Options Signal Engine (Event Loop Safe)
 
 import os
 import asyncio
@@ -88,7 +92,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (same as before)
+# Technical indicators (pure Python, no asyncio)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -209,7 +213,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis (called periodically)
+# Advanced analysis (synchronous, called periodically)
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -233,6 +237,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     smart_money = smart_money_analysis(spread, pcr)
     multi_tf = multi_tf_confirmation(rsi)
 
+    # Confidence scoring
     confidence = 0
     if ema_signal == "BULLISH": confidence += 15
     if rsi > 60: confidence += 15
@@ -283,7 +288,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callbacks (exactly as in the minimal version, but with analytics)
+# WebSocket callbacks (identical to minimal working version)
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, tick_counter
@@ -301,10 +306,10 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            # Store price for indicators
+            # Store for technical analysis
             price_history.append(ce)
 
-            # Simple signal (keeps WordPress working)
+            # Simple signal (spread based)
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -326,7 +331,7 @@ def on_message(instance, tick):
                 run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional: print for debugging (can be removed later)
+            # Optional print for debugging
             print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
     except Exception as e:
         print(f"on_message error: {e}")
@@ -341,39 +346,37 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Async WebSocket runner (identical to minimal version)
+# Async WebSocket runner – using asyncio.run() in thread
 # --------------------------------------------------
-async def websocket_loop():
-    instruments = [
-        (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
-        (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
-    ]
-    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-    feed = MarketFeed(ctx, instruments, version="v2")
-    feed.on_connect = on_connect
-    feed.on_error = on_error
-    feed.on_close = on_close
-    feed.on_message = on_message
+def run_websocket():
+    async def websocket_loop():
+        instruments = [
+            (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
+            (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
+        ]
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        feed = MarketFeed(ctx, instruments, version="v2")
+        feed.on_connect = on_connect
+        feed.on_error = on_error
+        feed.on_close = on_close
+        feed.on_message = on_message
 
-    await feed.connect()
-    await feed.subscribe_instruments()
-    print("Subscribed, waiting for ticks...")
-    feed.run_forever()
+        await feed.connect()
+        await feed.subscribe_instruments()
+        print("Subscribed, waiting for ticks...")
+        feed.run_forever()
 
-def start_feed():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(websocket_loop())
+    asyncio.run(websocket_loop())
 
 # --------------------------------------------------
-# Start background thread (exactly as minimal version)
+# Start background thread (using asyncio.run, safe)
 # --------------------------------------------------
-thread = threading.Thread(target=start_feed, daemon=True)
+thread = threading.Thread(target=run_websocket, daemon=True)
 thread.start()
 print("Background signal engine started")
 
 # --------------------------------------------------
-# Flask routes (extended with market and institutional data)
+# Flask routes
 # --------------------------------------------------
 @app.route("/")
 def home():
@@ -390,7 +393,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Running full institutional signal engine (no pandas)"
+    return "Running full institutional signal engine (event loop safe)"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
