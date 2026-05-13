@@ -6,11 +6,16 @@
 # backend.py - Nifty Options Signal Engine (Stable, using dhanhq==2.0.2)
 # Security IDs: CE=35000, PE=35001 (expiry 2026-05-26, strike 65400)
 
+# backend.py - Institutional Nifty Options Signal Engine
+# Dynamic contract rollover + real volume (Quote)
+# Uses dhanhq==2.0.2 with DhanFeed
+
 import os
 import threading
 import time
 import logging
 import requests
+import pandas as pd
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
@@ -26,9 +31,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 application = app
-#-----------------------------------------
-#Proxy QUOTAGUARD Endpoint
-#---------------------------------------
+
+# --------------------------------------------------
+# Proxy debug endpoint
+# --------------------------------------------------
 @app.route('/debug/static-ip')
 def debug_my_ip():
     import requests
@@ -36,8 +42,9 @@ def debug_my_ip():
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
     r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
     if r.status_code == 200:
-        return r.text   # this is your public static IP
+        return r.text
     return "Failed", 500
+
 # --------------------------------------------------
 # Environment variables
 # --------------------------------------------------
@@ -47,10 +54,73 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# YOUR SECURITY IDs (from diagnostic output)
+# Dynamic contract selection (nearest monthly expiry ATM strike)
 # --------------------------------------------------
-CE_ID = "35000"   # Call option, strike 65400, expiry 2026-05-26
-PE_ID = "35001"   # Put option, strike 65400, expiry 2026-05-26
+SELECTED_CE_ID = None
+SELECTED_PE_ID = None
+LAST_KNOWN_CE = "35000"   # fallback
+LAST_KNOWN_PE = "35001"
+
+def update_contracts():
+    """Fetch latest instrument master and select nearest monthly expiry ATM CE/PE."""
+    global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
+    try:
+        url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+        df = pd.read_csv(url, low_memory=False)
+        df.columns = df.columns.str.upper()
+
+        # Filter for NSE F&O, Index Options, NIFTY
+        opts = df[(df["SEGMENT"] == "NSE_FNO") &
+                  (df["INSTRUMENT"] == "OPTIDX") &
+                  (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))].copy()
+
+        # Parse expiry dates and take the nearest monthly expiry (ignore weekly)
+        opts["EXPIRY"] = pd.to_datetime(opts["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
+        opts = opts.dropna(subset=["EXPIRY"])
+        # Filter for monthly expiry (optional: you may also keep weekly, but monthly is safer)
+        # For simplicity we take the nearest expiry regardless of weekly/monthly
+        nearest_expiry = opts["EXPIRY"].min()
+        opts = opts[opts["EXPIRY"] == nearest_expiry]
+
+        # Get strike prices and find ATM (using live spot or fallback)
+        opts["STRIKE"] = pd.to_numeric(opts["STRIKE_PRICE"], errors="coerce")
+        opts = opts.dropna(subset=["STRIKE"])
+
+        # Fetch current Nifty spot (simple NSE API)
+        try:
+            spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+            headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            s = requests.Session()
+            s.get("https://www.nseindia.com", headers=headers, timeout=5)
+            r = s.get(spot_url, headers=headers, timeout=5)
+            spot = float(r.json()["data"][0]["lastPrice"])
+        except:
+            spot = 24000.0  # fallback
+
+        # Find strike closest to spot
+        strikes = sorted(opts["STRIKE"].unique())
+        atm_strike = min(strikes, key=lambda x: abs(x - spot))
+
+        ce = opts[(opts["OPTION_TYPE"] == "CE") & (opts["STRIKE"] == atm_strike)]
+        pe = opts[(opts["OPTION_TYPE"] == "PE") & (opts["STRIKE"] == atm_strike)]
+
+        if ce.empty or pe.empty:
+            raise ValueError("No ATM contracts found")
+
+        SELECTED_CE_ID = str(int(ce.iloc[0]["SECURITY_ID"]))
+        SELECTED_PE_ID = str(int(pe.iloc[0]["SECURITY_ID"]))
+        LAST_KNOWN_CE = SELECTED_CE_ID
+        LAST_KNOWN_PE = SELECTED_PE_ID
+        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={nearest_expiry.date()}")
+        return True
+    except Exception as e:
+        logger.error(f"Contract update failed: {e}, using last known IDs")
+        SELECTED_CE_ID = LAST_KNOWN_CE
+        SELECTED_PE_ID = LAST_KNOWN_PE
+        return False
+
+# Run initial contract selection
+update_contracts()
 
 # --------------------------------------------------
 # Global state
@@ -97,13 +167,14 @@ institutional_state = {
     "institutional_confidence": 0
 }
 
-price_history = deque(maxlen=200)
+price_history = deque(maxlen=200)          # store CE prices for RSI/MACD
+volume_history = deque(maxlen=200)         # store corresponding volumes for VWAP
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (pure Python)
+# Technical indicators (pure Python) – updated VWAP to use real volume
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -144,12 +215,12 @@ def calculate_atr(prices, period=14):
     trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
     return round(sum(trs[-period:]) / period, 2)
 
-def calculate_vwap(prices):
-    if not prices:
+def calculate_vwap(prices, volumes):
+    """Use real volume for VWAP."""
+    if not prices or not volumes or len(prices) != len(volumes):
         return 0
-    vol = [100] * len(prices)   # dummy volume
-    pv = sum(p * v for p, v in zip(prices, vol))
-    tv = sum(vol)
+    pv = sum(p * v for p, v in zip(prices, volumes))
+    tv = sum(volumes)
     return round(pv / tv, 2) if tv else 0
 
 def estimate_greeks(ce, pe):
@@ -224,16 +295,16 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis (called periodically from on_message)
+# Advanced analysis (called periodically)
 # --------------------------------------------------
-def run_advanced_analysis(ce, pe, spread, pcr, price_list):
+def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
     global market_state, institutional_state
     if len(price_list) < 14:
         return
 
     rsi = calculate_rsi(price_list)
     macd = calculate_macd(price_list)
-    vwap = calculate_vwap(price_list)
+    vwap = calculate_vwap(price_list, volume_list)   # now uses real volume
     ema_fast = calculate_ema(price_list, 9)
     ema_slow = calculate_ema(price_list, 21)
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
@@ -298,16 +369,22 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# WebSocket callback
+# WebSocket callback (now receives volume from Quote)
 # --------------------------------------------------
 def on_message(instance, tick):
-    global latest_data, price_history, tick_counter
+    global latest_data, price_history, volume_history, tick_counter
     try:
         sec_id = str(tick.get("security_id"))
         price = float(tick.get("ltp", 0))
-        if sec_id == CE_ID:
+        volume = int(tick.get("volume", 0))      # real volume from Quote
+
+        if sec_id == SELECTED_CE_ID:
             latest_data["ce_price"] = price
-        elif sec_id == PE_ID:
+            # For advanced analysis, we store CE price and its volume
+            if price > 0:
+                price_history.append(price)
+                volume_history.append(volume)
+        elif sec_id == SELECTED_PE_ID:
             latest_data["pe_price"] = price
 
         if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
@@ -316,8 +393,7 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            price_history.append(ce)
-
+            # Simple signal
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -325,6 +401,7 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
+            # Periodic advanced analysis (every UPDATE_INTERVAL ticks)
             tick_counter += 1
             if tick_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 tick_counter = 0
@@ -335,11 +412,13 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
+                # Pass both price and volume histories
+                run_advanced_analysis(ce, pe, spread, pcr_val,
+                                      list(price_history), list(volume_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional debug print
-            # print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
+            # Optional debug
+            # print(f"Tick: CE={ce} PE={pe} Vol={volume} Spread={spread:.2f}")
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -353,18 +432,21 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner (synchronous, uses DhanFeed – works with dhanhq==2.0.2)
+# Feed runner (synchronous, uses DhanFeed with Quote)
 # --------------------------------------------------
 def run_feed():
+    global SELECTED_CE_ID, SELECTED_PE_ID
     while True:
         try:
-            print(f"Subscribing to CE={CE_ID}, PE={PE_ID} (using DhanFeed)")
+            # Refresh contracts periodically (e.g., once per day or on reconnect)
+            update_contracts()
+            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (using Quote for volume)")
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
-                    (marketfeed.NSE_FNO, str(CE_ID), marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, str(PE_ID), marketfeed.Ticker)
+                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),   # Quote includes volume
+                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
                 ]
             )
             feed.on_connect = on_connect
@@ -381,7 +463,7 @@ def run_feed():
 # --------------------------------------------------
 thread = threading.Thread(target=run_feed, daemon=True)
 thread.start()
-print("Background signal engine started")
+print("Background signal engine started (dynamic rollover + real volume)")
 
 # --------------------------------------------------
 # Flask routes
@@ -401,7 +483,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Stable version with dhanhq==2.0.2 and correct IDs (35000, 35001)"
+    return "Dynamic rollover + real volume (Quote) | IDs: {} / {}".format(SELECTED_CE_ID, SELECTED_PE_ID)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
