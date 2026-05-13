@@ -132,17 +132,86 @@ def run_feed():
 # --------------------------------------------------
 # Initialization & Routes
 # --------------------------------------------------
+# --------------------------------------------------
+# WebSocket Handlers
+# --------------------------------------------------
+def on_message(instance, tick):
+    global tick_counter, latest_data
+    try:
+        # Dhan sends ticks as dictionaries
+        sid = str(tick.get("security_id"))
+        ltp = float(tick.get("ltp", 0))
+        
+        if sid == SELECTED_CE_ID:
+            latest_data["ce_price"] = ltp
+            price_history.append(ltp)
+        elif sid == SELECTED_PE_ID:
+            latest_data["pe_price"] = ltp
+
+        if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
+            latest_data["spread"] = round(latest_data["ce_price"] - latest_data["pe_price"], 2)
+            latest_data["timestamp"] = datetime.now().isoformat()
+    except Exception as e:
+        pass # Keep logs clean during high-frequency ticks
+
+# --------------------------------------------------
+# The Background Engine
+# --------------------------------------------------
+def run_feed():
+    """Logic to handle the WebSocket in a background thread"""
+    while True:
+        try:
+            # 1. Refresh contracts
+            update_contracts()
+            
+            # 2. Define what to watch
+            instruments = [
+                (marketfeed.NSE, SELECTED_CE_ID, marketfeed.TICKER),
+                (marketfeed.NSE, SELECTED_PE_ID, marketfeed.TICKER)
+            ]
+            
+            logger.info(f"Starting DhanFeed: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}")
+            
+            # 3. Use the correct DhanFeed signature for your library version
+            # If your version is newer, it might need on_message=on_message
+            feed = marketfeed.DhanFeed(
+                CLIENT_ID, 
+                ACCESS_TOKEN, 
+                instruments, 
+                on_message
+            )
+            feed.run_forever()
+            
+        except Exception as e:
+            logger.error(f"WebSocket Loop Error: {e}")
+            time.sleep(10) # Wait before retrying
+
+# --------------------------------------------------
+# Flask Start (Render Compatible)
+# --------------------------------------------------
+
+# Start the thread BEFORE the app runs
+# We use a daemon thread so it dies when the app stops
 if not os.environ.get("WERKZEUG_RUN_MAIN"):
-    threading.Thread(target=run_feed, daemon=True).start()
+    worker = threading.Thread(target=run_feed, daemon=True)
+    worker.start()
+    logger.info("🚀 Background Thread Spawned")
 
 @app.route("/")
 def home():
-    return jsonify({"status": "active", "data": latest_data})
+    return jsonify({
+        "status": "online",
+        "engine": "active",
+        "data": latest_data,
+        "contracts": {"CE": SELECTED_CE_ID, "PE": SELECTED_PE_ID}
+    })
 
 @app.route("/api/health")
 def health():
     return "OK", 200
 
+# DO NOT put threading logic inside this __main__ block 
+# because Gunicorn (Render's server) ignores this block.
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
