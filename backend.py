@@ -453,33 +453,23 @@ def run_feed():
         try:
             update_contracts()
             print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
-            
-            # CORRECTED INITIALIZATION
-            # We pass the callback function directly to the 'on_message' parameter
-            # If your version doesn't support 'on_connect', we remove it from the init.
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
                     (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
-                ],
-                on_message=on_message  # The main callback
+                ]
             )
-            
-            # If you want to keep other callbacks, check if your library version 
-            # supports setting them as attributes like this:
-            try:
-                feed.on_connect = on_connect
-                feed.on_error = on_error
-                feed.on_close = on_close
-            except AttributeError:
-                logger.warning("Optional callbacks (on_connect/error) not supported by this library version.")
-
+            feed.on_connect = on_connect
+            feed.on_error = on_error
+            feed.on_close = on_close
+            feed.on_message = on_message
             feed.run_forever()
         except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in 10s")
+            print(f"Feed crashed: {e}, reconnecting in 10s")
             time.sleep(10)
+
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
