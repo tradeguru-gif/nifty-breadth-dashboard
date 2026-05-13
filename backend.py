@@ -447,29 +447,31 @@ def on_close(instance):
 # Feed runner with explicit event loop
 # --------------------------------------------------
 def run_feed():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Remove manual event loop management as DhanFeed handles it
     while True:
         try:
             update_contracts()
-            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
+            logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
+            
+            # Initialize with all callbacks inside the constructor
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
                     (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
-                ]
+                ],
+                on_connect=on_connect,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
             )
-            feed.on_connect = on_connect
-            feed.on_error = on_error
-            feed.on_close = on_close
-            feed.on_message = on_message
+            
             feed.run_forever()
+            
         except Exception as e:
-            print(f"Feed crashed: {e}, reconnecting in 10s")
+            logger.error(f"Feed crashed: {e}. Reconnecting in 10s...")
             time.sleep(10)
-
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
