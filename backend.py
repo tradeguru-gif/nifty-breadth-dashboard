@@ -406,6 +406,11 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
 # --------------------------------------------------
 # WebSocket callback
 # --------------------------------------------------
+# ... (Previous code: calculate_rsi, analyze_oi, run_advanced_analysis, etc.)
+
+# --------------------------------------------------
+# WebSocket callbacks
+# --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, volume_history, tick_counter
     try:
@@ -444,135 +449,78 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                run_advanced_analysis(ce, pe, spread, pcr_val,
-                                      list(price_history), list(volume_history))
+                run_advanced_analysis(ce, pe, spread, pcr_val, 
+                                     list(price_history), list(volume_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
     except Exception as e:
-        print(f"on_message error: {e}")
+        logger.error(f"on_message error: {e}")
 
 def on_connect(instance):
-    print("✅ WebSocket connected and authorized")
-
-def on_error(instance, error):
-    print(f"❌ WebSocket error: {error}")
-
-def on_close(instance):
-    print("🔌 WebSocket closed, reconnecting...")
+    logger.info("✅ WebSocket connected and authorized")
 
 # --------------------------------------------------
-# Feed runner with explicit event loop
+# THE MISSING FUNCTION: run_feed
 # --------------------------------------------------
 # --------------------------------------------------
-# Feed runner – without manual event loop (let DhanFeed handle it)
+# Optimized Feed runner
 # --------------------------------------------------
-def update_contracts():
-    global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
-    try:
-        # 1. Fetch the latest Scrip Master
-        url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        
-        lines = response.text.splitlines()
-        reader = csv.DictReader(lines)
-        
-        opts = []
-        for row in reader:
-            # Filter for Derivatives and Index Options
-            if row.get("SEGMENT") != "D" or row.get("INSTRUMENT") != "OPTIDX":
-                continue
-            
-            # Target NIFTY 50 only (Exclude BANKNIFTY, FINNIFTY, MIDCPNIFTY)
-            symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
-            if "NIFTY" not in symbol or any(x in symbol for x in ["BANK", "FIN", "MIDCP", "IT"]):
-                continue
-
-            # Parse Expiry Date
-            expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
-            if not expiry_str: continue
-            try:
-                try:
-                    expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
-                except:
-                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
-            except: continue
-
-            # Filter for current or future expiries only
-            if expiry.date() < datetime.now().date():
-                continue
-
-            # Parse Strike
-            try:
-                strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
-            except: continue
-
-            opts.append({
-                "expiry": expiry,
-                "strike": strike,
-                "option_type": row.get("OPTION_TYPE", ""),
-                "security_id": row.get("SECURITY_ID", "")
-            })
-
-        if not opts:
-            raise ValueError("No matching NIFTY Option contracts found.")
-
-        # 2. Identify the Nearest (Current Weekly/Monthly) Expiry
-        min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
-        near_opts = [o for o in opts if o["expiry"] == min_expiry]
-
-        # 3. GET LIVE ATM SPOT PRICE
-        # We try NSE first, then a backup financial API to ensure ATM is accurate
-        spot = 0.0
+def run_feed():
+    """Main loop to maintain WebSocket connection and handle dynamic rollover"""
+    last_contract_update = 0
+    
+    while True:
         try:
-            # Try primary NSE API
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            session = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = session.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", headers=headers, timeout=5)
-            spot = float(r.json()["data"][0]["lastPrice"])
-            logger.info(f"Live Nifty Spot from NSE: {spot}")
+            now = time.time()
+            # 1. Update contracts every hour or if IDs are still placeholders
+            if now - last_contract_update > 3600 or SELECTED_CE_ID == "35000":
+                update_contracts()
+                last_contract_update = now
+
+            # 2. Setup subscription list - USE Quote mode for Volume data
+            instruments = [
+                (marketfeed.NSE, SELECTED_CE_ID, marketfeed.Quote),
+                (marketfeed.NSE, SELECTED_PE_ID, marketfeed.Quote)
+            ]
+
+            logger.info(f"Connecting WebSocket: CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
+            
+            # 3. Start the Feed
+            feed = marketfeed.DhanFeed(
+                CLIENT_ID, 
+                ACCESS_TOKEN, 
+                instruments, 
+                on_message, 
+                on_connect=on_connect
+            )
+            
+            # This blocks the thread and handles data
+            feed.run_forever()
+            
         except Exception as e:
-            # Backup: If NSE blocks Render, we use the last known price from our data or a static fallback
-            logger.warning(f"NSE Blocked: Using fallback for ATM calculation. Error: {e}")
-            # If your websocket already has a price, you could use: spot = latest_data.get('nifty_spot', 24000.0)
-            spot = 24300.0 # Standard fallback for current market regime
+            logger.error(f"Feed crashed: {e}, reconnecting in 10s...")
+            time.sleep(10)
 
-        # 4. Automatic ATM Selection
-        # Calculate which strike is closest to the live spot
-        unique_strikes = sorted(set(o["strike"] for o in near_opts))
-        atm_strike = min(unique_strikes, key=lambda x: abs(x - spot))
-
-        # 5. Extract specific IDs for CE and PE at that ATM Strike
-        ce_id = None
-        pe_id = None
-        for o in near_opts:
-            if o["strike"] == atm_strike:
-                if o["option_type"] == "CE":
-                    ce_id = o["security_id"]
-                elif o["option_type"] == "PE":
-                    pe_id = o["security_id"]
-
-        if ce_id and pe_id:
-            SELECTED_CE_ID = str(int(float(ce_id)))
-            SELECTED_PE_ID = str(int(float(pe_id)))
-            LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
-            logger.info(f"🚀 AUTO-SELECTED ATM: {atm_strike} | CE={SELECTED_CE_ID} | PE={SELECTED_PE_ID} | Expiry={min_expiry.date()}")
-            return True
-        else:
-            raise ValueError(f"Could not find both CE and PE for strike {atm_strike}")
-        
-    except Exception as e:
-        logger.error(f"❌ Automatic Contract selection failed: {e}")
-        # Revert to last known good IDs to prevent system crash
-        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
-        return False
+# --------------------------------------------------
+# CLEAN Initialization
+# --------------------------------------------------
+# 1. Only start the thread if NOT in the Flask reloader
+if not os.environ.get("WERKZEUG_RUN_MAIN"):
+    # Initial contract fetch
+    update_contracts()
+    # Start the background engine
+    daemon_thread = threading.Thread(target=run_feed, daemon=True)
+    daemon_thread.start()
+    logger.info("🚀 Background Signal Engine Started Successfully")
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
+# First update to ensure IDs are ready before thread starts
+update_contracts()
+
 thread = threading.Thread(target=run_feed, daemon=True)
 thread.start()
-print("Background signal engine started (dynamic rollover + real volume)")
+logger.info("Background signal engine started (dynamic rollover active)")
 
 # --------------------------------------------------
 # Flask routes
@@ -583,7 +531,8 @@ def home():
         "status": "active",
         "data": latest_data,
         "market": market_state,
-        "institutional": institutional_state
+        "institutional": institutional_state,
+        "contracts": {"CE": SELECTED_CE_ID, "PE": SELECTED_PE_ID}
     })
 
 @app.route("/api/health")
@@ -595,4 +544,5 @@ def debug_version():
     return f"Stable version | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
