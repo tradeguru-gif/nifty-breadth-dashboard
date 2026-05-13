@@ -452,29 +452,31 @@ def run_feed():
             update_contracts()
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
             
-            # 1. Initialize with ONLY the essentials
+            # 1. Initialize with ONLY the 3 essential credentials/data points
+            # We remove on_message from here because your log says it's "unexpected"
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
                     (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
-                ],
-                on_message=on_message # This is the only one guaranteed to work in __init__
+                ]
             )
             
-            # 2. Try to attach other handlers safely
-            # If the library version doesn't support these, it will just skip them
-            # instead of crashing the whole thread.
-            for attr, func in [("on_connect", on_connect), 
-                              ("on_error", on_error), 
-                              ("on_close", on_close)]:
-                try:
-                    setattr(feed, attr, func)
-                except Exception:
-                    logger.warning(f"Could not set {attr} callback - skipping.")
+            # 2. Attach callbacks manually AFTER initialization
+            # This is the standard way for the latest version of the library
+            feed.on_message = on_message
+            
+            # 3. Safely try to attach the others (won't crash if they fail)
+            try:
+                feed.on_connect = on_connect
+                feed.on_error = on_error
+                feed.on_close = on_close
+            except Exception:
+                pass 
 
-            # 3. Start the feed
+            # 4. Start the engine
+            logger.info("Starting DhanFeed loop...")
             feed.run_forever()
             
         except Exception as e:
