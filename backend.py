@@ -1,3 +1,5 @@
+# backend.py - Nifty Options Signal Engine (Fixed contract selection)
+
 import os
 import threading
 import time
@@ -446,44 +448,30 @@ def on_close(instance):
 # --------------------------------------------------
 # Feed runner with explicit event loop
 # --------------------------------------------------
-from dhanhq import MarketFeed # Make sure this import is at the top
-
 def run_feed():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     while True:
         try:
             update_contracts()
-            
-            # Instruments for v2 must be a list of tuples: (exchange, security_id, subscription_type)
-            # MarketFeed.Ticker provides basic LTP which is more stable for breadths
-            instruments = [
-                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
-                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
-            ]
-
-            logger.info(f"Connecting to MarketFeed V2 for {SELECTED_CE_ID}, {SELECTED_PE_ID}")
-
-            # Use MarketFeed instead of DhanFeed for v2 compatibility
-            feed = MarketFeed(
+            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
+            feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
-                instruments=instruments
+                instruments=[
+                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
+                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
+                ]
             )
-            
-            # Manual property assignment
             feed.on_connect = on_connect
-            feed.on_message = on_message
             feed.on_error = on_error
             feed.on_close = on_close
-
-            logger.info("MarketFeed V2 initialized. Starting...")
+            feed.on_message = on_message
             feed.run_forever()
-            
         except Exception as e:
-            logger.error(f"Feed crashed: {e}. Reconnecting in 10s...")
+            print(f"Feed crashed: {e}, reconnecting in 10s")
             time.sleep(10)
+
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
