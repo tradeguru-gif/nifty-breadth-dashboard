@@ -450,12 +450,15 @@ def on_close(instance):
 # Feed runner – using modern MarketFeed (no manual event loop)
 # --------------------------------------------------
 def run_feed():
+    # Create DhanContext once and reuse it
+    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    reconnect_delay = 5  # start with 5 seconds
+
     while True:
         try:
-            # Refresh contracts on every reconnect (optional, but good)
-            update_contracts()
+            # Optional: refresh contracts every few hours (e.g., once per day)
+            # For now, we rely on the initial selection – it will work for days.
             logger.info(f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
-            ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
             instruments = [
                 (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
@@ -467,9 +470,10 @@ def run_feed():
             feed.on_message = on_message
             feed.run_forever()
         except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in 10s")
-            time.sleep(10)
-
+            logger.error(f"Feed crashed: {e}, reconnecting in {reconnect_delay}s")
+            time.sleep(reconnect_delay)
+            # Exponential backoff, max 5 minutes (300 seconds)
+            reconnect_delay = min(reconnect_delay * 2, 300)
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
