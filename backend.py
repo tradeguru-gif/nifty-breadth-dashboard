@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (No pandas, event loop fixed)
+# backend.py - Nifty Options Signal Engine (Fixed contract selection)
 
 import os
 import threading
@@ -6,6 +6,7 @@ import time
 import logging
 import requests
 import csv
+import asyncio
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
@@ -43,19 +44,16 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# --------------------------------------------------
-# Static fallback IDs (will be replaced dynamically if possible)
-# --------------------------------------------------
+# Static fallback IDs (will be replaced if dynamic works)
 LAST_KNOWN_CE = "35000"
 LAST_KNOWN_PE = "35001"
 SELECTED_CE_ID = LAST_KNOWN_CE
 SELECTED_PE_ID = LAST_KNOWN_PE
 
 # --------------------------------------------------
-# Dynamic contract selection (pure Python, no pandas)
+# Dynamic contract selection (flexible filtering)
 # --------------------------------------------------
 def update_contracts():
-    """Fetch latest instrument master CSV and select nearest monthly expiry ATM CE/PE."""
     global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
@@ -68,12 +66,12 @@ def update_contracts():
         if not fieldnames:
             raise ValueError("Empty CSV")
 
-        # Debug: print column names once
-        if not hasattr(update_contracts, "logged"):
+        # Log columns once
+        if not hasattr(update_contracts, "logged_columns"):
             logger.info(f"CSV columns: {fieldnames}")
-            update_contracts.logged = True
+            update_contracts.logged_columns = True
 
-        # Identify expiry and symbol columns (same as before)
+        # Identify expiry column (try common names)
         expiry_col = None
         for col in ['SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE', 'EXPIRY_DATE']:
             if col in fieldnames:
@@ -90,19 +88,23 @@ def update_contracts():
         if not symbol_col:
             raise KeyError("No symbol column found")
 
-        # Collect all NIFTY OPTIDX rows
         opts = []
-        sample_count = 0
+        sample_row_logged = False
         for row in reader:
-            segment = row.get("SEGMENT", "").upper().strip()
-            instrument = row.get("INSTRUMENT", "").upper().strip()
-            symbol = row.get(symbol_col, "").upper().strip()
-            if segment != "NSE_FNO":
+            segment = row.get("SEGMENT", "")
+            instrument = row.get("INSTRUMENT", "")
+            symbol = row.get(symbol_col, "")
+
+            # Flexible matching: NIFTY in symbol, and segment/instrument contain OPT or FNO
+            if "NIFTY" not in symbol.upper():
                 continue
-            if instrument != "OPTIDX":
+            if not ("OPT" in instrument.upper() or "OPT" in segment.upper() or "FNO" in segment.upper()):
                 continue
-            if "NIFTY" not in symbol:
-                continue
+
+            # Log one sample row for debugging
+            if not sample_row_logged:
+                logger.info(f"Sample row: SEGMENT={segment}, INSTRUMENT={instrument}, SYMBOL={symbol}, OPTION_TYPE={row.get('OPTION_TYPE')}, STRIKE={row.get('STRIKE_PRICE')}, EXPIRY={row.get(expiry_col)}")
+                sample_row_logged = True
 
             expiry_str = row.get(expiry_col, "")
             if not expiry_str:
@@ -126,29 +128,37 @@ def update_contracts():
                 "option_type": row.get("OPTION_TYPE", "").upper().strip(),
                 "security_id": row.get("SECURITY_ID", "")
             })
-            sample_count += 1
-            if sample_count <= 5:
-                logger.info(f"Sample row: expiry={expiry_str}, strike={strike}, type={row.get('OPTION_TYPE')}, id={row.get('SECURITY_ID')}")
 
         if not opts:
             raise ValueError("No NIFTY OPTIDX rows found")
 
-        # Rest of the logic unchanged...
+        # Find nearest expiry
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Fetch spot (fallback as before)
+        # Fetch spot – but NSE may block Render; fallback to last known or default
+        spot = None
         try:
             spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
             s = requests.Session()
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
             r = s.get(spot_url, headers=headers, timeout=5)
-            spot = float(r.json()["data"][0]["lastPrice"])
+            if r.status_code == 200:
+                spot = float(r.json()["data"][0]["lastPrice"])
         except Exception as e:
-            logger.warning(f"Spot fetch failed: {e}, using fallback 24000")
-            spot = 24000.0
+            logger.warning(f"Spot fetch failed: {e}")
 
+        if spot is None:
+            # Try to use a free API (optional) – otherwise fallback
+            try:
+                r = requests.get("https://api.niftyindices.com/...", timeout=5)  # replace with a working endpoint if needed
+            except:
+                pass
+            spot = 24000.0  # fallback
+            logger.warning(f"Using fallback spot: {spot}")
+
+        # Find strike closest to spot
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
@@ -167,7 +177,7 @@ def update_contracts():
         SELECTED_PE_ID = str(int(pe_id))
         LAST_KNOWN_CE = SELECTED_CE_ID
         LAST_KNOWN_PE = SELECTED_PE_ID
-        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={min_expiry.date()}")
+        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={min_expiry.date()} spot={spot:.2f}")
         return True
     except Exception as e:
         logger.error(f"Contract update failed: {e}, using last known IDs")
@@ -227,7 +237,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (same as before)
+# Technical indicators (pure Python)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -421,7 +431,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
     })
 
 # --------------------------------------------------
-# WebSocket callback (real volume from Quote)
+# WebSocket callback
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, volume_history, tick_counter
@@ -478,17 +488,13 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner – with explicit event loop
+# Feed runner with explicit event loop
 # --------------------------------------------------
 def run_feed():
-    # Create and set an event loop for this thread
-    import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
     while True:
         try:
-            # Refresh contracts periodically
             update_contracts()
             print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
             feed = marketfeed.DhanFeed(
