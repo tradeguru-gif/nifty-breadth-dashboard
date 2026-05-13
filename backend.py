@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Fixed contract selection)
+# backend.py - Nifty Options Signal Engine (Final, stable contract selection)
 
 import os
 import threading
@@ -44,57 +44,60 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# Static fallback IDs (will be replaced if dynamic works)
+# Start with fallback IDs (will be replaced when dynamic works)
 LAST_KNOWN_CE = "35000"
 LAST_KNOWN_PE = "35001"
 SELECTED_CE_ID = LAST_KNOWN_CE
 SELECTED_PE_ID = LAST_KNOWN_PE
 
 # --------------------------------------------------
-# Dynamic contract selection (flexible filtering)
+# Dynamic contract selection – robust version
 # --------------------------------------------------
 def update_contracts():
     global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
         
+        # Parse CSV fresh each time
         lines = response.text.splitlines()
         reader = csv.DictReader(lines)
         
         opts = []
         for row in reader:
-            # 1. Use 'D' for Derivatives (FNO)
+            # Segment 'D' for Derivatives (F&O)
             if row.get("SEGMENT") != "D":
                 continue
-            
-            # 2. Match OPTIDX
+            # Instrument must be OPTIDX (Index Options)
             if row.get("INSTRUMENT") != "OPTIDX":
                 continue
-            
-            # 3. Ensure it is NIFTY but NOT BANKNIFTY or FINNIFTY
+            # Symbol must contain NIFTY but not BANKNIFTY or FINNIFTY
             symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
-            if "NIFTY" not in symbol or "BANK" in symbol or "FIN" in symbol:
+            if "NIFTY" not in symbol:
+                continue
+            if "BANK" in symbol or "FIN" in symbol:
                 continue
 
-            # 4. Extract Expiry
+            # Expiry date – handle both YYYY-MM-DD and DD-MMM-YYYY
             expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
             if not expiry_str:
                 continue
             try:
-                # Dhan date format is usually '2026-06-30' or '30-Jun-2026'
-                # Let's try both common formats
-                try:
-                    expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
-                except:
-                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+                # Try ISO format first (YYYY-MM-DD)
+                expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
             except:
-                continue
+                try:
+                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+                except:
+                    continue
 
-            # 5. Extract Strike
+            # Strike price
+            strike_str = row.get("STRIKE_PRICE") or row.get("STRIKE")
+            if not strike_str:
+                continue
             try:
-                strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
+                strike = float(strike_str)
             except:
                 continue
 
@@ -106,48 +109,60 @@ def update_contracts():
             })
 
         if not opts:
-            raise ValueError("No NIFTY rows matched filters (Segment 'D', Inst 'OPTIDX')")
+            logger.error("No NIFTY OPTIDX rows found after filtering")
+            return False
 
-        # --- Rest of logic remains the same ---
-        # Find nearest expiry
+        # Find nearest expiry (minimum date)
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Fetch Spot (Using fallback 24000 if NSE blocks Render)
-        spot = 24000.0 
+        # Fetch spot (fallback to 24000 if NSE blocks)
+        spot = 24000.0
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             s = requests.Session()
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
             r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", headers=headers, timeout=5)
-            spot = float(r.json()["data"][0]["lastPrice"])
-        except:
-            logger.warning("NSE Spot fetch blocked (common on Render), using 24000.0")
+            if r.status_code == 200:
+                spot = float(r.json()["data"][0]["lastPrice"])
+        except Exception as e:
+            logger.warning(f"NSE spot fetch failed (common on Render): {e}, using fallback 24000")
 
         # Find ATM strike
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        ce_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "CE"), None)
-        pe_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "PE"), None)
+        ce_id = None
+        pe_id = None
+        for o in near_opts:
+            if o["strike"] == atm_strike:
+                if o["option_type"] == "CE":
+                    ce_id = o["security_id"]
+                elif o["option_type"] == "PE":
+                    pe_id = o["security_id"]
+        if not ce_id or not pe_id:
+            logger.error(f"Missing CE/PE for strike {atm_strike}")
+            return False
 
-        if ce_id and pe_id:
-            SELECTED_CE_ID = str(int(float(ce_id)))
-            SELECTED_PE_ID = str(int(float(pe_id)))
-            LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
-            logger.info(f"✅ Success! CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} at Strike {atm_strike}")
-            return True
-        
+        # Convert to string (they may be integers)
+        new_ce = str(int(float(ce_id)))
+        new_pe = str(int(float(pe_id)))
+        SELECTED_CE_ID = new_ce
+        SELECTED_PE_ID = new_pe
+        LAST_KNOWN_CE = new_ce
+        LAST_KNOWN_PE = new_pe
+        logger.info(f"✅ Dynamic contract update SUCCESS: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} Strike={atm_strike} Expiry={min_expiry.date()}")
+        return True
     except Exception as e:
-        logger.error(f"Contract update failed: {e}")
-        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
+        logger.error(f"Contract update failed: {e}. Keeping last known IDs: CE={LAST_KNOWN_CE} PE={LAST_KNOWN_PE}")
+        # DO NOT overwrite SELECTED_* with fallback – keep what we have
         return False
 
-# Run initial contract update
+# Run initial contract update (will set IDs if successful)
 update_contracts()
 
 # --------------------------------------------------
-# Global state (same as before)
+# Global state (unchanged)
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -453,8 +468,9 @@ def run_feed():
     asyncio.set_event_loop(loop)
     while True:
         try:
+            # Try to update contracts (may succeed or keep existing)
             update_contracts()
-            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
+            logger.info(f"Current subscription IDs: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}")
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
@@ -497,7 +513,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return f"Stable version (no pandas) | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
+    return f"Stable version | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
