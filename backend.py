@@ -59,130 +59,88 @@ def update_contracts():
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
         response = requests.get(url, timeout=15)
         response.raise_for_status()
-        content = response.text
-        lines = content.splitlines()
+        
+        lines = response.text.splitlines()
         reader = csv.DictReader(lines)
-        fieldnames = reader.fieldnames
-        if not fieldnames:
-            raise ValueError("Empty CSV")
-
-        # Log columns once
-        if not hasattr(update_contracts, "logged_columns"):
-            logger.info(f"CSV columns: {fieldnames}")
-            update_contracts.logged_columns = True
-
-        # Identify expiry column (try common names)
-        expiry_col = None
-        for col in ['SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE', 'EXPIRY_DATE']:
-            if col in fieldnames:
-                expiry_col = col
-                break
-        if not expiry_col:
-            raise KeyError("No expiry column found")
-
-        symbol_col = None
-        for col in ['SEM_TRADING_SYMBOL', 'SYMBOL_NAME', 'DISPLAY_NAME']:
-            if col in fieldnames:
-                symbol_col = col
-                break
-        if not symbol_col:
-            raise KeyError("No symbol column found")
-
+        
         opts = []
-        sample_row_logged = False
         for row in reader:
-            segment = row.get("SEGMENT", "")
-            instrument = row.get("INSTRUMENT", "")
-            symbol = row.get(symbol_col, "")
-
-            # Flexible matching: NIFTY in symbol, and segment/instrument contain OPT or FNO
-            if "NIFTY" not in symbol.upper():
+            # 1. Use 'D' for Derivatives (FNO)
+            if row.get("SEGMENT") != "D":
                 continue
-            if not ("OPT" in instrument.upper() or "OPT" in segment.upper() or "FNO" in segment.upper()):
+            
+            # 2. Match OPTIDX
+            if row.get("INSTRUMENT") != "OPTIDX":
+                continue
+            
+            # 3. Ensure it is NIFTY but NOT BANKNIFTY or FINNIFTY
+            symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
+            if "NIFTY" not in symbol or "BANK" in symbol or "FIN" in symbol:
                 continue
 
-            # Log one sample row for debugging
-            if not sample_row_logged:
-                logger.info(f"Sample row: SEGMENT={segment}, INSTRUMENT={instrument}, SYMBOL={symbol}, OPTION_TYPE={row.get('OPTION_TYPE')}, STRIKE={row.get('STRIKE_PRICE')}, EXPIRY={row.get(expiry_col)}")
-                sample_row_logged = True
-
-            expiry_str = row.get(expiry_col, "")
+            # 4. Extract Expiry
+            expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
             if not expiry_str:
                 continue
             try:
-                expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+                # Dhan date format is usually '2026-06-30' or '30-Jun-2026'
+                # Let's try both common formats
+                try:
+                    expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
+                except:
+                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
             except:
                 continue
 
-            strike_str = row.get("STRIKE_PRICE", "")
-            if not strike_str:
-                continue
+            # 5. Extract Strike
             try:
-                strike = float(strike_str)
+                strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
             except:
                 continue
 
             opts.append({
                 "expiry": expiry,
                 "strike": strike,
-                "option_type": row.get("OPTION_TYPE", "").upper().strip(),
+                "option_type": row.get("OPTION_TYPE", ""),
                 "security_id": row.get("SECURITY_ID", "")
             })
 
         if not opts:
-            raise ValueError("No NIFTY OPTIDX rows found")
+            raise ValueError("No NIFTY rows matched filters (Segment 'D', Inst 'OPTIDX')")
 
+        # --- Rest of logic remains the same ---
         # Find nearest expiry
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Fetch spot – but NSE may block Render; fallback to last known or default
-        spot = None
+        # Fetch Spot (Using fallback 24000 if NSE blocks Render)
+        spot = 24000.0 
         try:
-            spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
-            headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            headers = {"User-Agent": "Mozilla/5.0"}
             s = requests.Session()
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = s.get(spot_url, headers=headers, timeout=5)
-            if r.status_code == 200:
-                spot = float(r.json()["data"][0]["lastPrice"])
-        except Exception as e:
-            logger.warning(f"Spot fetch failed: {e}")
+            r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", headers=headers, timeout=5)
+            spot = float(r.json()["data"][0]["lastPrice"])
+        except:
+            logger.warning("NSE Spot fetch blocked (common on Render), using 24000.0")
 
-        if spot is None:
-            # Try to use a free API (optional) – otherwise fallback
-            try:
-                r = requests.get("https://api.niftyindices.com/...", timeout=5)  # replace with a working endpoint if needed
-            except:
-                pass
-            spot = 24000.0  # fallback
-            logger.warning(f"Using fallback spot: {spot}")
-
-        # Find strike closest to spot
+        # Find ATM strike
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        ce_id = None
-        pe_id = None
-        for o in near_opts:
-            if o["strike"] == atm_strike:
-                if o["option_type"] == "CE":
-                    ce_id = o["security_id"]
-                elif o["option_type"] == "PE":
-                    pe_id = o["security_id"]
-        if not ce_id or not pe_id:
-            raise ValueError(f"Missing CE/PE for strike {atm_strike}")
+        ce_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "CE"), None)
+        pe_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "PE"), None)
 
-        SELECTED_CE_ID = str(int(ce_id))
-        SELECTED_PE_ID = str(int(pe_id))
-        LAST_KNOWN_CE = SELECTED_CE_ID
-        LAST_KNOWN_PE = SELECTED_PE_ID
-        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={min_expiry.date()} spot={spot:.2f}")
-        return True
+        if ce_id and pe_id:
+            SELECTED_CE_ID = str(int(float(ce_id)))
+            SELECTED_PE_ID = str(int(float(pe_id)))
+            LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
+            logger.info(f"✅ Success! CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} at Strike {atm_strike}")
+            return True
+        
     except Exception as e:
-        logger.error(f"Contract update failed: {e}, using last known IDs")
-        SELECTED_CE_ID = LAST_KNOWN_CE
-        SELECTED_PE_ID = LAST_KNOWN_PE
+        logger.error(f"Contract update failed: {e}")
+        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
         return False
 
 # Run initial contract update
