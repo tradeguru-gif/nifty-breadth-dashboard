@@ -69,24 +69,53 @@ def update_contracts():
         df = pd.read_csv(url, low_memory=False)
         df.columns = df.columns.str.upper()
 
+        # Debug: print column names (will appear in Render logs once)
+        if not hasattr(update_contracts, "logged_columns"):
+            logger.info(f"CSV columns: {list(df.columns)}")
+            update_contracts.logged_columns = True
+
+        # Identify expiry column (try common names)
+        expiry_col = None
+        for col in ['SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE', 'EXPIRY_DATE']:
+            if col in df.columns:
+                expiry_col = col
+                break
+        if not expiry_col:
+            raise KeyError("No expiry column found")
+
+        # Identify symbol column
+        symbol_col = None
+        for col in ['SEM_TRADING_SYMBOL', 'SYMBOL_NAME', 'DISPLAY_NAME']:
+            if col in df.columns:
+                symbol_col = col
+                break
+        if not symbol_col:
+            raise KeyError("No symbol column found")
+
         # Filter for NSE F&O, Index Options, NIFTY
         opts = df[(df["SEGMENT"] == "NSE_FNO") &
                   (df["INSTRUMENT"] == "OPTIDX") &
-                  (df["SYMBOL_NAME"].str.contains("NIFTY", case=False, na=False))].copy()
+                  (df[symbol_col].str.contains("NIFTY", case=False, na=False))].copy()
 
-        # Parse expiry dates and take the nearest monthly expiry (ignore weekly)
-        opts["EXPIRY"] = pd.to_datetime(opts["SM_EXPIRY_DATE"], format="%d-%b-%Y", errors="coerce")
+        if opts.empty:
+            raise ValueError("No NIFTY OPTIDX found")
+
+        # Parse expiry dates
+        opts["EXPIRY"] = pd.to_datetime(opts[expiry_col], format="%d-%b-%Y", errors="coerce")
         opts = opts.dropna(subset=["EXPIRY"])
-        # Filter for monthly expiry (optional: you may also keep weekly, but monthly is safer)
-        # For simplicity we take the nearest expiry regardless of weekly/monthly
+        if opts.empty:
+            raise ValueError("No valid expiry dates")
+
         nearest_expiry = opts["EXPIRY"].min()
         opts = opts[opts["EXPIRY"] == nearest_expiry]
 
-        # Get strike prices and find ATM (using live spot or fallback)
+        # Get strike prices and find ATM
         opts["STRIKE"] = pd.to_numeric(opts["STRIKE_PRICE"], errors="coerce")
         opts = opts.dropna(subset=["STRIKE"])
+        if opts.empty:
+            raise ValueError("No valid strikes")
 
-        # Fetch current Nifty spot (simple NSE API)
+        # Fetch current Nifty spot (fallback if fails)
         try:
             spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
@@ -94,8 +123,9 @@ def update_contracts():
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
             r = s.get(spot_url, headers=headers, timeout=5)
             spot = float(r.json()["data"][0]["lastPrice"])
-        except:
-            spot = 24000.0  # fallback
+        except Exception as e:
+            logger.warning(f"Spot fetch failed: {e}, using fallback 24000")
+            spot = 24000.0
 
         # Find strike closest to spot
         strikes = sorted(opts["STRIKE"].unique())
@@ -105,7 +135,7 @@ def update_contracts():
         pe = opts[(opts["OPTION_TYPE"] == "PE") & (opts["STRIKE"] == atm_strike)]
 
         if ce.empty or pe.empty:
-            raise ValueError("No ATM contracts found")
+            raise ValueError(f"No ATM CE/PE for strike {atm_strike}")
 
         SELECTED_CE_ID = str(int(ce.iloc[0]["SECURITY_ID"]))
         SELECTED_PE_ID = str(int(pe.iloc[0]["SECURITY_ID"]))
@@ -118,7 +148,6 @@ def update_contracts():
         SELECTED_CE_ID = LAST_KNOWN_CE
         SELECTED_PE_ID = LAST_KNOWN_PE
         return False
-
 # Run initial contract selection
 update_contracts()
 
