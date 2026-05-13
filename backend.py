@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Simple WebSocket, dynamic contracts)
+# backend.py - Nifty Options Signal Engine (Modern Dhan SDK, stable WebSocket)
 
 import os
 import threading
@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import marketfeed
+from dhanhq import DhanContext, MarketFeed
 
 # --------------------------------------------------
 # Logging & Flask
@@ -23,16 +23,19 @@ CORS(app)
 application = app
 
 # --------------------------------------------------
-# Proxy debug endpoint
+# Debug: show static IP (for QuotaGuard)
 # --------------------------------------------------
 @app.route('/debug/static-ip')
 def debug_my_ip():
     import requests
     proxy_url = os.getenv("QUOTAGUARDSTATIC_URL")
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-    r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
-    if r.status_code == 200:
-        return r.text
+    try:
+        r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
+        if r.status_code == 200:
+            return r.text
+    except:
+        pass
     return "Failed", 500
 
 # --------------------------------------------------
@@ -43,14 +46,14 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# Static fallback IDs (will be replaced if dynamic works)
+# Initial fallback IDs
 LAST_KNOWN_CE = "35000"
 LAST_KNOWN_PE = "35001"
 SELECTED_CE_ID = LAST_KNOWN_CE
 SELECTED_PE_ID = LAST_KNOWN_PE
 
 # --------------------------------------------------
-# Dynamic contract selection (flexible filtering)
+# Dynamic contract selection (pure Python, no pandas)
 # --------------------------------------------------
 def update_contracts():
     global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
@@ -58,34 +61,35 @@ def update_contracts():
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        
         lines = response.text.splitlines()
         reader = csv.DictReader(lines)
-        
+
         opts = []
         for row in reader:
-            # Segment 'D' for Derivatives (FNO)
+            # Segment 'D' for Derivatives (F&O)
             if row.get("SEGMENT") != "D":
                 continue
-            # Instrument OPTIDX
+            # Instrument must be OPTIDX (Index Options)
             if row.get("INSTRUMENT") != "OPTIDX":
                 continue
-            # Symbol must contain NIFTY but not BANKNIFTY or FINNIFTY
+            # Symbol must contain NIFTY, exclude BANKNIFTY/FINNIFTY
             symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
             if "NIFTY" not in symbol or "BANK" in symbol or "FIN" in symbol:
                 continue
 
+            # Expiry date – try both formats
             expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
             if not expiry_str:
                 continue
             try:
-                try:
-                    expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
-                except:
-                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+                expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
             except:
-                continue
+                try:
+                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+                except:
+                    continue
 
+            # Strike price
             try:
                 strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
             except:
@@ -99,45 +103,51 @@ def update_contracts():
             })
 
         if not opts:
-            raise ValueError("No NIFTY rows matched")
+            raise ValueError("No NIFTY OPTIDX rows found")
 
+        # Nearest expiry
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        spot = 24000.0 
+        # Spot price (fallback 24000 if NSE blocks)
+        spot = 24000.0
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             s = requests.Session()
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", headers=headers, timeout=5)
+            r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
+                      headers=headers, timeout=5)
             if r.status_code == 200:
                 spot = float(r.json()["data"][0]["lastPrice"])
         except:
-            pass
+            logger.warning("NSE spot fetch failed, using fallback 24000")
 
+        # ATM strike
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        ce_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "CE"), None)
-        pe_id = next((o["security_id"] for o in near_opts if o["strike"] == atm_strike and o["option_type"] == "PE"), None)
-
+        ce_id = next((o["security_id"] for o in near_opts
+                      if o["strike"] == atm_strike and o["option_type"] == "CE"), None)
+        pe_id = next((o["security_id"] for o in near_opts
+                      if o["strike"] == atm_strike and o["option_type"] == "PE"), None)
         if ce_id and pe_id:
             SELECTED_CE_ID = str(int(float(ce_id)))
             SELECTED_PE_ID = str(int(float(pe_id)))
             LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
             logger.info(f"✅ Dynamic contract: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} Strike={atm_strike} Expiry={min_expiry.date()}")
             return True
+        else:
+            raise ValueError(f"Missing CE/PE for strike {atm_strike}")
     except Exception as e:
-        logger.error(f"Contract update failed: {e}")
-    # Fallback: keep last known IDs
-    SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
-    return False
+        logger.error(f"Contract update failed: {e}. Keeping last known IDs.")
+        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
+        return False
 
-# Run initial update
+# Run once at startup
 update_contracts()
 
 # --------------------------------------------------
-# Global state
+# Global state (all indicators)
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -179,13 +189,13 @@ institutional_state = {
     "institutional_confidence": 0
 }
 price_history = deque(maxlen=200)
-volume_history = deque(maxlen=200)
+volume_history = deque(maxlen=200)   # will store dummy volumes if needed
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (same as before, but volume not used now)
+# Technical indicators (identical to your working version)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -386,7 +396,8 @@ def on_message(instance, tick):
     try:
         sec_id = str(tick.get("security_id"))
         price = float(tick.get("ltp", 0))
-        volume = int(tick.get("volume", 0))  # may be 0 if not subscribed to Quote
+        # If volume is missing, use dummy 100
+        volume = int(tick.get("volume", 100))
 
         if sec_id == SELECTED_CE_ID:
             latest_data["ce_price"] = price
@@ -424,34 +435,32 @@ def on_message(instance, tick):
 
             latest_data["timestamp"] = datetime.now().isoformat()
     except Exception as e:
-        print(f"on_message error: {e}")
+        logger.error(f"on_message error: {e}")
 
 def on_connect(instance):
-    print("✅ WebSocket connected and authorized")
+    logger.info("✅ WebSocket connected and authorized")
 
 def on_error(instance, error):
-    print(f"❌ WebSocket error: {error}")
+    logger.error(f"❌ WebSocket error: {error}")
 
 def on_close(instance):
-    print("🔌 WebSocket closed, reconnecting...")
+    logger.warning("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner – SIMPLE, no asyncio
+# Feed runner – using modern MarketFeed (no manual event loop)
 # --------------------------------------------------
 def run_feed():
     while True:
         try:
-            # Refresh contracts on each reconnect
+            # Refresh contracts on every reconnect (optional, but good)
             update_contracts()
-            logger.info(f"Connecting to DhanFeed for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
-            feed = marketfeed.DhanFeed(
-                client_id=CLIENT_ID,
-                access_token=ACCESS_TOKEN,
-                instruments=[
-                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Ticker),
-                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
-                ]
-            )
+            logger.info(f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
+            ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+            instruments = [
+                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
+                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
+            ]
+            feed = MarketFeed(ctx, instruments, version="v2")
             feed.on_connect = on_connect
             feed.on_error = on_error
             feed.on_close = on_close
@@ -466,7 +475,7 @@ def run_feed():
 # --------------------------------------------------
 thread = threading.Thread(target=run_feed, daemon=True)
 thread.start()
-print("Background signal engine started (dynamic contracts, simple WebSocket)")
+logger.info("Background signal engine started (modern SDK)")
 
 # --------------------------------------------------
 # Flask routes
@@ -486,7 +495,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return f"Stable version | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
+    return f"Modern Dhan SDK | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
