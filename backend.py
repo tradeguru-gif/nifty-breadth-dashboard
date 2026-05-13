@@ -463,12 +463,12 @@ def on_close(instance):
 # --------------------------------------------------
 # Feed runner with explicit event loop
 # --------------------------------------------------
+# --------------------------------------------------
+# Feed runner – without manual event loop (let DhanFeed handle it)
+# --------------------------------------------------
 def run_feed():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     while True:
         try:
-            # Try to update contracts (may succeed or keep existing)
             update_contracts()
             logger.info(f"Current subscription IDs: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}")
             feed = marketfeed.DhanFeed(
@@ -483,11 +483,11 @@ def run_feed():
             feed.on_error = on_error
             feed.on_close = on_close
             feed.on_message = on_message
+            logger.info("Starting DhanFeed (WebSocket)...")
             feed.run_forever()
         except Exception as e:
-            print(f"Feed crashed: {e}, reconnecting in 10s")
+            logger.error(f"Feed crashed: {e}, reconnecting in 10s")
             time.sleep(10)
-
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
