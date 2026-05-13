@@ -447,13 +447,16 @@ def on_close(instance):
 # Feed runner with explicit event loop
 # --------------------------------------------------
 def run_feed():
+    # 1. CRITICAL: Create and set the event loop for this specific thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     while True:
         try:
             update_contracts()
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
             
-            # 1. Initialize with ONLY the 3 essential credentials/data points
-            # We remove on_message from here because your log says it's "unexpected"
+            # 2. Initialize with ONLY the 3 core credentials
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
@@ -463,20 +466,14 @@ def run_feed():
                 ]
             )
             
-            # 2. Attach callbacks manually AFTER initialization
-            # This is the standard way for the latest version of the library
+            # 3. Assign callbacks as object properties (Standard for latest SDK)
+            feed.on_connect = on_connect
             feed.on_message = on_message
-            
-            # 3. Safely try to attach the others (won't crash if they fail)
-            try:
-                feed.on_connect = on_connect
-                feed.on_error = on_error
-                feed.on_close = on_close
-            except Exception:
-                pass 
+            feed.on_error = on_error
+            feed.on_close = on_close
 
-            # 4. Start the engine
-            logger.info("Starting DhanFeed loop...")
+            # 4. Start the feed
+            logger.info("DhanFeed initialized. Starting run_forever...")
             feed.run_forever()
             
         except Exception as e:
