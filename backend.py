@@ -447,13 +447,12 @@ def on_close(instance):
 # Feed runner with explicit event loop
 # --------------------------------------------------
 def run_feed():
-    # Remove manual event loop management as DhanFeed handles it
     while True:
         try:
             update_contracts()
             logger.info(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID}")
             
-            # Initialize with all callbacks inside the constructor
+            # 1. Initialize with ONLY the essentials
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
@@ -461,12 +460,21 @@ def run_feed():
                     (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
                 ],
-                on_connect=on_connect,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
+                on_message=on_message # This is the only one guaranteed to work in __init__
             )
             
+            # 2. Try to attach other handlers safely
+            # If the library version doesn't support these, it will just skip them
+            # instead of crashing the whole thread.
+            for attr, func in [("on_connect", on_connect), 
+                              ("on_error", on_error), 
+                              ("on_close", on_close)]:
+                try:
+                    setattr(feed, attr, func)
+                except Exception:
+                    logger.warning(f"Could not set {attr} callback - skipping.")
+
+            # 3. Start the feed
             feed.run_forever()
             
         except Exception as e:
