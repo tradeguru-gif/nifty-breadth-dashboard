@@ -73,7 +73,7 @@ def update_contracts():
             logger.info(f"CSV columns: {fieldnames}")
             update_contracts.logged = True
 
-        # Identify expiry column (try common names)
+        # Identify expiry and symbol columns (same as before)
         expiry_col = None
         for col in ['SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE', 'EXPIRY_DATE']:
             if col in fieldnames:
@@ -82,7 +82,6 @@ def update_contracts():
         if not expiry_col:
             raise KeyError("No expiry column found")
 
-        # Identify symbol column
         symbol_col = None
         for col in ['SEM_TRADING_SYMBOL', 'SYMBOL_NAME', 'DISPLAY_NAME']:
             if col in fieldnames:
@@ -93,14 +92,18 @@ def update_contracts():
 
         # Collect all NIFTY OPTIDX rows
         opts = []
+        sample_count = 0
         for row in reader:
-            if row.get("SEGMENT") != "NSE_FNO":
+            segment = row.get("SEGMENT", "").upper().strip()
+            instrument = row.get("INSTRUMENT", "").upper().strip()
+            symbol = row.get(symbol_col, "").upper().strip()
+            if segment != "NSE_FNO":
                 continue
-            if row.get("INSTRUMENT") != "OPTIDX":
+            if instrument != "OPTIDX":
                 continue
-            if "NIFTY" not in row.get(symbol_col, ""):
+            if "NIFTY" not in symbol:
                 continue
-            # Convert expiry to datetime
+
             expiry_str = row.get(expiry_col, "")
             if not expiry_str:
                 continue
@@ -108,6 +111,7 @@ def update_contracts():
                 expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
             except:
                 continue
+
             strike_str = row.get("STRIKE_PRICE", "")
             if not strike_str:
                 continue
@@ -115,20 +119,25 @@ def update_contracts():
                 strike = float(strike_str)
             except:
                 continue
+
             opts.append({
                 "expiry": expiry,
                 "strike": strike,
-                "option_type": row.get("OPTION_TYPE", ""),
+                "option_type": row.get("OPTION_TYPE", "").upper().strip(),
                 "security_id": row.get("SECURITY_ID", "")
             })
+            sample_count += 1
+            if sample_count <= 5:
+                logger.info(f"Sample row: expiry={expiry_str}, strike={strike}, type={row.get('OPTION_TYPE')}, id={row.get('SECURITY_ID')}")
+
         if not opts:
             raise ValueError("No NIFTY OPTIDX rows found")
 
-        # Find nearest expiry (minimum expiry date)
+        # Rest of the logic unchanged...
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Fetch current Nifty spot
+        # Fetch spot (fallback as before)
         try:
             spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
@@ -140,11 +149,9 @@ def update_contracts():
             logger.warning(f"Spot fetch failed: {e}, using fallback 24000")
             spot = 24000.0
 
-        # Find strike closest to spot
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        # Get CE and PE for that strike
         ce_id = None
         pe_id = None
         for o in near_opts:
