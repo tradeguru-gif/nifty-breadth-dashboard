@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (Fixed contract selection)
+# backend.py - Nifty Options Signal Engine (Simple WebSocket, dynamic contracts)
 
 import os
 import threading
@@ -6,7 +6,6 @@ import time
 import logging
 import requests
 import csv
-import asyncio
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
@@ -65,26 +64,21 @@ def update_contracts():
         
         opts = []
         for row in reader:
-            # 1. Use 'D' for Derivatives (FNO)
+            # Segment 'D' for Derivatives (FNO)
             if row.get("SEGMENT") != "D":
                 continue
-            
-            # 2. Match OPTIDX
+            # Instrument OPTIDX
             if row.get("INSTRUMENT") != "OPTIDX":
                 continue
-            
-            # 3. Ensure it is NIFTY but NOT BANKNIFTY or FINNIFTY
+            # Symbol must contain NIFTY but not BANKNIFTY or FINNIFTY
             symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
             if "NIFTY" not in symbol or "BANK" in symbol or "FIN" in symbol:
                 continue
 
-            # 4. Extract Expiry
             expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
             if not expiry_str:
                 continue
             try:
-                # Dhan date format is usually '2026-06-30' or '30-Jun-2026'
-                # Let's try both common formats
                 try:
                     expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
                 except:
@@ -92,7 +86,6 @@ def update_contracts():
             except:
                 continue
 
-            # 5. Extract Strike
             try:
                 strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
             except:
@@ -106,25 +99,22 @@ def update_contracts():
             })
 
         if not opts:
-            raise ValueError("No NIFTY rows matched filters (Segment 'D', Inst 'OPTIDX')")
+            raise ValueError("No NIFTY rows matched")
 
-        # --- Rest of logic remains the same ---
-        # Find nearest expiry
         min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
         near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Fetch Spot (Using fallback 24000 if NSE blocks Render)
         spot = 24000.0 
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             s = requests.Session()
             s.get("https://www.nseindia.com", headers=headers, timeout=5)
             r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050", headers=headers, timeout=5)
-            spot = float(r.json()["data"][0]["lastPrice"])
+            if r.status_code == 200:
+                spot = float(r.json()["data"][0]["lastPrice"])
         except:
-            logger.warning("NSE Spot fetch blocked (common on Render), using 24000.0")
+            pass
 
-        # Find ATM strike
         strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
@@ -135,19 +125,19 @@ def update_contracts():
             SELECTED_CE_ID = str(int(float(ce_id)))
             SELECTED_PE_ID = str(int(float(pe_id)))
             LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
-            logger.info(f"✅ Success! CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} at Strike {atm_strike}")
+            logger.info(f"✅ Dynamic contract: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} Strike={atm_strike} Expiry={min_expiry.date()}")
             return True
-        
     except Exception as e:
         logger.error(f"Contract update failed: {e}")
-        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
-        return False
+    # Fallback: keep last known IDs
+    SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
+    return False
 
-# Run initial contract update
+# Run initial update
 update_contracts()
 
 # --------------------------------------------------
-# Global state (same as before)
+# Global state
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -195,7 +185,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (pure Python)
+# Technical indicators (same as before, but volume not used now)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -396,7 +386,7 @@ def on_message(instance, tick):
     try:
         sec_id = str(tick.get("security_id"))
         price = float(tick.get("ltp", 0))
-        volume = int(tick.get("volume", 0))
+        volume = int(tick.get("volume", 0))  # may be 0 if not subscribed to Quote
 
         if sec_id == SELECTED_CE_ID:
             latest_data["ce_price"] = price
@@ -446,21 +436,20 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner with explicit event loop
+# Feed runner – SIMPLE, no asyncio
 # --------------------------------------------------
 def run_feed():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     while True:
         try:
+            # Refresh contracts on each reconnect
             update_contracts()
-            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
+            logger.info(f"Connecting to DhanFeed for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
-                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
-                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
+                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Ticker),
+                    (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Ticker)
                 ]
             )
             feed.on_connect = on_connect
@@ -469,7 +458,7 @@ def run_feed():
             feed.on_message = on_message
             feed.run_forever()
         except Exception as e:
-            print(f"Feed crashed: {e}, reconnecting in 10s")
+            logger.error(f"Feed crashed: {e}, reconnecting in 10s")
             time.sleep(10)
 
 # --------------------------------------------------
@@ -477,7 +466,7 @@ def run_feed():
 # --------------------------------------------------
 thread = threading.Thread(target=run_feed, daemon=True)
 thread.start()
-print("Background signal engine started (dynamic rollover + real volume)")
+print("Background signal engine started (dynamic contracts, simple WebSocket)")
 
 # --------------------------------------------------
 # Flask routes
@@ -497,7 +486,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return f"Stable version (no pandas) | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
+    return f"Stable version | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
