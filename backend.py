@@ -1,21 +1,11 @@
-# backend.py - Institutional Nifty Options Signal Engine
-# Based on your minimal working WebSocket – no event loop changes
-#CE_ID = "35000"   # <-- CHANGE
-#PE_ID = "35001"   # <-- CHANGE
-
-# backend.py - Nifty Options Signal Engine (Stable, using dhanhq==2.0.2)
-# Security IDs: CE=35000, PE=35001 (expiry 2026-05-26, strike 65400)
-
-# backend.py - Institutional Nifty Options Signal Engine
-# Dynamic contract rollover + real volume (Quote)
-# Uses dhanhq==2.0.2 with DhanFeed
+# backend.py - Nifty Options Signal Engine (No pandas, event loop fixed)
 
 import os
 import threading
 import time
 import logging
 import requests
-import pandas as pd
+import csv
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
@@ -54,30 +44,39 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Dynamic contract selection (nearest monthly expiry ATM strike)
+# Static fallback IDs (will be replaced dynamically if possible)
 # --------------------------------------------------
-SELECTED_CE_ID = None
-SELECTED_PE_ID = None
-LAST_KNOWN_CE = "35000"   # fallback
+LAST_KNOWN_CE = "35000"
 LAST_KNOWN_PE = "35001"
+SELECTED_CE_ID = LAST_KNOWN_CE
+SELECTED_PE_ID = LAST_KNOWN_PE
 
+# --------------------------------------------------
+# Dynamic contract selection (pure Python, no pandas)
+# --------------------------------------------------
 def update_contracts():
-    """Fetch latest instrument master and select nearest monthly expiry ATM CE/PE."""
+    """Fetch latest instrument master CSV and select nearest monthly expiry ATM CE/PE."""
     global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = df.columns.str.upper()
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        content = response.text
+        lines = content.splitlines()
+        reader = csv.DictReader(lines)
+        fieldnames = reader.fieldnames
+        if not fieldnames:
+            raise ValueError("Empty CSV")
 
-        # Debug: print column names (will appear in Render logs once)
-        if not hasattr(update_contracts, "logged_columns"):
-            logger.info(f"CSV columns: {list(df.columns)}")
-            update_contracts.logged_columns = True
+        # Debug: print column names once
+        if not hasattr(update_contracts, "logged"):
+            logger.info(f"CSV columns: {fieldnames}")
+            update_contracts.logged = True
 
         # Identify expiry column (try common names)
         expiry_col = None
         for col in ['SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE', 'EXPIRY_DATE']:
-            if col in df.columns:
+            if col in fieldnames:
                 expiry_col = col
                 break
         if not expiry_col:
@@ -86,36 +85,50 @@ def update_contracts():
         # Identify symbol column
         symbol_col = None
         for col in ['SEM_TRADING_SYMBOL', 'SYMBOL_NAME', 'DISPLAY_NAME']:
-            if col in df.columns:
+            if col in fieldnames:
                 symbol_col = col
                 break
         if not symbol_col:
             raise KeyError("No symbol column found")
 
-        # Filter for NSE F&O, Index Options, NIFTY
-        opts = df[(df["SEGMENT"] == "NSE_FNO") &
-                  (df["INSTRUMENT"] == "OPTIDX") &
-                  (df[symbol_col].str.contains("NIFTY", case=False, na=False))].copy()
+        # Collect all NIFTY OPTIDX rows
+        opts = []
+        for row in reader:
+            if row.get("SEGMENT") != "NSE_FNO":
+                continue
+            if row.get("INSTRUMENT") != "OPTIDX":
+                continue
+            if "NIFTY" not in row.get(symbol_col, ""):
+                continue
+            # Convert expiry to datetime
+            expiry_str = row.get(expiry_col, "")
+            if not expiry_str:
+                continue
+            try:
+                expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
+            except:
+                continue
+            strike_str = row.get("STRIKE_PRICE", "")
+            if not strike_str:
+                continue
+            try:
+                strike = float(strike_str)
+            except:
+                continue
+            opts.append({
+                "expiry": expiry,
+                "strike": strike,
+                "option_type": row.get("OPTION_TYPE", ""),
+                "security_id": row.get("SECURITY_ID", "")
+            })
+        if not opts:
+            raise ValueError("No NIFTY OPTIDX rows found")
 
-        if opts.empty:
-            raise ValueError("No NIFTY OPTIDX found")
+        # Find nearest expiry (minimum expiry date)
+        min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
+        near_opts = [o for o in opts if o["expiry"] == min_expiry]
 
-        # Parse expiry dates
-        opts["EXPIRY"] = pd.to_datetime(opts[expiry_col], format="%d-%b-%Y", errors="coerce")
-        opts = opts.dropna(subset=["EXPIRY"])
-        if opts.empty:
-            raise ValueError("No valid expiry dates")
-
-        nearest_expiry = opts["EXPIRY"].min()
-        opts = opts[opts["EXPIRY"] == nearest_expiry]
-
-        # Get strike prices and find ATM
-        opts["STRIKE"] = pd.to_numeric(opts["STRIKE_PRICE"], errors="coerce")
-        opts = opts.dropna(subset=["STRIKE"])
-        if opts.empty:
-            raise ValueError("No valid strikes")
-
-        # Fetch current Nifty spot (fallback if fails)
+        # Fetch current Nifty spot
         try:
             spot_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
@@ -128,31 +141,38 @@ def update_contracts():
             spot = 24000.0
 
         # Find strike closest to spot
-        strikes = sorted(opts["STRIKE"].unique())
+        strikes = sorted(set(o["strike"] for o in near_opts))
         atm_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        ce = opts[(opts["OPTION_TYPE"] == "CE") & (opts["STRIKE"] == atm_strike)]
-        pe = opts[(opts["OPTION_TYPE"] == "PE") & (opts["STRIKE"] == atm_strike)]
+        # Get CE and PE for that strike
+        ce_id = None
+        pe_id = None
+        for o in near_opts:
+            if o["strike"] == atm_strike:
+                if o["option_type"] == "CE":
+                    ce_id = o["security_id"]
+                elif o["option_type"] == "PE":
+                    pe_id = o["security_id"]
+        if not ce_id or not pe_id:
+            raise ValueError(f"Missing CE/PE for strike {atm_strike}")
 
-        if ce.empty or pe.empty:
-            raise ValueError(f"No ATM CE/PE for strike {atm_strike}")
-
-        SELECTED_CE_ID = str(int(ce.iloc[0]["SECURITY_ID"]))
-        SELECTED_PE_ID = str(int(pe.iloc[0]["SECURITY_ID"]))
+        SELECTED_CE_ID = str(int(ce_id))
+        SELECTED_PE_ID = str(int(pe_id))
         LAST_KNOWN_CE = SELECTED_CE_ID
         LAST_KNOWN_PE = SELECTED_PE_ID
-        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={nearest_expiry.date()}")
+        logger.info(f"Dynamic contract update: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} strike={atm_strike} expiry={min_expiry.date()}")
         return True
     except Exception as e:
         logger.error(f"Contract update failed: {e}, using last known IDs")
         SELECTED_CE_ID = LAST_KNOWN_CE
         SELECTED_PE_ID = LAST_KNOWN_PE
         return False
-# Run initial contract selection
+
+# Run initial contract update
 update_contracts()
 
 # --------------------------------------------------
-# Global state
+# Global state (same as before)
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -164,7 +184,6 @@ latest_data = {
     "pcr": 1.0,
     "timestamp": ""
 }
-
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -175,7 +194,6 @@ market_state = {
     "volatility": "NORMAL",
     "alert": "NONE"
 }
-
 institutional_state = {
     "vwap": 0,
     "ema_fast": 0,
@@ -195,15 +213,14 @@ institutional_state = {
     "institutional_signal": "HOLD",
     "institutional_confidence": 0
 }
-
-price_history = deque(maxlen=200)          # store CE prices for RSI/MACD
-volume_history = deque(maxlen=200)         # store corresponding volumes for VWAP
+price_history = deque(maxlen=200)
+volume_history = deque(maxlen=200)
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (pure Python) – updated VWAP to use real volume
+# Technical indicators (same as before)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -245,7 +262,6 @@ def calculate_atr(prices, period=14):
     return round(sum(trs[-period:]) / period, 2)
 
 def calculate_vwap(prices, volumes):
-    """Use real volume for VWAP."""
     if not prices or not volumes or len(prices) != len(volumes):
         return 0
     pv = sum(p * v for p, v in zip(prices, volumes))
@@ -333,7 +349,7 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
 
     rsi = calculate_rsi(price_list)
     macd = calculate_macd(price_list)
-    vwap = calculate_vwap(price_list, volume_list)   # now uses real volume
+    vwap = calculate_vwap(price_list, volume_list)
     ema_fast = calculate_ema(price_list, 9)
     ema_slow = calculate_ema(price_list, 21)
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
@@ -398,18 +414,17 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
     })
 
 # --------------------------------------------------
-# WebSocket callback (now receives volume from Quote)
+# WebSocket callback (real volume from Quote)
 # --------------------------------------------------
 def on_message(instance, tick):
     global latest_data, price_history, volume_history, tick_counter
     try:
         sec_id = str(tick.get("security_id"))
         price = float(tick.get("ltp", 0))
-        volume = int(tick.get("volume", 0))      # real volume from Quote
+        volume = int(tick.get("volume", 0))
 
         if sec_id == SELECTED_CE_ID:
             latest_data["ce_price"] = price
-            # For advanced analysis, we store CE price and its volume
             if price > 0:
                 price_history.append(price)
                 volume_history.append(volume)
@@ -422,7 +437,6 @@ def on_message(instance, tick):
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
 
-            # Simple signal
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
             elif spread < -SPREAD_THRESHOLD:
@@ -430,7 +444,6 @@ def on_message(instance, tick):
             else:
                 latest_data["signal"] = "NEUTRAL"
 
-            # Periodic advanced analysis (every UPDATE_INTERVAL ticks)
             tick_counter += 1
             if tick_counter >= UPDATE_INTERVAL and len(price_history) >= 20:
                 tick_counter = 0
@@ -441,13 +454,10 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                # Pass both price and volume histories
                 run_advanced_analysis(ce, pe, spread, pcr_val,
                                       list(price_history), list(volume_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            # Optional debug
-            # print(f"Tick: CE={ce} PE={pe} Vol={volume} Spread={spread:.2f}")
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -461,20 +471,24 @@ def on_close(instance):
     print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner (synchronous, uses DhanFeed with Quote)
+# Feed runner – with explicit event loop
 # --------------------------------------------------
 def run_feed():
-    global SELECTED_CE_ID, SELECTED_PE_ID
+    # Create and set an event loop for this thread
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     while True:
         try:
-            # Refresh contracts periodically (e.g., once per day or on reconnect)
+            # Refresh contracts periodically
             update_contracts()
-            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (using Quote for volume)")
+            print(f"Subscribing to CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Quote for volume)")
             feed = marketfeed.DhanFeed(
                 client_id=CLIENT_ID,
                 access_token=ACCESS_TOKEN,
                 instruments=[
-                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),   # Quote includes volume
+                    (marketfeed.NSE_FNO, str(SELECTED_CE_ID), marketfeed.Quote),
                     (marketfeed.NSE_FNO, str(SELECTED_PE_ID), marketfeed.Quote)
                 ]
             )
@@ -512,7 +526,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return "Dynamic rollover + real volume (Quote) | IDs: {} / {}".format(SELECTED_CE_ID, SELECTED_PE_ID)
+    return f"Stable version (no pandas) | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
