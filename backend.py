@@ -10,7 +10,8 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import DhanContext, MarketFeed
+from dhanhq import DhanContext
+from dhanhq.marketfeed import MarketFeed
 
 # --------------------------------------------------
 # Logging & Flask
@@ -139,9 +140,18 @@ def update_contracts():
         else:
             raise ValueError(f"Missing CE/PE for strike {atm_strike}")
     except Exception as e:
-        logger.error(f"Contract update failed: {e}. Keeping last known IDs.")
-        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
-        return False
+
+    err = str(e)
+
+    logger.error(f"Feed crashed: {err}")
+
+    if "429" in err:
+        logger.warning("Rate limited by Dhan. Sleeping 15 minutes...")
+        time.sleep(900)
+
+    else:
+        time.sleep(reconnect_delay)
+        reconnect_delay = min(reconnect_delay * 2, 900)
 
 # Run once at startup
 update_contracts()
@@ -451,8 +461,14 @@ def on_close(instance):
 # --------------------------------------------------
 def run_feed():
     # Create DhanContext once and reuse it
-    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-    reconnect_delay = 5  # start with 5 seconds
+    ctx = DhanContext(
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN
+)
+    reconnect_delay = 10
+
+    logger.info("Cooling down before websocket connect...")
+    time.sleep(60)
 
     while True:
         try:
@@ -468,12 +484,12 @@ def run_feed():
             feed.on_error = on_error
             feed.on_close = on_close
             feed.on_message = on_message
-            feed.run_forever()
+            feed.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             logger.error(f"Feed crashed: {e}, reconnecting in {reconnect_delay}s")
             time.sleep(reconnect_delay)
             # Exponential backoff, max 5 minutes (300 seconds)
-            reconnect_delay = min(reconnect_delay * 2, 300)
+            reconnect_delay = min(reconnect_delay * 2, 900)
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
