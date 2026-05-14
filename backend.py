@@ -1,16 +1,21 @@
-# backend.py - Nifty Options Signal Engine (Modern Dhan SDK, stable WebSocket)
+# backend.py - Institutional Nifty Options Signal Engine
+# Based on your minimal working WebSocket – no event loop changes
+#CE_ID = "35000"   # <-- CHANGE
+#PE_ID = "35001"   # <-- CHANGE
+
+# backend.py - Nifty Options Signal Engine (Stable, using dhanhq==2.0.2)
+# Security IDs: CE=35000, PE=35001 (expiry 2026-05-26, strike 65400)
 
 import os
 import threading
 import time
 import logging
 import requests
-import csv
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import DhanContext, MarketFeed
+from dhanhq import marketfeed
 
 # --------------------------------------------------
 # Logging & Flask
@@ -21,23 +26,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 application = app
-
-# --------------------------------------------------
-# Debug: show static IP (for QuotaGuard)
-# --------------------------------------------------
+#-----------------------------------------
+#Proxy QUOTAGUARD Endpoint
+#---------------------------------------
 @app.route('/debug/static-ip')
 def debug_my_ip():
     import requests
     proxy_url = os.getenv("QUOTAGUARDSTATIC_URL")
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-    try:
-        r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
-        if r.status_code == 200:
-            return r.text
-    except:
-        pass
+    r = requests.get('https://ip.quotaguard.com', proxies=proxies, timeout=10)
+    if r.status_code == 200:
+        return r.text   # this is your public static IP
     return "Failed", 500
-
 # --------------------------------------------------
 # Environment variables
 # --------------------------------------------------
@@ -46,108 +46,14 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
-# Initial fallback IDs
-LAST_KNOWN_CE = "35000"
-LAST_KNOWN_PE = "35001"
-SELECTED_CE_ID = LAST_KNOWN_CE
-SELECTED_PE_ID = LAST_KNOWN_PE
+# --------------------------------------------------
+# YOUR SECURITY IDs (from diagnostic output)
+# --------------------------------------------------
+CE_ID = "35000"   # Call option, strike 65400, expiry 2026-05-26
+PE_ID = "35001"   # Put option, strike 65400, expiry 2026-05-26
 
 # --------------------------------------------------
-# Dynamic contract selection (pure Python, no pandas)
-# --------------------------------------------------
-def update_contracts():
-    global SELECTED_CE_ID, SELECTED_PE_ID, LAST_KNOWN_CE, LAST_KNOWN_PE
-    try:
-        url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        lines = response.text.splitlines()
-        reader = csv.DictReader(lines)
-
-        opts = []
-        for row in reader:
-            # Segment 'D' for Derivatives (F&O)
-            if row.get("SEGMENT") != "D":
-                continue
-            # Instrument must be OPTIDX (Index Options)
-            if row.get("INSTRUMENT") != "OPTIDX":
-                continue
-            # Symbol must contain NIFTY, exclude BANKNIFTY/FINNIFTY
-            symbol = row.get("SYMBOL_NAME") or row.get("SYMBOL") or ""
-            if "NIFTY" not in symbol or "BANK" in symbol or "FIN" in symbol:
-                continue
-
-            # Expiry date – try both formats
-            expiry_str = row.get("SM_EXPIRY_DATE") or row.get("EXPIRY_DATE")
-            if not expiry_str:
-                continue
-            try:
-                expiry = datetime.strptime(expiry_str, "%Y-%m-%d")
-            except:
-                try:
-                    expiry = datetime.strptime(expiry_str, "%d-%b-%Y")
-                except:
-                    continue
-
-            # Strike price
-            try:
-                strike = float(row.get("STRIKE_PRICE") or row.get("STRIKE", 0))
-            except:
-                continue
-
-            opts.append({
-                "expiry": expiry,
-                "strike": strike,
-                "option_type": row.get("OPTION_TYPE", ""),
-                "security_id": row.get("SECURITY_ID", "")
-            })
-
-        if not opts:
-            raise ValueError("No NIFTY OPTIDX rows found")
-
-        # Nearest expiry
-        min_expiry = min(opts, key=lambda x: x["expiry"])["expiry"]
-        near_opts = [o for o in opts if o["expiry"] == min_expiry]
-
-        # Spot price (fallback 24000 if NSE blocks)
-        spot = 24000.0
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            s = requests.Session()
-            s.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = s.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
-                      headers=headers, timeout=5)
-            if r.status_code == 200:
-                spot = float(r.json()["data"][0]["lastPrice"])
-        except:
-            logger.warning("NSE spot fetch failed, using fallback 24000")
-
-        # ATM strike
-        strikes = sorted(set(o["strike"] for o in near_opts))
-        atm_strike = min(strikes, key=lambda x: abs(x - spot))
-
-        ce_id = next((o["security_id"] for o in near_opts
-                      if o["strike"] == atm_strike and o["option_type"] == "CE"), None)
-        pe_id = next((o["security_id"] for o in near_opts
-                      if o["strike"] == atm_strike and o["option_type"] == "PE"), None)
-        if ce_id and pe_id:
-            SELECTED_CE_ID = str(int(float(ce_id)))
-            SELECTED_PE_ID = str(int(float(pe_id)))
-            LAST_KNOWN_CE, LAST_KNOWN_PE = SELECTED_CE_ID, SELECTED_PE_ID
-            logger.info(f"✅ Dynamic contract: CE={SELECTED_CE_ID} PE={SELECTED_PE_ID} Strike={atm_strike} Expiry={min_expiry.date()}")
-            return True
-        else:
-            raise ValueError(f"Missing CE/PE for strike {atm_strike}")
-    except Exception as e:
-        logger.error(f"Contract update failed: {e}. Keeping last known IDs.")
-        SELECTED_CE_ID, SELECTED_PE_ID = LAST_KNOWN_CE, LAST_KNOWN_PE
-        return False
-
-# Run once at startup
-update_contracts()
-
-# --------------------------------------------------
-# Global state (all indicators)
+# Global state
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -159,6 +65,7 @@ latest_data = {
     "pcr": 1.0,
     "timestamp": ""
 }
+
 market_state = {
     "rsi": 50,
     "momentum": "NEUTRAL",
@@ -169,6 +76,7 @@ market_state = {
     "volatility": "NORMAL",
     "alert": "NONE"
 }
+
 institutional_state = {
     "vwap": 0,
     "ema_fast": 0,
@@ -188,14 +96,14 @@ institutional_state = {
     "institutional_signal": "HOLD",
     "institutional_confidence": 0
 }
+
 price_history = deque(maxlen=200)
-volume_history = deque(maxlen=200)   # will store dummy volumes if needed
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (identical to your working version)
+# Technical indicators (pure Python)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -236,11 +144,12 @@ def calculate_atr(prices, period=14):
     trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
     return round(sum(trs[-period:]) / period, 2)
 
-def calculate_vwap(prices, volumes):
-    if not prices or not volumes or len(prices) != len(volumes):
+def calculate_vwap(prices):
+    if not prices:
         return 0
-    pv = sum(p * v for p, v in zip(prices, volumes))
-    tv = sum(volumes)
+    vol = [100] * len(prices)   # dummy volume
+    pv = sum(p * v for p, v in zip(prices, vol))
+    tv = sum(vol)
     return round(pv / tv, 2) if tv else 0
 
 def estimate_greeks(ce, pe):
@@ -315,16 +224,16 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis (called periodically)
+# Advanced analysis (called periodically from on_message)
 # --------------------------------------------------
-def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
+def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
     if len(price_list) < 14:
         return
 
     rsi = calculate_rsi(price_list)
     macd = calculate_macd(price_list)
-    vwap = calculate_vwap(price_list, volume_list)
+    vwap = calculate_vwap(price_list)
     ema_fast = calculate_ema(price_list, 9)
     ema_slow = calculate_ema(price_list, 21)
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
@@ -392,19 +301,13 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list, volume_list):
 # WebSocket callback
 # --------------------------------------------------
 def on_message(instance, tick):
-    global latest_data, price_history, volume_history, tick_counter
+    global latest_data, price_history, tick_counter
     try:
         sec_id = str(tick.get("security_id"))
         price = float(tick.get("ltp", 0))
-        # If volume is missing, use dummy 100
-        volume = int(tick.get("volume", 100))
-
-        if sec_id == SELECTED_CE_ID:
+        if sec_id == CE_ID:
             latest_data["ce_price"] = price
-            if price > 0:
-                price_history.append(price)
-                volume_history.append(volume)
-        elif sec_id == SELECTED_PE_ID:
+        elif sec_id == PE_ID:
             latest_data["pe_price"] = price
 
         if latest_data["ce_price"] > 0 and latest_data["pe_price"] > 0:
@@ -412,6 +315,8 @@ def on_message(instance, tick):
             pe = latest_data["pe_price"]
             spread = ce - pe
             latest_data["spread"] = round(spread, 2)
+
+            price_history.append(ce)
 
             if spread > SPREAD_THRESHOLD:
                 latest_data["signal"] = "BULLISH"
@@ -430,50 +335,53 @@ def on_message(instance, tick):
                 latest_data["macd"] = round(macd_val, 2)
                 latest_data["pcr"] = round(pcr_val, 2)
 
-                run_advanced_analysis(ce, pe, spread, pcr_val,
-                                      list(price_history), list(volume_history))
+                run_advanced_analysis(ce, pe, spread, pcr_val, list(price_history))
 
             latest_data["timestamp"] = datetime.now().isoformat()
+            # Optional debug print
+            # print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
     except Exception as e:
-        logger.error(f"on_message error: {e}")
+        print(f"on_message error: {e}")
 
 def on_connect(instance):
-    logger.info("✅ WebSocket connected and authorized")
+    print("✅ WebSocket connected and authorized")
 
 def on_error(instance, error):
-    logger.error(f"❌ WebSocket error: {error}")
+    print(f"❌ WebSocket error: {error}")
 
 def on_close(instance):
-    logger.warning("🔌 WebSocket closed, reconnecting...")
+    print("🔌 WebSocket closed, reconnecting...")
 
 # --------------------------------------------------
-# Feed runner – using modern MarketFeed (no manual event loop)
+# Feed runner (synchronous, uses DhanFeed – works with dhanhq==2.0.2)
 # --------------------------------------------------
 def run_feed():
-    # Create DhanContext once and reuse it
-    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-    reconnect_delay = 5  # start with 5 seconds
-
     while True:
         try:
-            logger.info(f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
-            instruments = [
-                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
-                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
-            ]
-            feed = MarketFeed(ctx, instruments, version="v2")
+            print(f"Subscribing to CE={CE_ID}, PE={PE_ID} (using DhanFeed)")
+            feed = marketfeed.DhanFeed(
+                client_id=CLIENT_ID,
+                access_token=ACCESS_TOKEN,
+                instruments=[
+                    (marketfeed.NSE_FNO, str(CE_ID), marketfeed.Ticker),
+                    (marketfeed.NSE_FNO, str(PE_ID), marketfeed.Ticker)
+                ]
+            )
             feed.on_connect = on_connect
             feed.on_error = on_error
             feed.on_close = on_close
             feed.on_message = on_message
-            feed.run_forever()   # This blocks until the connection is closed (normally or by error)
+            feed.run_forever()
         except Exception as e:
-            logger.error(f"Feed crashed: {e}")
-        # Always wait before reconnecting, even if the feed exited normally
-        logger.info(f"WebSocket disconnected. Reconnecting in {reconnect_delay} seconds...")
-        time.sleep(reconnect_delay)
-        # Exponential backoff, max 5 minutes (300 seconds)
-        reconnect_delay = min(reconnect_delay * 2, 300)
+            print(f"Feed crashed: {e}, reconnecting in 10s")
+            time.sleep(10)
+
+# --------------------------------------------------
+# Start background thread
+# --------------------------------------------------
+thread = threading.Thread(target=run_feed, daemon=True)
+thread.start()
+print("Background signal engine started")
 
 # --------------------------------------------------
 # Flask routes
@@ -493,7 +401,7 @@ def health():
 
 @app.route("/debug/version")
 def debug_version():
-    return f"Modern Dhan SDK | CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
+    return "Stable version with dhanhq==2.0.2 and correct IDs (35000, 35001)"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
