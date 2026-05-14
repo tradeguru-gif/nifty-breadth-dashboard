@@ -456,8 +456,6 @@ def run_feed():
 
     while True:
         try:
-            # Optional: refresh contracts every few hours (e.g., once per day)
-            # For now, we rely on the initial selection – it will work for days.
             logger.info(f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
             instruments = [
                 (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
@@ -468,19 +466,14 @@ def run_feed():
             feed.on_error = on_error
             feed.on_close = on_close
             feed.on_message = on_message
-            feed.run_forever()
+            feed.run_forever()   # This blocks until the connection is closed (normally or by error)
         except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in {reconnect_delay}s")
-            time.sleep(reconnect_delay)
-            # Exponential backoff, max 5 minutes (300 seconds)
-            reconnect_delay = min(reconnect_delay * 2, 300)
-
-# --------------------------------------------------
-# Start background thread
-# --------------------------------------------------
-thread = threading.Thread(target=run_feed, daemon=True)
-thread.start()
-logger.info("Background signal engine started (modern SDK)")
+            logger.error(f"Feed crashed: {e}")
+        # Always wait before reconnecting, even if the feed exited normally
+        logger.info(f"WebSocket disconnected. Reconnecting in {reconnect_delay} seconds...")
+        time.sleep(reconnect_delay)
+        # Exponential backoff, max 5 minutes (300 seconds)
+        reconnect_delay = min(reconnect_delay * 2, 300)
 
 # --------------------------------------------------
 # Flask routes
