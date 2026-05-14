@@ -460,36 +460,51 @@ def on_close(instance):
 # Feed runner – using modern MarketFeed (no manual event loop)
 # --------------------------------------------------
 def run_feed():
-    # Create DhanContext once and reuse it
-    ctx = DhanContext(
-    client_id=CLIENT_ID,
-    access_token=ACCESS_TOKEN
-)
-    reconnect_delay = 10
 
-    logger.info("Cooling down before websocket connect...")
-    time.sleep(60)
+    ctx = DhanContext(
+        client_id=CLIENT_ID,
+        access_token=ACCESS_TOKEN
+    )
 
     while True:
+
         try:
-            # Optional: refresh contracts every few hours (e.g., once per day)
-            # For now, we rely on the initial selection – it will work for days.
-            logger.info(f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)")
+
+            logger.info(
+                f"Connecting to MarketFeed V2 for CE={SELECTED_CE_ID}, PE={SELECTED_PE_ID} (Ticker)"
+            )
+
             instruments = [
                 (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
             ]
-            feed = MarketFeed(ctx, instruments, version="v2")
+
+            feed = MarketFeed(
+                ctx,
+                instruments,
+                version="v2"
+            )
+
             feed.on_connect = on_connect
+            feed.on_message = on_message
             feed.on_error = on_error
             feed.on_close = on_close
-            feed.on_message = on_message
-            feed.run_forever(ping_interval=30, ping_timeout=10)
+
+            # CONNECT
+            feed.run_forever()
+
+            logger.info("WebSocket started successfully")
+
+            # IMPORTANT:
+            # Prevent loop from creating new feeds
+            while True:
+                time.sleep(60)
+
         except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in {reconnect_delay}s")
-            time.sleep(reconnect_delay)
-            # Exponential backoff, max 5 minutes (300 seconds)
-            reconnect_delay = min(reconnect_delay * 2, 900)
+
+            logger.error(f"Feed crashed: {e}")
+
+            time.sleep(30)
 # --------------------------------------------------
 # Start background thread
 # --------------------------------------------------
