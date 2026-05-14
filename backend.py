@@ -431,38 +431,24 @@ def on_close(instance):
 # --------------------------------------------------
 def run_feed():
 
-    global reconnect_delay
-
-    logger.info("Cooling down before websocket connect...")
-
-    time.sleep(60)
-
     ctx = DhanContext(
         client_id=CLIENT_ID,
         access_token=ACCESS_TOKEN
     )
+
+    reconnect_delay = 60
 
     while True:
 
         try:
 
             logger.info(
-                f"Connecting to MarketFeed "
-                f"CE={SELECTED_CE_ID} "
-                f"PE={SELECTED_PE_ID}"
+                f"Connecting to MarketFeed CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
             )
 
             instruments = [
-                (
-                    MarketFeed.NSE_FNO,
-                    str(SELECTED_CE_ID),
-                    MarketFeed.Ticker
-                ),
-                (
-                    MarketFeed.NSE_FNO,
-                    str(SELECTED_PE_ID),
-                    MarketFeed.Ticker
-                )
+                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
+                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
             ]
 
             feed = MarketFeed(
@@ -476,22 +462,23 @@ def run_feed():
             feed.on_error = on_error
             feed.on_close = on_close
 
+            # BLOCKS HERE
             feed.run_forever()
+
+            # if run_forever exits naturally
+            logger.warning("WebSocket exited unexpectedly")
 
         except Exception as e:
 
             logger.error(
-                f"Feed crashed: {e} | "
-                f"retry in {reconnect_delay}s"
+                f"Feed crashed: {e} | retry in {reconnect_delay}s"
             )
 
-            time.sleep(reconnect_delay)
+        logger.info(f"Sleeping {reconnect_delay}s before reconnect")
 
-            reconnect_delay = min(
-                reconnect_delay * 2,
-                900
-            )
+        time.sleep(reconnect_delay)
 
+        reconnect_delay = min(reconnect_delay * 2, 900)
 # --------------------------------------------------
 # START THREAD
 # --------------------------------------------------
