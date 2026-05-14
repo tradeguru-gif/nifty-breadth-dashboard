@@ -436,35 +436,41 @@ def run_feed():
         access_token=ACCESS_TOKEN
     )
 
-    reconnect_delay = 60
+    reconnect_delay = 900
 
-while True:
-    try:
-        logger.info(
-            f"Connecting to MarketFeed CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
-        )
+    while True:
+        try:
 
-        instruments = [
-            (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
-            (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
-        ]
+            logger.info(
+                f"Connecting to MarketFeed CE={SELECTED_CE_ID} PE={SELECTED_PE_ID}"
+            )
 
-        feed = MarketFeed(ctx, instruments, version="v2")
+            instruments = [
+                (MarketFeed.NSE_FNO, str(SELECTED_CE_ID), MarketFeed.Ticker),
+                (MarketFeed.NSE_FNO, str(SELECTED_PE_ID), MarketFeed.Ticker)
+            ]
 
-        feed.on_connect = on_connect
-        feed.on_message = on_message
-        feed.on_error = on_error
-        feed.on_close = on_close
+            feed = MarketFeed(
+                ctx,
+                instruments,
+                version="v2"
+            )
 
-        feed.run_forever()
+            feed.on_connect = on_connect
+            feed.on_message = on_message
+            feed.on_error = on_error
+            feed.on_close = on_close
 
-        logger.warning("WebSocket exited unexpectedly")
+            feed.run_forever()
 
-    except Exception as e:
-        logger.error(f"Feed crashed: {e}")
+            logger.warning("WebSocket exited unexpectedly")
 
-    logger.info(f"Sleeping {reconnect_delay}s before reconnect")
-    time.sleep(reconnect_delay)    
+        except Exception as e:
+            logger.error(f"Feed crashed: {e}")
+
+        logger.info(f"Sleeping {reconnect_delay}s before reconnect")
+        time.sleep(reconnect_delay)
+
 # --------------------------------------------------
 # START THREAD
 # --------------------------------------------------
