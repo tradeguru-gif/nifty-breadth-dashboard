@@ -349,6 +349,9 @@ def get_pcr():
 # --------------------------------------------------
 def on_message(instance, tick):
 
+    logger.info(f"TICK RECEIVED: {tick}")
+
+    global latest_data, price_history
     global tick_counter
 
     try:
