@@ -150,38 +150,52 @@ def calculate_atm_strike(spot):
 import csv
 
 def find_option_security_id(symbol, expiry, strike, option_type):
+    """
+    Finds Security ID using Dhan's Scrip Master CSV.
+    Reliable, fast, and avoids 'AttributeError'.
+    """
     try:
+        # 1. Download the Scrip Master (Detailed)
         url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-        response = requests.get(url, timeout=15)
-        lines = response.text.splitlines()
-        reader = csv.DictReader(lines)
+        response = requests.get(url, timeout=10)
         
-        target_expiry = datetime.strptime(expiry, "%Y-%m-%d").date()
+        # 2. Parse the CSV
+        decoded_content = response.content.decode('utf-8')
+        cr = csv.DictReader(decoded_content.splitlines())
+        
+        # Standardize expiry format for comparison
+        # CSV format is usually YYYY-MM-DD HH:MM:SS
+        target_expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
 
-        for row in reader:
-            if row.get("SEM_INSTRUMENT_NAME") != "OPTIDX": continue
-            if symbol not in row.get("SEM_SYMBOL_NAME", ""): continue
+        for row in cr:
+            # Filters
+            if row.get('SEM_INSTRUMENT_NAME') != 'OPTIDX': continue
+            if symbol not in row.get('SEM_SYMBOL_NAME', ''): continue
+            if row.get('SEM_OPTION_TYPE') != option_type: continue
             
-            # Match Strike
-            row_strike = int(float(row.get("SEM_STRIKE_PRICE", 0)))
-            if row_strike != strike: continue
-            
-            # Match Option Type
-            if row.get("SEM_OPTION_TYPE") != option_type: continue
-            
-            # Match Expiry
-            row_expiry_str = row.get("SEM_EXPIRY_DATE", "")
+            # Match Strike Price
             try:
-                row_expiry = datetime.strptime(row_expiry_str, "%Y-%m-%d %H:%M:%S").date()
-            except:
-                continue
-                
-            if row_expiry == target_expiry:
-                return str(row.get("SEM_SMST_SECURITY_ID"))
-                
+                row_strike = int(float(row.get('SEM_STRIKE_PRICE', 0)))
+                if row_strike != strike: continue
+            except: continue
+            
+            # Match Expiry Date
+            try:
+                row_expiry_str = row.get('SEM_EXPIRY_DATE', '').split(' ')[0]
+                row_expiry = datetime.strptime(row_expiry_str, "%Y-%m-%d").date()
+                if row_expiry != target_expiry_date: continue
+            except: continue
+
+            # If we reached here, it's a match!
+            sec_id = row.get('SEM_SMST_SECURITY_ID')
+            logger.info(f"✅ Found ID for {symbol} {strike} {option_type}: {sec_id}")
+            return str(sec_id)
+
+        logger.warning(f"❌ No ID found in CSV for {symbol} {strike} {option_type}")
         return None
+
     except Exception as e:
-        logger.error(f"CSV lookup failed: {e}")
+        logger.error(f"Failed to find ID via CSV: {e}")
         return None
 # --------------------------------------------------
 # Auto-update ATM option IDs based on current spot
@@ -487,10 +501,11 @@ async def websocket_loop():
                     await asyncio.sleep(30)
                     continue
 # Create a simple list of tuples for the subscription
-            instruments = [
+instruments = [
                 (MarketFeed.NSE_FNO, str(CE_ID), MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, str(PE_ID), MarketFeed.Ticker)
-            ]
+            ]           
+
             
             # Initialize without DhanContext if using MarketFeed directly
             feed = CustomFeed(CLIENT_ID, ACCESS_TOKEN, instruments, version="v2")
