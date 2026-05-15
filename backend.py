@@ -1,10 +1,11 @@
 import os
+import math
 import logging
 import pandas as pd
+
 from flask import Flask, jsonify
 from flask_cors import CORS
 from dhanhq import dhanhq
-from datetime import datetime
 
 # =========================
 # LOGGING
@@ -13,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =========================
-# FLASK
+# FLASK APP
 # =========================
 app = Flask(__name__)
 CORS(app)
@@ -21,201 +22,151 @@ CORS(app)
 application = app
 
 # =========================
-# ENV VARIABLES
-# =========================
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-# =========================
 # DHAN CLIENT
 # =========================
 def get_dhan_client():
     try:
-        client = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+        client_id = os.getenv("DHAN_CLIENT_ID")
+        access_token = os.getenv("DHAN_ACCESS_TOKEN")
+
+        if not client_id or not access_token:
+            logger.error("Missing Dhan credentials")
+            return None
+
+        client = dhanhq(client_id, access_token)
+
         logger.info("Dhan client initialized successfully")
+
         return client
+
     except Exception as e:
         logger.error(f"Dhan Init Error: {e}")
         return None
 
 # =========================
-# LOAD DHAN INSTRUMENT CSV
+# LOAD DHAN CSV
 # =========================
 def load_instruments():
 
-    try:
-        logger.info("Loading Dhan instrument master...")
+    url = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+    df = pd.read_csv(url, low_memory=False)
 
-        df = pd.read_csv(url, low_memory=False)
-
-        df.columns = [c.strip().upper() for c in df.columns]
-
-        return df
-
-    except Exception as e:
-        logger.error(f"Instrument Load Error: {e}")
-        return None
+    return df
 
 # =========================
-# GET LIVE NIFTY PRICE
-# =========================
-# =========================
-# GET NIFTY SPOT
-# =========================
-try:
-    quote = client.quote_data({
-        "IDX_I": [13]
-    })
-
-    logger.info(f"Nifty Quote Response: {quote}")
-
-    if quote.get("status") != "success":
-        raise Exception("Quote API failed")
-
-    data = quote.get("data", {})
-
-    # Dhan response structure
-    nifty_data = data.get("IDX_I", {}).get("13", {})
-
-    spot = nifty_data.get("last_price")
-
-    if not spot:
-        raise Exception("Spot price missing")
-
-    spot = float(spot)
-
-    logger.info(f"NIFTY Spot = {spot}")
-
-except Exception as e:
-    logger.error(f"Nifty Spot Error: {e}")
-    raise Exception("Unable to fetch NIFTY spot")
-
-# =========================
-# FIND ATM CONTRACTS
+# OPTION CONTRACT SELECTION
 # =========================
 def get_option_contracts():
 
+    client = get_dhan_client()
+
+    if not client:
+        raise Exception("Dhan client failed")
+
     try:
 
-        client = get_dhan_client()
+        # =========================
+        # NIFTY SPOT
+        # =========================
+        quote = client.quote_data({
+            "IDX_I": [13]
+        })
 
-        if not client:
-            return None
+        logger.info(f"Nifty Quote Response: {quote}")
 
-        spot = get_nifty_spot(client)
+        if quote.get("status") != "success":
+            raise Exception("Quote API failed")
+
+        data = quote.get("data", {})
+
+        nifty_data = data.get("IDX_I", {}).get("13", {})
+
+        spot = nifty_data.get("last_price")
 
         if not spot:
-            raise Exception("Unable to fetch NIFTY spot")
+            raise Exception("Spot price missing")
+
+        spot = float(spot)
 
         logger.info(f"NIFTY Spot = {spot}")
 
+        # =========================
+        # ATM STRIKE
+        # =========================
         atm = round(spot / 50) * 50
 
         logger.info(f"ATM Strike = {atm}")
 
+        # =========================
+        # LOAD CSV
+        # =========================
         df = load_instruments()
 
-        if df is None:
-            raise Exception("Instrument CSV not loaded")
-
+        # =========================
         # FILTER NIFTY OPTIONS
-        opts = df[
-            (df["SEM_INSTRUMENT_NAME"] == "OPTIDX")
-            &
-            (
-                df["SEM_TRADING_SYMBOL"]
-                .astype(str)
-                .str.contains("NIFTY", na=False)
-            )
-        ].copy()
+        # =========================
+        nifty = df[
+            (df["SEM_CUSTOM_SYMBOL"].astype(str).str.contains("NIFTY")) &
+            (df["SEM_STRIKE_PRICE"].fillna(0).astype(float) == float(atm))
+        ]
 
-        logger.info(f"Option rows = {len(opts)}")
+        if nifty.empty:
+            raise Exception("No option contracts found")
 
-        if len(opts) == 0:
-            raise Exception("No option rows found")
-
-        # CONVERT STRIKE
-        opts["SEM_STRIKE_PRICE"] = pd.to_numeric(
-            opts["SEM_STRIKE_PRICE"],
-            errors="coerce"
-        )
-
+        # =========================
         # EXPIRY
-        opts["SEM_EXPIRY_DATE"] = pd.to_datetime(
-            opts["SEM_EXPIRY_DATE"],
+        # =========================
+        nifty["EXPIRY"] = pd.to_datetime(
+            nifty["SEM_EXPIRY_DATE"],
             errors="coerce"
         )
 
-        opts = opts.dropna(subset=["SEM_EXPIRY_DATE"])
+        nifty = nifty.sort_values("EXPIRY")
 
-        nearest_expiry = opts["SEM_EXPIRY_DATE"].min()
+        nearest_expiry = nifty["EXPIRY"].iloc[0]
 
-        logger.info(f"Nearest expiry = {nearest_expiry}")
+        nifty = nifty[nifty["EXPIRY"] == nearest_expiry]
 
-        opts = opts[
-            opts["SEM_EXPIRY_DATE"] == nearest_expiry
-        ]
+        # =========================
+        # CE / PE
+        # =========================
+        ce = nifty[
+            nifty["SEM_OPTION_TYPE"] == "CE"
+        ].iloc[0]
 
-        # CE
-        ce = opts[
-            (
-                opts["SEM_OPTION_TYPE"]
-                .astype(str)
-                .str.upper() == "CE"
-            )
-            &
-            (
-                opts["SEM_STRIKE_PRICE"] == atm
-            )
-        ]
+        pe = nifty[
+            nifty["SEM_OPTION_TYPE"] == "PE"
+        ].iloc[0]
 
-        # PE
-        pe = opts[
-            (
-                opts["SEM_OPTION_TYPE"]
-                .astype(str)
-                .str.upper() == "PE"
-            )
-            &
-            (
-                opts["SEM_STRIKE_PRICE"] == atm
-            )
-        ]
-
-        if len(ce) == 0:
-            raise Exception("No CE found")
-
-        if len(pe) == 0:
-            raise Exception("No PE found")
-
-        ce_row = ce.iloc[0]
-        pe_row = pe.iloc[0]
-
-        result = {
+        return {
             "spot": spot,
             "atm": atm,
             "expiry": str(nearest_expiry.date()),
-            "ce_security_id": str(ce_row["SEM_SMST_SECURITY_ID"]),
-            "pe_security_id": str(pe_row["SEM_SMST_SECURITY_ID"]),
-            "ce_symbol": ce_row["SEM_TRADING_SYMBOL"],
-            "pe_symbol": pe_row["SEM_TRADING_SYMBOL"],
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "ce_security_id": str(ce["SEM_SMST_SECURITY_ID"]),
+            "pe_security_id": str(pe["SEM_SMST_SECURITY_ID"]),
+            "ce_symbol": ce["SEM_CUSTOM_SYMBOL"],
+            "pe_symbol": pe["SEM_CUSTOM_SYMBOL"]
         }
-
-        logger.info(f"Selected Contracts: {result}")
-
-        return result
 
     except Exception as e:
         logger.exception(f"Contract Selection Error: {e}")
         return None
 
 # =========================
-# ROUTES
+# HOME
 # =========================
-@app.route('/api/trading-signals')
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "NIFTY ATM API Running"
+    })
+
+# =========================
+# API
+# =========================
+@app.route("/api/trading-signals")
 def trading_signals():
 
     data = get_option_contracts()
@@ -230,10 +181,6 @@ def trading_signals():
         "status": "success",
         "data": data
     })
-
-@app.route("/api/health")
-def health():
-    return "OK", 200
 
 # =========================
 # MAIN
