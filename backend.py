@@ -116,63 +116,29 @@ def get_dhan_api():
 def get_nifty_spot():
     """Fetch current Nifty spot via Dhan's ticker_data API"""
     try:
-        dhan = get_dhan_api()
-        # Securities dict: key is exchange segment, value is list of security IDs
-        # 13 = NIFTY 50, IDX_I = Index segment
-        ticker_response = dhan.ticker_data(securities={"IDX_I": [13]})
-        spot = ticker_response['data']['IDX_I'][0]['last_price']
-        logger.info(f"Spot NIFTY: {spot}")
-        return float(spot)
+        # Create Dhan context and API object
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        dhan = dhanhq(ctx)
+
+        # Request ticker data for Nifty index (segment IDX_I, security ID 13)
+        # The response structure is: {'data': {'IDX_I': [{'ltp': float}]}}
+        ticker_response = dhan.ticker_data(securities={"IDX_I": ["13"]})
+
+        # Extract the LTP directly from the response
+        # This avoids the KeyError by using .get() with a default value
+        ltp = ticker_response.get('data', {}).get('IDX_I', [{}])[0].get('ltp', 0)
+
+        if ltp == 0:
+            logger.error("Failed to extract LTP from ticker response")
+            return None
+
+        logger.info(f"Spot NIFTY: {ltp}")
+        return float(ltp)
+
     except Exception as e:
         logger.error(f"Failed to get spot: {e}")
         logger.error(traceback.format_exc())
         return None
-
-def get_nearest_weekly_expiry():
-    """First expiry date from Dhan's expiry_list API"""
-    try:
-        dhan = get_dhan_api()
-        expiries = dhan.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
-        if expiries and 'data' in expiries and len(expiries['data']) > 0:
-            return expiries['data'][0]
-    except Exception as e:
-        logger.error(f"Expiry fetch failed: {e}")
-        logger.error(traceback.format_exc())
-    # Fallback: next Thursday
-    base = datetime.now()
-    days_ahead = 3 - base.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    expiry_date = base + timedelta(days=days_ahead)
-    return expiry_date.strftime("%Y-%m-%d")
-
-def calculate_atm_strike(spot):
-    return int(round(spot / 50.0) * 50)
-
-def fetch_atm_option_ids(expiry, strike):
-    """Use Dhan's option_chain API to get CE and PE security IDs"""
-    try:
-        dhan = get_dhan_api()
-        oc = dhan.option_chain(
-            under_security_id=13,
-            under_exchange_segment="IDX_I",
-            expiry=expiry
-        )
-        # Convert strike to the format used in the response (a string with 6 decimal places)
-        strike_key = f"{float(strike):.6f}"
-        instruments = oc['data']['oc'].get(strike_key)
-        if instruments:
-            ce_id = str(instruments['ce']['security_id'])
-            pe_id = str(instruments['pe']['security_id'])
-            return ce_id, pe_id
-        else:
-            logger.error(f"Strike {strike} not found in option chain for expiry {expiry}")
-            return None, None
-    except Exception as e:
-        logger.error(f"Option chain fetch failed: {e}")
-        logger.error(traceback.format_exc())
-        return None, None
-
 def update_atm_option_ids(force=False):
     global CE_ID, PE_ID, current_strike, current_expiry, last_id_update, need_restart
     now = time.time()
