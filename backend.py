@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Fully corrected for DhanHQ MarketFeed V2 – NO callback assignments
+# Fully corrected for DhanHQ MarketFeed V2 – with explicit subscription
 
 import os
 import asyncio
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
-application = app  # for Gunicorn
+application = app
 
 # --------------------------------------------------
 # Environment variables
@@ -37,7 +37,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# OPTION SECURITY IDS (replace with your live IDs)
+# OPTION SECURITY IDS (⚠️ replace with YOUR actual IDs)
 # --------------------------------------------------
 CE_ID = "63719"
 PE_ID = "63720"
@@ -244,10 +244,13 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
 def process_tick(tick):
     global tick_counter
     try:
+        # v2 uses 'securityId' and 'ltp'
         security_id = str(tick.get("securityId", tick.get("security_id", "")))
         price = float(tick.get("ltp", tick.get("LTP", 0)))
         if not security_id or price == 0:
             return
+
+        logger.debug(f"Raw tick: {security_id} = {price}")
 
         if security_id == CE_ID:
             latest_data["ce_price"] = price
@@ -281,13 +284,13 @@ def process_tick(tick):
                 run_advanced_analysis(ce, pe, spread, pcr, prices)
 
             latest_data["timestamp"] = datetime.now().isoformat()
-            print(f"Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
+            print(f"✅ Tick: CE={ce} PE={pe} Spread={spread:.2f} Signal={latest_data['signal']}")
 
     except Exception as e:
         logger.error(f"Tick processing error: {e}")
 
 # --------------------------------------------------
-# CUSTOM FEED CLASS – NO CALLBACK ASSIGNMENTS
+# CUSTOM FEED CLASS
 # --------------------------------------------------
 class CustomFeed(MarketFeed):
     def __init__(self, dhan_context, instruments, version="v2"):
@@ -306,7 +309,7 @@ class CustomFeed(MarketFeed):
         logger.warning("WebSocket closed – will reconnect")
 
 # --------------------------------------------------
-# ASYNC WEBSOCKET LOOP (clean reconnection)
+# ASYNC WEBSOCKET LOOP (with explicit subscription)
 # --------------------------------------------------
 async def websocket_loop():
     while True:
@@ -320,9 +323,10 @@ async def websocket_loop():
 
             logger.info(f"Subscribing to CE={CE_ID}, PE={PE_ID}")
             await feed.connect()
-            logger.info("Feed connected – waiting for ticks...")
+            await feed.subscribe_instruments()   # 🔑 THIS WAS MISSING
+            logger.info("Feed connected and subscribed – waiting for ticks...")
 
-            # Keep running – the feed's internal loop handles messages
+            # Keep the connection alive
             while True:
                 await asyncio.sleep(1)
 
