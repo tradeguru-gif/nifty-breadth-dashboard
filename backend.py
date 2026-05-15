@@ -12,7 +12,6 @@ app = Flask(__name__)
 CORS(app)
 application = app 
 
-# Fetch from Render Env
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
@@ -20,28 +19,26 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 dhan = None
 
 def get_dhan_client():
-    """Final fixed initialization for dhanhq 2.2.0"""
+    """Universal init for dhanhq 2.2.0"""
     global dhan
     if dhan is not None:
         return dhan
     
     try:
-        # In version 2.2.0, the first positional argument is the token.
-        # We pass it this way to avoid the "3 arguments given" error.
-        dhan = dhanhq(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
+        # Standard initialization for 2.2.0
+        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
         logger.info("✅ Dhan client successfully started")
-    except TypeError:
-        # Fallback: some 2.x versions only take the token in the constructor
-        # and handle the Client ID internally or via keyword.
+    except Exception as e:
+        logger.warning(f"Standard init failed, trying positional: {e}")
         try:
+            # Fallback for older positional logic
             dhan = dhanhq(ACCESS_TOKEN)
-            logger.info("✅ Dhan client started with Token fallback")
-        except Exception as e:
-            logger.error(f"❌ All initialization attempts failed: {e}")
+            logger.info("✅ Dhan client started with fallback")
+        except Exception as final_e:
+            logger.error(f"❌ Initialization failed: {final_e}")
             dhan = None
     return dhan
 
-# DATA STORE
 market_data = {"spot": 0.0, "status": "online"}
 
 @app.route('/')
@@ -52,10 +49,9 @@ def home():
             # Security ID 13 = Nifty 50 Index
             resp = client.get_quote_data(securities={"IDX_I": [13]})
             
-            # Robust dictionary checking to prevent the 'str' error
+            # Check if resp is a dictionary to avoid 'str' attribute errors
             if isinstance(resp, dict) and resp.get('status') == 'success':
                 data = resp.get('data', {})
-                # Fetching the price safely
                 market_data["spot"] = data.get('last_price', 0.0)
                 market_data["status"] = "Connected"
             else:
@@ -64,10 +60,6 @@ def home():
             logger.error(f"Quote fetch error: {e}")
             market_data["status"] = "Fetch Error"
             
-    return jsonify(market_data)
-
-@app.route('/api/trading-signals')
-def signals():
     return jsonify(market_data)
 
 if __name__ == '__main__':
