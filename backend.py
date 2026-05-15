@@ -238,14 +238,7 @@ def get_option_contracts():
 # =========================
 # ROUTES
 # =========================
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "NIFTY ATM Selector"
-    })
-
-@app.route("/api/trading-signals")
+@app.route('/api/trading-signals')
 def trading_signals():
 
     data = get_option_contracts()
