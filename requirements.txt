@@ -1,5 +1,8 @@
 flask==2.3.3
 flask-cors==4.0.1
-dhanhq>=2.1.0
+dhanhq>=2.2.0
 gunicorn==21.2.0
 requests==2.31.0
+websockets
+pandas
+pyOpenSSL
