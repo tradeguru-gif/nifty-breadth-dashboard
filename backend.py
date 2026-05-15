@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Merged: Auto ATM selection + Advanced Technical Analysis + Reliable WebSocket Feed
+# Fixed: dhanhq initialisation with DhanContext
 
 import os
 import asyncio
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
-application = app  # for gunicorn
+application = app
 
 # --------------------------------------------------
 # Environment variables
@@ -44,7 +44,6 @@ current_strike = None
 current_expiry = None
 last_id_update = 0
 ID_REFRESH_INTERVAL = 3600       # 1 hour
-SPOT_DEVIATION_PERCENT = 0.02    # 2% change triggers refresh
 need_restart = False
 
 # --------------------------------------------------
@@ -103,7 +102,7 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Technical indicators (from original engine)
+# Technical indicators (unchanged)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -160,7 +159,7 @@ def estimate_greeks(ce, pe):
     return delta, gamma, theta, vega
 
 # --------------------------------------------------
-# PCR fetcher (NSE)
+# PCR fetcher (unchanged)
 # --------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -188,7 +187,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced analysis (combines all signals)
+# Advanced analysis (unchanged)
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -246,14 +245,14 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# Auto ATM instrument selection (using Dhan APIs)
+# Auto ATM instrument selection (FIXED: use DhanContext)
 # --------------------------------------------------
 def get_nifty_spot():
     """Fetch current Nifty spot via Dhan quote API"""
     try:
-        # Security ID 13 = NIFTY 50
-        dhan_obj = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        quote = dhan_obj.get_quote_data(securities={"IDX_I": [13]})
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        dhan = dhanhq(ctx)
+        quote = dhan.get_quote_data(securities={"IDX_I": [13]})
         spot = quote['data']['last_price']
         logger.info(f"Spot NIFTY: {spot}")
         return float(spot)
@@ -264,13 +263,14 @@ def get_nifty_spot():
 def get_nearest_weekly_expiry():
     """First expiry date from Dhan expiry list"""
     try:
-        dhan_obj = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        expiries = dhan_obj.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        dhan = dhanhq(ctx)
+        expiries = dhan.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
         if expiries and 'data' in expiries and len(expiries['data']) > 0:
-            return expiries['data'][0]   # closest expiry
+            return expiries['data'][0]
     except Exception as e:
         logger.error(f"Expiry fetch failed: {e}")
-    # Fallback: next Thursday
+    # Fallback to next Thursday
     base = datetime.now()
     days_ahead = 3 - base.weekday()
     if days_ahead <= 0:
@@ -282,15 +282,15 @@ def calculate_atm_strike(spot):
     return int(round(spot / 50.0) * 50)
 
 def fetch_atm_option_ids(expiry, strike):
-    """Use Dhan option_chain to get CE and PE security IDs for given expiry and strike"""
+    """Use Dhan option_chain to get CE and PE security IDs"""
     try:
-        dhan_obj = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        oc = dhan_obj.option_chain(
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        dhan = dhanhq(ctx)
+        oc = dhan.option_chain(
             under_security_id=13,
             under_exchange_segment="IDX_I",
             expiry=expiry
         )
-        # The option chain response: oc['data']['oc'] is a dict with strike as key (as string with decimals)
         strike_key = f"{float(strike):.6f}"
         instruments = oc['data']['oc'].get(strike_key)
         if instruments:
@@ -298,7 +298,7 @@ def fetch_atm_option_ids(expiry, strike):
             pe_id = str(instruments['pe']['security_id'])
             return ce_id, pe_id
         else:
-            logger.error(f"Strike {strike} not found in option chain for expiry {expiry}")
+            logger.error(f"Strike {strike} not found in option chain")
             return None, None
     except Exception as e:
         logger.error(f"Option chain fetch failed: {e}")
@@ -331,14 +331,14 @@ def update_atm_option_ids(force=False):
         latest_data["strike"] = strike
         latest_data["expiry"] = expiry
         logger.info(f"Updated ATM options: Strike={strike}, Expiry={expiry}, CE={CE_ID}, PE={PE_ID}")
-        need_restart = True   # signal feed to reconnect with new IDs
+        need_restart = True
         return True
     else:
         logger.error("Failed to fetch CE or PE IDs – keeping old ones")
         return False
 
 # --------------------------------------------------
-# Tick processor (uses current CE_ID / PE_ID)
+# Tick processor (unchanged)
 # --------------------------------------------------
 def process_tick(tick):
     global tick_counter
@@ -390,7 +390,7 @@ def process_tick(tick):
         logger.error(f"Tick processing error: {e}")
 
 # --------------------------------------------------
-# Custom Feed Class (robust v2)
+# Custom Feed Class (unchanged)
 # --------------------------------------------------
 class CustomFeed(MarketFeed):
     def __init__(self, dhan_context, instruments, version="v2"):
@@ -409,13 +409,12 @@ class CustomFeed(MarketFeed):
         logger.warning("WebSocket closed – will reconnect")
 
 # --------------------------------------------------
-# Async WebSocket loop with auto‑restart on ID change
+# Async WebSocket loop with auto‑restart
 # --------------------------------------------------
 async def websocket_loop():
     global need_restart, CE_ID, PE_ID, current_strike
     while True:
         try:
-            # Ensure we have valid IDs before connecting
             if CE_ID is None or PE_ID is None:
                 logger.info("Initializing option IDs...")
                 update_atm_option_ids(force=True)
@@ -436,26 +435,25 @@ async def websocket_loop():
             await feed.subscribe_instruments()
             logger.info("Feed connected and subscribed – waiting for ticks...")
 
-            # Keep alive until restart flag is set
             while not need_restart:
                 await asyncio.sleep(1)
 
             logger.info("Restarting feed due to ID change...")
             need_restart = False
             await feed.disconnect()
-            await asyncio.sleep(5)   # allow cleanup
+            await asyncio.sleep(5)
 
         except Exception as e:
             logger.error(f"Feed crashed: {e}, reconnecting in 10s")
             await asyncio.sleep(10)
 
 # --------------------------------------------------
-# Background thread: periodic ID updater
+# Background ID updater
 # --------------------------------------------------
 def periodic_id_updater():
     global need_restart
     while True:
-        time.sleep(300)   # check every 5 minutes
+        time.sleep(300)   # every 5 minutes
         spot = get_nifty_spot()
         if spot:
             new_strike = calculate_atm_strike(spot)
@@ -478,7 +476,7 @@ threading.Thread(target=periodic_id_updater, daemon=True).start()
 logger.info("✅ Background signal engine started with auto‑ATM selection")
 
 # --------------------------------------------------
-# Flask Routes
+# Flask routes
 # --------------------------------------------------
 @app.route("/")
 def home():
@@ -505,7 +503,7 @@ def trading_signals():
 @app.route("/debug/version")
 def debug_version():
     return jsonify({
-        "version": "Auto-ATM + Advanced Signals v2",
+        "version": "Auto-ATM + Advanced Signals v2 (fixed dhanhq init)",
         "ce_id": CE_ID,
         "pe_id": PE_ID,
         "strike": current_strike,
@@ -514,7 +512,6 @@ def debug_version():
 
 @app.route("/api/refresh-atm", methods=['POST'])
 def refresh_atm():
-    """Manual trigger to refresh ATM option IDs"""
     success = update_atm_option_ids(force=True)
     return jsonify({"status": "updated" if success else "failed", "ce_id": CE_ID, "pe_id": PE_ID})
 
