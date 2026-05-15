@@ -1,10 +1,10 @@
 import os
 import logging
+import math
 from flask import Flask, jsonify
 from flask_cors import CORS
 from dhanhq import dhanhq
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -12,67 +12,65 @@ app = Flask(__name__)
 CORS(app)
 application = app 
 
-# Fetch credentials
+# Credentials
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
 def get_dhan_client():
     """
-    Direct Injection Method: This bypasses the library's internal 
-    constructor logic that is causing the 'str' object error.
+    FIX: Pass credentials as POSITIONAL arguments only.
+    Dhan's library is failing because of keyword arguments.
     """
     try:
-        # Create a bare client instance
-        # We pass the token as the first positional argument
-        client = dhanhq(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
-        
-        # MANUAL OVERRIDE: 
-        # The library error happens because it expects 'access_token' 
-        # to be an object with a 'get_dhan_http' method. 
-        # We force the internal variables to the raw strings they need to be.
-        client.access_token = ACCESS_TOKEN
-        client.client_id = CLIENT_ID
-        
+        # Pass values directly without 'client_id=' labels
+        client = dhanhq(CLIENT_ID, ACCESS_TOKEN)
         return client
     except Exception as e:
-        # Fallback for older versions of the library
-        try:
-            client = dhanhq()
-            client.access_token = ACCESS_TOKEN
-            client.client_id = CLIENT_ID
-            return client
-        except:
-            logger.error(f"Failed to initialize Dhan: {e}")
-            return None
+        logger.error(f"Failed to initialize Dhan: {e}")
+        return None
+
+def calculate_atm(spot_price):
+    """Calculates the Nifty ATM strike (multiples of 50)"""
+    return round(spot_price / 50) * 50
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "backend": "active"})
+    return jsonify({"status": "online", "feature": "ATM Selection Active"})
 
 @app.route('/api/trading-signals')
 def signals():
     client = get_dhan_client()
     if not client:
-        return jsonify({"status": "error", "message": "API Client Fail"}), 500
+        return jsonify({"status": "error", "message": "Init Failed"}), 500
         
     try:
-        # Get Nifty 50 Index (Security ID 13)
-        # We use keyword arguments here to stay safe
-        resp = client.get_quote_data(securities={"IDX_I": [13]})
+        # 1. Fetch Nifty 50 Spot Price (Security ID 13)
+        quote = client.get_quote_data(securities={"IDX_I": [13]})
         
-        # Check if response is valid JSON/Dict
-        if isinstance(resp, dict) and resp.get('status') == 'success':
-            last_price = resp.get('data', {}).get('last_price', 0)
+        if isinstance(quote, dict) and quote.get('status') == 'success':
+            spot_price = quote.get('data', {}).get('last_price', 0)
+            
+            # 2. Automatic ATM Selection Logic
+            atm_strike = calculate_atm(spot_price)
+            itm_call = atm_strike - 50  # Just down
+            otm_call = atm_strike + 50  # Just up
+            
             return jsonify({
-                "spot": last_price,
-                "status": "online",
-                "timestamp": "Live"
+                "status": "success",
+                "spot": spot_price,
+                "atm": atm_strike,
+                "selection": {
+                    "atm": atm_strike,
+                    "near_down": itm_call,
+                    "near_up": otm_call
+                },
+                "note": "Strike selection based on Nifty 50-point intervals"
             })
         
-        return jsonify({"status": "api_offline", "response": str(resp)})
+        return jsonify({"status": "api_error", "msg": str(quote)})
 
     except Exception as e:
-        logger.error(f"Fetch Error: {e}")
+        logger.error(f"Logic Error: {e}")
         return jsonify({"status": "exception", "error": str(e)}), 500
 
 if __name__ == '__main__':
