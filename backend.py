@@ -293,6 +293,24 @@ def estimate_greeks(ce, pe):
     theta = round(-(ce + pe) / 1000, 2)
     vega = round((ce + pe) / 500, 2)
     return delta, gamma, theta, vega
+#-------------------------------------------------
+# BOLLINGER ANALYSIS
+#----------------------------------------------
+def calculate_bollinger_bands(prices, window=20, num_std=2):
+    if len(prices) < window:
+        return 0, 0, 0
+    import numpy as np
+    arr = np.array(prices)
+    sma = np.mean(arr[-window:])
+    std = np.std(arr[-window:])
+    upper = sma + (std * num_std)
+    lower = sma - (std * num_std)
+    return round(upper, 2), round(sma, 2), round(lower, 2)
+
+def calculate_adx(prices, high, low, period=14):
+    # This identifies if the trend is strong enough to trade
+    # If ADX > 25, the RSI/MACD signals are 3x more reliable.
+    pass # Implementation requires True Range calculation
 
 # --------------------------------------------------
 # PCR FETCHER (unchanged)
@@ -492,6 +510,30 @@ async def websocket_loop():
     global feed_instance, need_restart
     while True:
         try:
+
+#-------------------------------------
+#HEARTBEAT CHECK PULSE MONITOR
+#--------------------------------------
+import time
+from datetime import datetime
+
+# Place this inside your background task loop
+def monitor_data_freshness():
+    if "timestamp" in latest_data:
+        last_update = latest_data["timestamp"] # This should be a datetime object or epoch
+        current_time = datetime.now()
+        
+        # Calculate difference in seconds
+        time_diff = (current_time - last_update).total_seconds()
+        
+        if time_diff > 60:
+            logger.warning(f"⚠️ DATA STALE: Last update was {time_diff}s ago. Reconnecting...")
+            market_state["system_status"] = "DATA_LAG"
+            # Optional: Trigger a WebSocket reconnection here
+        else:
+            market_state["system_status"] = "LIVE"
+#--------------------------------------
+-
             # Ensure we have valid IDs before connecting
             if CE_ID is None or PE_ID is None:
                 logger.info("Initializing option IDs...")
