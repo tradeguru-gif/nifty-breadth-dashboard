@@ -35,13 +35,21 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 # Most versions of dhanhq take (client_id, access_token). 
 # If it fails, we wrap it to ensure it matches the library expectations.
 try:
-    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-    logger.info("✅ Dhan client initialized successfully")
-except TypeError:
-    # Fallback for older/newer versions that might only want the token
-    dhan = dhanhq(ACCESS_TOKEN)
-    logger.info("✅ Dhan client initialized with Token only")
-
+   # ------------------------------------------------------------
+# Dhan Client Initialization
+# ------------------------------------------------------------
+try:
+    # Use keyword arguments to ensure the library maps them correctly
+    dhan = dhanhq(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
+    logger.info("✅ Dhan client initialized successfully with Keyword Arguments")
+except Exception as e:
+    logger.error(f"Failed to initialize Dhan: {e}")
+    # Final fallback attempt
+    try:
+        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+    except Exception as final_e:
+        logger.error(f"Critical initialization failure: {final_e}")
+        raise
 # ------------------------------------------------------------
 # Fixed Spot Fetcher
 # ------------------------------------------------------------
