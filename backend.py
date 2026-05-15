@@ -23,18 +23,17 @@ def get_dhan_client():
         return None
 
     try:
-        client = DhanHQ(cid)
+        client = DhanHQ(
+            cid,
+            tkn
+        )
 
-        # manually inject token for older SDK
-        client.access_token = tkn
-
-        logger.info("Dhan client initialized")
+        logger.info("Dhan client initialized successfully")
         return client
 
     except Exception as e:
         logger.error(f"Dhan Init Error: {e}")
         return None
-
     try:
         # CORRECT INITIALIZATION
         client = dhanhq(
