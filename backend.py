@@ -1,5 +1,6 @@
 import os
 import logging
+import requests
 import pandas as pd
 from datetime import datetime
 from flask import Flask, jsonify
@@ -29,7 +30,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Dhan client helper (using DhanContext for v2.2.0)
+# Dhan client helper
 # --------------------------------------------------
 def get_dhan_client():
     try:
@@ -37,6 +38,31 @@ def get_dhan_client():
         return dhanhq(ctx)
     except Exception as e:
         logger.error(f"Failed to create Dhan client: {e}")
+        return None
+
+# --------------------------------------------------
+# Get Nifty spot price from public NSE API (reliable)
+# --------------------------------------------------
+def get_nifty_spot():
+    """Fetch Nifty spot from NSE's official API (works even when market closed)"""
+    try:
+        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
+        session = requests.Session()
+        # First hit the homepage to set cookies
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        time.sleep(0.5)  # Small delay to avoid rate limiting
+        response = session.get(url, headers=headers, timeout=10)
+        data = response.json()
+        spot = data['data'][0]['lastPrice']
+        logger.info(f"NIFTY spot from NSE = {spot}")
+        return float(spot)
+    except Exception as e:
+        logger.error(f"Failed to get spot from NSE: {e}")
         return None
 
 # --------------------------------------------------
@@ -53,55 +79,23 @@ def load_instruments():
         raise
 
 # --------------------------------------------------
-# Get Nifty spot price (corrected path)
-# --------------------------------------------------
-def get_nifty_spot(client):
-    try:
-        # Quote request for index segment IDX_I, security ID 13 (Nifty 50)
-        response = client.quote_data(securities={"IDX_I": ["13"]})
-        logger.debug(f"Quote response: {response}")
-
-        if response.get("status") != "success":
-            raise Exception(f"Quote API failed: {response.get('remarks')}")
-
-        # Navigate the nested structure
-        data = response.get("data", {})
-        # The actual data is inside another "data" key
-        inner_data = data.get("data", {})
-        nifty_data = inner_data.get("IDX_I", {}).get("13", {})
-
-        spot = nifty_data.get("last_price")
-        if spot is None:
-            raise Exception("Spot price missing in response")
-
-        spot = float(spot)
-        logger.info(f"NIFTY spot = {spot}")
-        return spot
-
-    except Exception as e:
-        logger.error(f"Failed to get spot: {e}")
-        logger.exception(e)
-        return None
-
-# --------------------------------------------------
 # Select nearest ATM weekly option contracts
 # --------------------------------------------------
 def get_option_contracts():
-    client = get_dhan_client()
-    if not client:
-        return {"error": "Dhan client not available"}
-
-    # 1. Get spot price
-    spot = get_nifty_spot(client)
+    # 1. Get spot price (using NSE public API)
+    spot = get_nifty_spot()
     if spot is None:
-        return {"error": "Could not fetch spot price"}
+        return {"error": "Could not fetch Nifty spot price from NSE"}
 
     # 2. Calculate ATM strike (multiple of 50)
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike}")
 
-    # 3. Load scrip master
-    df = load_instruments()
+    # 3. Load scrip master CSV
+    try:
+        df = load_instruments()
+    except Exception as e:
+        return {"error": f"Failed to load instruments: {str(e)}"}
 
     # 4. Filter Nifty options for the calculated strike
     nifty_options = df[
@@ -156,7 +150,7 @@ def get_option_contracts():
 def home():
     return jsonify({
         "status": "online",
-        "message": "NIFTY ATM API Running (fixed spot extraction)"
+        "message": "NIFTY ATM API Running (spot from NSE public API)"
     })
 
 @app.route("/api/trading-signals")
@@ -176,5 +170,6 @@ def trading_signals():
 # Main
 # --------------------------------------------------
 if __name__ == "__main__":
+    import time
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
