@@ -2,7 +2,7 @@ import os
 import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import dhanhq
+from dhanhq import dhanhq as DhanHQ
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +20,19 @@ def get_dhan_client():
 
     if not cid or not tkn:
         logger.error("Missing DHAN credentials")
+        return None
+
+    try:
+        client = DhanHQ(cid)
+
+        # manually inject token for older SDK
+        client.access_token = tkn
+
+        logger.info("Dhan client initialized")
+        return client
+
+    except Exception as e:
+        logger.error(f"Dhan Init Error: {e}")
         return None
 
     try:
