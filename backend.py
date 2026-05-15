@@ -5,26 +5,29 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from dhanhq import dhanhq
 
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-application = app 
 
-# Credentials
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+# Force the application variable for Gunicorn
+application = app
 
+# Credentials - Fetched inside the function to ensure they are fresh
 def get_dhan_client():
-    """
-    FIX: Pass credentials as POSITIONAL arguments only.
-    Dhan's library is failing because of keyword arguments.
-    """
+    client_id = os.getenv("DHAN_CLIENT_ID")
+    access_token = os.getenv("DHAN_ACCESS_TOKEN")
+    
+    if not client_id or not access_token:
+        logger.error("Environment variables missing")
+        return None
+
     try:
-        # Pass values directly without 'client_id=' labels
-        client = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        return client
+        # Pass credentials as POSITIONAL arguments
+        # This prevents the 'keyword argument' error
+        return dhanhq(client_id, access_token)
     except Exception as e:
         logger.error(f"Failed to initialize Dhan: {e}")
         return None
@@ -35,25 +38,32 @@ def calculate_atm(spot_price):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "feature": "ATM Selection Active"})
+    return jsonify({
+        "status": "online", 
+        "feature": "ATM Selection Active",
+        "info": "Nifty Breadth Dashboard API"
+    })
 
 @app.route('/api/trading-signals')
 def signals():
     client = get_dhan_client()
     if not client:
-        return jsonify({"status": "error", "message": "Init Failed"}), 500
+        return jsonify({
+            "status": "error", 
+            "message": "Init Failed - Check Render Env Vars"
+        }), 500
         
     try:
-        # 1. Fetch Nifty 50 Spot Price (Security ID 13)
+        # Fetch Nifty 50 Spot Price (Security ID 13)
         quote = client.get_quote_data(securities={"IDX_I": [13]})
         
         if isinstance(quote, dict) and quote.get('status') == 'success':
             spot_price = quote.get('data', {}).get('last_price', 0)
             
-            # 2. Automatic ATM Selection Logic
+            # Automatic ATM Selection Logic
             atm_strike = calculate_atm(spot_price)
-            itm_call = atm_strike - 50  # Just down
-            otm_call = atm_strike + 50  # Just up
+            itm_call = atm_strike - 50
+            otm_call = atm_strike + 50
             
             return jsonify({
                 "status": "success",
