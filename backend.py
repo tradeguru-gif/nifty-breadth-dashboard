@@ -1,7 +1,7 @@
 import os
 import logging
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 from dhanhq import DhanContext, dhanhq
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
-application = app  # for gunicorn
+application = app
 
 # --------------------------------------------------
 # Environment variables
