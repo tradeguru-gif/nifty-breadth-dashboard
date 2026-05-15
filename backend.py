@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Fully corrected for DhanHQ MarketFeed V2 + Render deployment
+# Fully corrected for DhanHQ MarketFeed V2 – NO callback assignments
 
 import os
 import asyncio
@@ -26,16 +26,13 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
-
-# Required for Gunicorn on Render
-application = app
+application = app  # for Gunicorn
 
 # --------------------------------------------------
 # Environment variables
 # --------------------------------------------------
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
@@ -94,7 +91,6 @@ institutional_state = {
 # Internal state
 # --------------------------------------------------
 price_history = deque(maxlen=200)
-
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
@@ -157,7 +153,7 @@ def estimate_greeks(ce, pe):
     return delta, gamma, theta, vega
 
 # --------------------------------------------------
-# PCR FETCHER (unchanged)
+# PCR FETCHER
 # --------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -185,7 +181,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# ADVANCED ANALYSIS (unchanged)
+# ADVANCED ANALYSIS
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -243,12 +239,11 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# TICK PROCESSOR (updated for v2 tick structure)
+# TICK PROCESSOR (v2 compatible)
 # --------------------------------------------------
 def process_tick(tick):
     global tick_counter
     try:
-        # v2 tick dictionary fields: 'securityId', 'ltp', etc.
         security_id = str(tick.get("securityId", tick.get("security_id", "")))
         price = float(tick.get("ltp", tick.get("LTP", 0)))
         if not security_id or price == 0:
@@ -292,7 +287,7 @@ def process_tick(tick):
         logger.error(f"Tick processing error: {e}")
 
 # --------------------------------------------------
-# CUSTOM MARKET FEED CLASS (CORRECT V2 PATTERN)
+# CUSTOM FEED CLASS – NO CALLBACK ASSIGNMENTS
 # --------------------------------------------------
 class CustomFeed(MarketFeed):
     def __init__(self, dhan_context, instruments, version="v2"):
@@ -302,7 +297,6 @@ class CustomFeed(MarketFeed):
         logger.info("✅ WebSocket connected successfully")
 
     def on_message(self, message):
-        # message is a dictionary with tick data
         process_tick(message)
 
     def on_error(self, error):
@@ -312,7 +306,7 @@ class CustomFeed(MarketFeed):
         logger.warning("WebSocket closed – will reconnect")
 
 # --------------------------------------------------
-# ASYNC WEBSOCKET LOOP (with reconnection)
+# ASYNC WEBSOCKET LOOP (clean reconnection)
 # --------------------------------------------------
 async def websocket_loop():
     while True:
@@ -324,11 +318,11 @@ async def websocket_loop():
             ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
             feed = CustomFeed(ctx, instruments, version="v2")
 
-            logger.info(f"Subscribing to CE={CE_ID}, PE={PE_ID} (using CustomFeed)")
+            logger.info(f"Subscribing to CE={CE_ID}, PE={PE_ID}")
             await feed.connect()
-            logger.info("Feed connected, waiting for ticks...")
+            logger.info("Feed connected – waiting for ticks...")
 
-            # Keep the connection alive
+            # Keep running – the feed's internal loop handles messages
             while True:
                 await asyncio.sleep(1)
 
@@ -337,7 +331,7 @@ async def websocket_loop():
             await asyncio.sleep(10)
 
 # --------------------------------------------------
-# BACKGROUND THREAD STARTER
+# START BACKGROUND THREAD
 # --------------------------------------------------
 def start_feed():
     loop = asyncio.new_event_loop()
@@ -381,7 +375,7 @@ def debug_version():
     })
 
 # --------------------------------------------------
-# MAIN ENTRY POINT
+# MAIN
 # --------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
