@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import requests
 import pandas as pd
@@ -170,6 +171,5 @@ def trading_signals():
 # Main
 # --------------------------------------------------
 if __name__ == "__main__":
-    import time
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
