@@ -3,14 +3,10 @@ import time
 import threading
 import logging
 import requests
-import pandas as pd
-from collections import deque
-from datetime import datetime
+import asyncio
 from flask import Flask, jsonify
 from flask_cors import CORS
-
-# Import the library
-from dhanhq import dhanhq
+from dhanhq import dhanhq, MarketFeed
 
 # ------------------------------------------------------------
 # Logging & Flask Setup
@@ -29,69 +25,105 @@ CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
 if not CLIENT_ID or not ACCESS_TOKEN:
-    raise ValueError("CRITICAL: Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
+    logger.error("CRITICAL: Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
+    # We don't raise ValueError here to allow the process to start 
+    # so you can see logs, but the app won't function.
 
-# FIXED INITIALIZATION: 
-# Most versions of dhanhq take (client_id, access_token). 
-# If it fails, we wrap it to ensure it matches the library expectations.
-try:
-   # ------------------------------------------------------------
+# ------------------------------------------------------------
 # Dhan Client Initialization
 # ------------------------------------------------------------
 try:
-    # Use keyword arguments to ensure the library maps them correctly
+    # Use keyword arguments to resolve the initialization conflict
     dhan = dhanhq(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
-    logger.info("✅ Dhan client initialized successfully with Keyword Arguments")
+    logger.info("✅ Dhan client initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize Dhan: {e}")
-    # Final fallback attempt
+    logger.error(f"Dhan Init Error: {e}")
+    # Final fallback for different library versions
     try:
         dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
     except Exception as final_e:
         logger.error(f"Critical initialization failure: {final_e}")
-        raise
-# ------------------------------------------------------------
-# Fixed Spot Fetcher
-# ------------------------------------------------------------
-def get_nifty_spot():
+        dhan = None
+
+# Global Data Store
+market_data = {
+    "CE": {"id": None, "ltp": 0.0, "signal": "Neutral"},
+    "PE": {"id": None, "ltp": 0.0, "signal": "Neutral"},
+    "spot": 0.0
+}
+
+def get_atm_instruments():
+    """Automatically selects Nifty ATM strike IDs."""
+    if not dhan:
+        return "63719", "63720"
     try:
-        # Requesting Nifty 50 Index (Security ID 13)
-        ticker_response = dhan.get_quote_data(securities={"IDX_I": [13]})
-        
-        # SAFETY CHECK: If the response is a string, it means an error occurred (like "Invalid Token")
-        if isinstance(ticker_response, str):
-            logger.error(f"API Error Response: {ticker_response}")
-            return None
-
-        # Standard dictionary extraction
-        data = ticker_response.get('data', {})
-        # Depending on version, it might be in 'IDX_I' or direct
-        idx_data = data.get('IDX_I', {})
-        
-        # Get ltp from the first item if it's a list, or directly if dict
-        if isinstance(idx_data, list) and len(idx_data) > 0:
-            return idx_data[0].get('ltp', 0)
-        elif isinstance(idx_data, dict):
-            # Try to get the first value from the dictionary
-            first_val = next(iter(idx_data.values()), {})
-            return first_val.get('ltp', 0)
+        quote = dhan.get_quote_data(securities={"IDX_I": [13]})
+        # Handle cases where response might be a string error
+        if isinstance(quote, str):
+            logger.error(f"API returned string error: {quote}")
+            return "63719", "63720"
             
-        return None
+        nifty_spot = quote['data']['last_price']
+        market_data["spot"] = nifty_spot
+        atm_strike = round(nifty_spot / 50) * 50
+        
+        expiries = dhan.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
+        current_expiry = expiries['data'][0]
+        
+        oc = dhan.option_chain(13, "IDX_I", current_expiry)
+        strike_key = f"{float(atm_strike):.6f}"
+        instruments = oc['data']['oc'].get(strike_key)
+        
+        if instruments:
+            return str(instruments['ce']['security_id']), str(instruments['pe']['security_id'])
     except Exception as e:
-        logger.error(f"Failed to get spot: {e}")
-        return None
+        logger.error(f"Auto-select failed: {e}")
+    return "63719", "63720"
 
-# ... rest of your code ...
+# --- WebSocket Feed Logic ---
 
-@app.route("/")
-def home():
-    spot = get_nifty_spot()
-    return jsonify({
-        "status": "online",
-        "nifty_spot": spot,
-        "timestamp": datetime.now().isoformat()
-    })
+async def on_message(instance, message):
+    if 'last_price' in message:
+        sec_id = str(message['security_id'])
+        price = message['last_price']
+        if sec_id == market_data["CE"]["id"]:
+            market_data["CE"]["ltp"] = price
+        elif sec_id == market_data["PE"]["id"]:
+            market_data["PE"]["ltp"] = price
 
-if __name__ == "__main__":
+def run_dhan_feed():
+    if not CLIENT_ID or not ACCESS_TOKEN:
+        return
+    
+    ce_id, pe_id = get_atm_instruments()
+    market_data["CE"]["id"] = ce_id
+    market_data["PE"]["id"] = pe_id
+
+    instruments = [
+        (MarketFeed.NSE_FNO, ce_id, MarketFeed.Ticker),
+        (MarketFeed.NSE_FNO, pe_id, MarketFeed.Ticker)
+    ]
+
+    try:
+        feed = MarketFeed(CLIENT_ID, ACCESS_TOKEN, instruments, version="v2")
+        feed.on_message = on_message
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(feed.connect())
+    except Exception as e:
+        logger.error(f"WebSocket Error: {e}")
+
+# --- Routes ---
+
+@app.route('/api/trading-signals', methods=['GET'])
+def get_signals():
+    return jsonify(market_data)
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+if __name__ == '__main__':
+    threading.Thread(target=run_dhan_feed, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
