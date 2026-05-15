@@ -17,11 +17,21 @@ application = app
 def get_dhan_client():
     cid = os.getenv("DHAN_CLIENT_ID")
     tkn = os.getenv("DHAN_ACCESS_TOKEN")
+
     if not cid or not tkn:
+        logger.error("Missing DHAN credentials")
         return None
+
     try:
-        # Using positional arguments to avoid 'unexpected keyword' errors
-        return dhanhq(cid, tkn)
+        # CORRECT INITIALIZATION
+        client = dhanhq(
+            client_id=cid,
+            access_token=tkn
+        )
+
+        logger.info("Dhan client initialized")
+        return client
+
     except Exception as e:
         logger.error(f"Dhan Init Error: {e}")
         return None
