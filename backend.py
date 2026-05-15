@@ -64,7 +64,8 @@ def load_instruments():
 def get_nifty_spot(client):
 
     try:
-        response = client.get_quote_data(
+
+        response = client.quote_data(
             {
                 "IDX_I": ["13"]
             }
@@ -72,17 +73,30 @@ def get_nifty_spot(client):
 
         logger.info(f"Nifty Quote Response: {response}")
 
+        # SAFETY CHECK
+        if not response:
+            return None
+
         data = response.get("data", {})
 
+        # Dhan response structure
         if "IDX_I" in data:
-            nifty_data = data["IDX_I"]["13"]
 
-            spot = nifty_data.get("last_price")
+            idx_data = data["IDX_I"]
 
-            return float(spot)
+            if "13" in idx_data:
+
+                spot = idx_data["13"].get("last_price")
+
+                return float(spot)
 
         return None
 
+    except Exception as e:
+
+        logger.error(f"Nifty Spot Error: {e}")
+
+        return None
     except Exception as e:
         logger.error(f"Nifty Spot Error: {e}")
         return None
