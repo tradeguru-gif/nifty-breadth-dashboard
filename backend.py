@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Fully corrected for DhanHQ MarketFeed V2 – with explicit subscription
+# Fully corrected for DhanHQ MarketFeed V2 + Auto ATM Option Selection
 
 import os
 import asyncio
@@ -7,12 +7,12 @@ import threading
 import time
 import logging
 import requests
-
+import re
+from datetime import datetime, timedelta
 from collections import deque
-from datetime import datetime
+
 from flask import Flask, jsonify
 from flask_cors import CORS
-
 from dhanhq import DhanContext, MarketFeed
 
 # --------------------------------------------------
@@ -37,13 +37,18 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# OPTION SECURITY IDS (⚠️ replace with YOUR actual IDs)
+# Global state for option IDs (auto-updated)
 # --------------------------------------------------
-CE_ID = "63719"
-PE_ID = "63720"
+CE_ID = None
+PE_ID = None
+current_strike = None
+current_expiry = None
+last_id_update = 0
+ID_REFRESH_INTERVAL = 3600   # 1 hour
+SPOT_DEVIATION_PERCENT = 0.02  # 2% deviation triggers refresh
 
 # --------------------------------------------------
-# Shared frontend state
+# Shared frontend state (same as before)
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -53,7 +58,9 @@ latest_data = {
     "rsi": 50,
     "macd": 0.0,
     "pcr": 1.0,
-    "timestamp": ""
+    "timestamp": "",
+    "strike": None,
+    "expiry": None
 }
 
 market_state = {
@@ -88,7 +95,7 @@ institutional_state = {
 }
 
 # --------------------------------------------------
-# Internal state
+# Internal tick processing state
 # --------------------------------------------------
 price_history = deque(maxlen=200)
 tick_counter = 0
@@ -96,7 +103,121 @@ UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# TECHNICAL INDICATORS (unchanged)
+# Helper: Get Nifty Spot Price (from NSE)
+# --------------------------------------------------
+def get_nifty_spot():
+    """Fetch current Nifty spot price from NSE"""
+    try:
+        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        time.sleep(0.5)
+        resp = session.get(url, headers=headers, timeout=5)
+        data = resp.json()
+        price = data['data'][0]['lastPrice']
+        logger.info(f"Spot NIFTY: {price}")
+        return float(price)
+    except Exception as e:
+        logger.error(f"Failed to fetch spot: {e}")
+        # Fallback to a default (e.g., previous close) or raise
+        return None
+
+# --------------------------------------------------
+# Helper: Get nearest weekly expiry (Thursday)
+# --------------------------------------------------
+def get_nearest_weekly_expiry(base_date=None):
+    if base_date is None:
+        base_date = datetime.now()
+    # Find next Thursday (weekday = 3)
+    days_ahead = 3 - base_date.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    expiry_date = base_date + timedelta(days=days_ahead)
+    # Return as YYYY-MM-DD
+    return expiry_date.strftime("%Y-%m-%d")
+
+# --------------------------------------------------
+# Helper: Calculate ATM strike (nearest 50 multiple)
+# --------------------------------------------------
+def calculate_atm_strike(spot):
+    # Nifty options have strikes in multiples of 50 (sometimes 100 for far)
+    return int(round(spot / 50.0) * 50)
+
+# --------------------------------------------------
+# Helper: Search Dhan for option security ID
+# --------------------------------------------------
+def find_option_security_id(symbol, expiry, strike, option_type):
+    """
+    symbol: "NIFTY" (or "BANKNIFTY")
+    expiry: "YYYY-MM-DD"
+    strike: int
+    option_type: "CE" or "PE"
+    Returns security_id as string or None
+    """
+    try:
+        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        # Search query: e.g., "NIFTY24MAY24500CE"
+        expiry_obj = datetime.strptime(expiry, "%Y-%m-%d")
+        # Format: DDMMM (e.g., 24MAY)
+        expiry_code = expiry_obj.strftime("%d%b").upper()
+        query = f"{symbol}{expiry_code}{strike}{option_type}"
+        logger.info(f"Searching for: {query}")
+        results = ctx.search_scrips(query)
+        if results and len(results) > 0:
+            # Usually the first result is the exact match
+            sec_id = str(results[0]['securityId'])
+            logger.info(f"Found ID for {query}: {sec_id}")
+            return sec_id
+        else:
+            logger.error(f"No results for {query}")
+            return None
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return None
+
+# --------------------------------------------------
+# Auto-update ATM option IDs based on current spot
+# --------------------------------------------------
+def update_atm_option_ids(force=False):
+    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update
+    now = time.time()
+    if not force and (now - last_id_update) < ID_REFRESH_INTERVAL:
+        return False  # not updated
+
+    spot = get_nifty_spot()
+    if spot is None:
+        logger.warning("Could not fetch spot, skipping ID update")
+        return False
+
+    expiry = get_nearest_weekly_expiry()
+    strike = calculate_atm_strike(spot)
+
+    # If same strike and expiry and not forced, skip
+    if not force and current_strike == strike and current_expiry == expiry:
+        last_id_update = now
+        return False
+
+    ce_id = find_option_security_id("NIFTY", expiry, strike, "CE")
+    pe_id = find_option_security_id("NIFTY", expiry, strike, "PE")
+
+    if ce_id and pe_id:
+        CE_ID = ce_id
+        PE_ID = pe_id
+        current_strike = strike
+        current_expiry = expiry
+        last_id_update = now
+        logger.info(f"Updated ATM options: Strike={strike}, Expiry={expiry}, CE={CE_ID}, PE={PE_ID}")
+        # Also store in latest_data for frontend
+        latest_data["strike"] = strike
+        latest_data["expiry"] = expiry
+        return True
+    else:
+        logger.error("Failed to fetch CE or PE IDs – keeping old ones")
+        return False
+
+# --------------------------------------------------
+# TECHNICAL INDICATORS (unchanged from previous)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -153,7 +274,7 @@ def estimate_greeks(ce, pe):
     return delta, gamma, theta, vega
 
 # --------------------------------------------------
-# PCR FETCHER
+# PCR FETCHER (unchanged)
 # --------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
@@ -181,7 +302,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# ADVANCED ANALYSIS
+# ADVANCED ANALYSIS (unchanged)
 # --------------------------------------------------
 def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     global market_state, institutional_state
@@ -239,23 +360,28 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# TICK PROCESSOR (v2 compatible)
+# TICK PROCESSOR (v2 compatible, with auto re-subscribe on ID change)
 # --------------------------------------------------
 def process_tick(tick):
-    global tick_counter
+    global tick_counter, CE_ID, PE_ID, current_strike, feed_instance
     try:
-        # v2 uses 'securityId' and 'ltp'
         security_id = str(tick.get("securityId", tick.get("security_id", "")))
         price = float(tick.get("ltp", tick.get("LTP", 0)))
         if not security_id or price == 0:
             return
 
-        logger.debug(f"Raw tick: {security_id} = {price}")
+        # If IDs are None, skip processing
+        if CE_ID is None or PE_ID is None:
+            logger.warning("Option IDs not yet available")
+            return
 
         if security_id == CE_ID:
             latest_data["ce_price"] = price
         elif security_id == PE_ID:
             latest_data["pe_price"] = price
+        else:
+            # Not our subscribed instruments
+            return
 
         ce = latest_data["ce_price"]
         pe = latest_data["pe_price"]
@@ -290,7 +416,7 @@ def process_tick(tick):
         logger.error(f"Tick processing error: {e}")
 
 # --------------------------------------------------
-# CUSTOM FEED CLASS
+# CUSTOM FEED CLASS (same as before)
 # --------------------------------------------------
 class CustomFeed(MarketFeed):
     def __init__(self, dhan_context, instruments, version="v2"):
@@ -309,44 +435,98 @@ class CustomFeed(MarketFeed):
         logger.warning("WebSocket closed – will reconnect")
 
 # --------------------------------------------------
-# ASYNC WEBSOCKET LOOP (with explicit subscription)
+# Background ID updater (runs in separate thread)
+# --------------------------------------------------
+def update_ids_periodically():
+    """Runs in background, updates option IDs and triggers feed restart if changed"""
+    global feed_instance, CE_ID, PE_ID
+    while True:
+        time.sleep(300)  # check every 5 minutes (or adjust)
+        # Fetch spot and update if needed
+        spot = get_nifty_spot()
+        if spot:
+            new_strike = calculate_atm_strike(spot)
+            if new_strike != current_strike:
+                logger.info(f"Strike change detected: {current_strike} -> {new_strike}, refreshing IDs")
+                success = update_atm_option_ids(force=True)
+                if success and feed_instance:
+                    # Restart feed to subscribe to new instruments
+                    # Since websocket_loop will reconnect on crash, we just raise an exception to trigger reconnect
+                    # But better to close feed gracefully and let loop restart
+                    logger.info("Triggering feed restart for new instruments...")
+                    # This will cause the websocket_loop to reconnect (because feed will error out)
+                    # Actually we can't easily force a restart from another thread. We'll rely on the fact that
+                    # the feed will continue with old IDs, but we'll set a flag to restart in the main loop.
+                    # Simpler: just log and let the next tick check. But we need to subscribe to new IDs.
+                    # We'll set a global flag "need_restart" and websocket_loop will check it.
+                    global need_restart
+                    need_restart = True
+
+need_restart = False
+
+# --------------------------------------------------
+# ASYNC WEBSOCKET LOOP (with auto restart on ID change)
 # --------------------------------------------------
 async def websocket_loop():
+    global feed_instance, need_restart
     while True:
         try:
+            # Ensure we have valid IDs before connecting
+            if CE_ID is None or PE_ID is None:
+                logger.info("Initializing option IDs...")
+                update_atm_option_ids(force=True)
+                if CE_ID is None or PE_ID is None:
+                    logger.error("Could not fetch initial option IDs. Retrying in 30s...")
+                    await asyncio.sleep(30)
+                    continue
+
             instruments = [
                 (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
             ]
             ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
             feed = CustomFeed(ctx, instruments, version="v2")
+            feed_instance = feed   # store for potential restart
 
-            logger.info(f"Subscribing to CE={CE_ID}, PE={PE_ID}")
+            logger.info(f"Subscribing to CE={CE_ID} (Strike {current_strike}), PE={PE_ID}")
             await feed.connect()
-            await feed.subscribe_instruments()   # 🔑 THIS WAS MISSING
+            await feed.subscribe_instruments()
             logger.info("Feed connected and subscribed – waiting for ticks...")
 
-            # Keep the connection alive
-            while True:
+            # Keep alive and check for restart flag
+            while not need_restart:
                 await asyncio.sleep(1)
+
+            # Restart loop
+            logger.info("Restarting feed due to ID change...")
+            need_restart = False
+            await feed.disconnect()
+            await asyncio.sleep(5)  # allow cleanup
 
         except Exception as e:
             logger.error(f"Feed crashed: {e}, reconnecting in 10s")
             await asyncio.sleep(10)
 
 # --------------------------------------------------
-# START BACKGROUND THREAD
+# START BACKGROUND THREADS
 # --------------------------------------------------
 def start_feed():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(websocket_loop())
 
-threading.Thread(target=start_feed, daemon=True).start()
-logger.info("✅ Background signal engine started")
+# Start main feed thread
+feed_thread = threading.Thread(target=start_feed, daemon=True)
+feed_thread.start()
+
+# Start periodic ID updater thread
+updater_thread = threading.Thread(target=update_ids_periodically, daemon=True)
+updater_thread.start()
+
+logger.info("✅ Background signal engine started with auto-ATM selection")
 
 # --------------------------------------------------
-# FLASK ROUTES
+# FLASK ROUTES (unchanged, but added /debug/ids)
 # --------------------------------------------------
 @app.route("/")
 def home():
@@ -373,9 +553,11 @@ def trading_signals():
 @app.route("/debug/version")
 def debug_version():
     return jsonify({
-        "version": "FULLY CORRECTED MARKETFEED V2",
+        "version": "Auto-ATM Feed V2",
         "ce_id": CE_ID,
-        "pe_id": PE_ID
+        "pe_id": PE_ID,
+        "strike": current_strike,
+        "expiry": current_expiry
     })
 
 # --------------------------------------------------
