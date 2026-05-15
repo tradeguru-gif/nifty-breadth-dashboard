@@ -61,59 +61,36 @@ def load_instruments():
 # =========================
 # GET LIVE NIFTY PRICE
 # =========================
-def get_nifty_spot(client):
+# =========================
+# GET NIFTY SPOT
+# =========================
+try:
+    quote = client.quote_data({
+        "IDX_I": [13]
+    })
 
-    try:
+    logger.info(f"Nifty Quote Response: {quote}")
 
-        response = client.quote_data(
-            "IDX_I",
-            "13"
-        )
+    if quote.get("status") != "success":
+        raise Exception("Quote API failed")
 
-        logger.info(f"Nifty Quote Response: {response}")
+    data = quote.get("data", {})
 
-        if not response:
-            return None
+    # Dhan response structure
+    nifty_data = data.get("IDX_I", {}).get("13", {})
 
-        # Different SDK versions return different formats
-        if isinstance(response, dict):
+    spot = nifty_data.get("last_price")
 
-            # Try direct last_price
-            if "last_price" in response:
-                return float(response["last_price"])
+    if not spot:
+        raise Exception("Spot price missing")
 
-            # Try nested data
-            if "data" in response:
+    spot = float(spot)
 
-                data = response["data"]
+    logger.info(f"NIFTY Spot = {spot}")
 
-                # If returned as dict
-                if isinstance(data, dict):
-
-                    for key in data:
-
-                        item = data[key]
-
-                        if isinstance(item, dict):
-
-                            if "last_price" in item:
-                                return float(item["last_price"])
-
-        return None
-
-    except Exception as e:
-
-        logger.error(f"Nifty Spot Error: {e}")
-
-        return None
-    except Exception as e:
-
-        logger.error(f"Nifty Spot Error: {e}")
-
-        return None
-    except Exception as e:
-        logger.error(f"Nifty Spot Error: {e}")
-        return None
+except Exception as e:
+    logger.error(f"Nifty Spot Error: {e}")
+    raise Exception("Unable to fetch NIFTY spot")
 
 # =========================
 # FIND ATM CONTRACTS
