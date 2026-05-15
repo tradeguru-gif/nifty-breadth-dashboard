@@ -66,32 +66,46 @@ def get_nifty_spot(client):
     try:
 
         response = client.quote_data(
-            {
-                "IDX_I": ["13"]
-            }
+            "IDX_I",
+            "13"
         )
 
         logger.info(f"Nifty Quote Response: {response}")
 
-        # SAFETY CHECK
         if not response:
             return None
 
-        data = response.get("data", {})
+        # Different SDK versions return different formats
+        if isinstance(response, dict):
 
-        # Dhan response structure
-        if "IDX_I" in data:
+            # Try direct last_price
+            if "last_price" in response:
+                return float(response["last_price"])
 
-            idx_data = data["IDX_I"]
+            # Try nested data
+            if "data" in response:
 
-            if "13" in idx_data:
+                data = response["data"]
 
-                spot = idx_data["13"].get("last_price")
+                # If returned as dict
+                if isinstance(data, dict):
 
-                return float(spot)
+                    for key in data:
+
+                        item = data[key]
+
+                        if isinstance(item, dict):
+
+                            if "last_price" in item:
+                                return float(item["last_price"])
 
         return None
 
+    except Exception as e:
+
+        logger.error(f"Nifty Spot Error: {e}")
+
+        return None
     except Exception as e:
 
         logger.error(f"Nifty Spot Error: {e}")
