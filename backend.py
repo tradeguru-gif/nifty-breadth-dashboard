@@ -1,5 +1,5 @@
 # backend.py - Institutional Nifty Options Signal Engine
-# Fixed: dhanhq initialisation with DhanContext
+# Corrected for dhanhq v2.2.0 API
 
 import os
 import asyncio
@@ -7,6 +7,7 @@ import threading
 import time
 import logging
 import requests
+import traceback
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -47,7 +48,7 @@ ID_REFRESH_INTERVAL = 3600       # 1 hour
 need_restart = False
 
 # --------------------------------------------------
-# Shared frontend state (enriched)
+# Shared frontend state
 # --------------------------------------------------
 latest_data = {
     "signal": "WAITING",
@@ -100,6 +101,110 @@ price_history = deque(maxlen=200)
 tick_counter = 0
 UPDATE_INTERVAL = 10
 SPREAD_THRESHOLD = 5.0
+
+# --------------------------------------------------
+# Helper: Get Dhan context and API object (Used in all API calls)
+# --------------------------------------------------
+def get_dhan_api():
+    """Returns a dhanhq API object initialized with the DhanContext"""
+    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    return dhanhq(ctx)
+
+# --------------------------------------------------
+# Auto ATM instrument selection using the correct API
+# --------------------------------------------------
+def get_nifty_spot():
+    """Fetch current Nifty spot via Dhan's ticker_data API"""
+    try:
+        dhan = get_dhan_api()
+        # Securities dict: key is exchange segment, value is list of security IDs
+        # 13 = NIFTY 50, IDX_I = Index segment
+        ticker_response = dhan.ticker_data(securities={"IDX_I": [13]})
+        spot = ticker_response['data']['IDX_I'][0]['last_price']
+        logger.info(f"Spot NIFTY: {spot}")
+        return float(spot)
+    except Exception as e:
+        logger.error(f"Failed to get spot: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+def get_nearest_weekly_expiry():
+    """First expiry date from Dhan's expiry_list API"""
+    try:
+        dhan = get_dhan_api()
+        expiries = dhan.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
+        if expiries and 'data' in expiries and len(expiries['data']) > 0:
+            return expiries['data'][0]
+    except Exception as e:
+        logger.error(f"Expiry fetch failed: {e}")
+        logger.error(traceback.format_exc())
+    # Fallback: next Thursday
+    base = datetime.now()
+    days_ahead = 3 - base.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    expiry_date = base + timedelta(days=days_ahead)
+    return expiry_date.strftime("%Y-%m-%d")
+
+def calculate_atm_strike(spot):
+    return int(round(spot / 50.0) * 50)
+
+def fetch_atm_option_ids(expiry, strike):
+    """Use Dhan's option_chain API to get CE and PE security IDs"""
+    try:
+        dhan = get_dhan_api()
+        oc = dhan.option_chain(
+            under_security_id=13,
+            under_exchange_segment="IDX_I",
+            expiry=expiry
+        )
+        # Convert strike to the format used in the response (a string with 6 decimal places)
+        strike_key = f"{float(strike):.6f}"
+        instruments = oc['data']['oc'].get(strike_key)
+        if instruments:
+            ce_id = str(instruments['ce']['security_id'])
+            pe_id = str(instruments['pe']['security_id'])
+            return ce_id, pe_id
+        else:
+            logger.error(f"Strike {strike} not found in option chain for expiry {expiry}")
+            return None, None
+    except Exception as e:
+        logger.error(f"Option chain fetch failed: {e}")
+        logger.error(traceback.format_exc())
+        return None, None
+
+def update_atm_option_ids(force=False):
+    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update, need_restart
+    now = time.time()
+    if not force and (now - last_id_update) < ID_REFRESH_INTERVAL:
+        return False
+
+    spot = get_nifty_spot()
+    if spot is None:
+        return False
+
+    expiry = get_nearest_weekly_expiry()
+    strike = calculate_atm_strike(spot)
+
+    if not force and current_strike == strike and current_expiry == expiry:
+        last_id_update = now
+        return False
+
+    ce_id, pe_id = fetch_atm_option_ids(expiry, strike)
+    if ce_id and pe_id:
+        CE_ID = ce_id
+        PE_ID = pe_id
+        current_strike = strike
+        current_expiry = expiry
+        last_id_update = now
+        latest_data["strike"] = strike
+        latest_data["expiry"] = expiry
+        logger.info(f"Updated ATM options: Strike={strike}, Expiry={expiry}, CE={CE_ID}, PE={PE_ID}")
+        need_restart = True
+        return True
+    else:
+        logger.error("Failed to fetch CE or PE IDs – keeping old ones")
+        return False
 
 # --------------------------------------------------
 # Technical indicators (unchanged)
@@ -245,99 +350,6 @@ def run_advanced_analysis(ce, pe, spread, pcr, price_list):
     })
 
 # --------------------------------------------------
-# Auto ATM instrument selection (FIXED: use DhanContext)
-# --------------------------------------------------
-def get_nifty_spot():
-    """Fetch current Nifty spot via Dhan quote API"""
-    try:
-        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        dhan = dhanhq(ctx)
-        quote = dhan.get_quote_data(securities={"IDX_I": [13]})
-        spot = quote['data']['last_price']
-        logger.info(f"Spot NIFTY: {spot}")
-        return float(spot)
-    except Exception as e:
-        logger.error(f"Failed to get spot: {e}")
-        return None
-
-def get_nearest_weekly_expiry():
-    """First expiry date from Dhan expiry list"""
-    try:
-        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        dhan = dhanhq(ctx)
-        expiries = dhan.expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
-        if expiries and 'data' in expiries and len(expiries['data']) > 0:
-            return expiries['data'][0]
-    except Exception as e:
-        logger.error(f"Expiry fetch failed: {e}")
-    # Fallback to next Thursday
-    base = datetime.now()
-    days_ahead = 3 - base.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    expiry_date = base + timedelta(days=days_ahead)
-    return expiry_date.strftime("%Y-%m-%d")
-
-def calculate_atm_strike(spot):
-    return int(round(spot / 50.0) * 50)
-
-def fetch_atm_option_ids(expiry, strike):
-    """Use Dhan option_chain to get CE and PE security IDs"""
-    try:
-        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        dhan = dhanhq(ctx)
-        oc = dhan.option_chain(
-            under_security_id=13,
-            under_exchange_segment="IDX_I",
-            expiry=expiry
-        )
-        strike_key = f"{float(strike):.6f}"
-        instruments = oc['data']['oc'].get(strike_key)
-        if instruments:
-            ce_id = str(instruments['ce']['security_id'])
-            pe_id = str(instruments['pe']['security_id'])
-            return ce_id, pe_id
-        else:
-            logger.error(f"Strike {strike} not found in option chain")
-            return None, None
-    except Exception as e:
-        logger.error(f"Option chain fetch failed: {e}")
-        return None, None
-
-def update_atm_option_ids(force=False):
-    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update, need_restart
-    now = time.time()
-    if not force and (now - last_id_update) < ID_REFRESH_INTERVAL:
-        return False
-
-    spot = get_nifty_spot()
-    if spot is None:
-        return False
-
-    expiry = get_nearest_weekly_expiry()
-    strike = calculate_atm_strike(spot)
-
-    if not force and current_strike == strike and current_expiry == expiry:
-        last_id_update = now
-        return False
-
-    ce_id, pe_id = fetch_atm_option_ids(expiry, strike)
-    if ce_id and pe_id:
-        CE_ID = ce_id
-        PE_ID = pe_id
-        current_strike = strike
-        current_expiry = expiry
-        last_id_update = now
-        latest_data["strike"] = strike
-        latest_data["expiry"] = expiry
-        logger.info(f"Updated ATM options: Strike={strike}, Expiry={expiry}, CE={CE_ID}, PE={PE_ID}")
-        need_restart = True
-        return True
-    else:
-        logger.error("Failed to fetch CE or PE IDs – keeping old ones")
-        return False
-
-# --------------------------------------------------
 # Tick processor (unchanged)
 # --------------------------------------------------
 def process_tick(tick):
@@ -445,6 +457,7 @@ async def websocket_loop():
 
         except Exception as e:
             logger.error(f"Feed crashed: {e}, reconnecting in 10s")
+            logger.error(traceback.format_exc())
             await asyncio.sleep(10)
 
 # --------------------------------------------------
@@ -503,7 +516,7 @@ def trading_signals():
 @app.route("/debug/version")
 def debug_version():
     return jsonify({
-        "version": "Auto-ATM + Advanced Signals v2 (fixed dhanhq init)",
+        "version": "Auto-ATM + Advanced Signals v2 (corrected API)",
         "ce_id": CE_ID,
         "pe_id": PE_ID,
         "strike": current_strike,
