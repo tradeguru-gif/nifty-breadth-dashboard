@@ -1,4 +1,6 @@
 # backend.py - Complete Professional Trading Signals with Auto-ATM Selection
+# Added bidirectional signals: BUY PE / STRONG BUY PE
+
 import os
 import time
 import logging
@@ -68,7 +70,7 @@ UPDATE_INTERVAL = 10                   # recompute indicators every 10 ticks
 # Trading signals state (updated periodically)
 # --------------------------------------------------
 market_signal = {
-    "signal": "WAITING",               # BULLISH / BEARISH / NEUTRAL
+    "signal": "WAITING",
     "ce_price": 0.0,
     "pe_price": 0.0,
     "spread": 0.0,
@@ -333,28 +335,60 @@ def run_signal_engine(ce_price, pe_price, price_list):
     delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
 
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
-    confidence = 0
-    if ema_signal == "BULLISH":
-        confidence += 20
-    if rsi > 60:
-        confidence += 20
-    if spread > 0:
-        confidence += 20
-    if pcr < 1:
-        confidence += 20
-    if macd > 0:
-        confidence += 20
 
-    if confidence >= 80:
-        action = "STRONG BUY CE"
-    elif confidence >= 60:
-        action = "BUY CE"
-    elif confidence <= 20:
-        action = "EXIT"
+    # ---------- BULLISH CONFIDENCE (for CE) ----------
+    bullish_score = 0
+    if ema_signal == "BULLISH":
+        bullish_score += 20
+    if rsi > 60:
+        bullish_score += 20
+    if spread > 0:
+        bullish_score += 20
+    if pcr < 1.0:
+        bullish_score += 20
+    if macd > 0:
+        bullish_score += 20
+
+    # ---------- BEARISH CONFIDENCE (for PE) ----------
+    bearish_score = 0
+    if ema_signal == "BEARISH":
+        bearish_score += 20
+    if rsi < 40:
+        bearish_score += 20
+    if spread < 0:
+        bearish_score += 20
+    if pcr > 1.2:        # high PCR indicates put buying
+        bearish_score += 20
+    if macd < 0:
+        bearish_score += 20
+
+    # Decide action based on which score is higher
+    if bullish_score >= bearish_score and bullish_score >= 20:
+        confidence = bullish_score
+        if confidence >= 80:
+            action = "STRONG BUY CE"
+        elif confidence >= 60:
+            action = "BUY CE"
+        elif confidence >= 40:
+            action = "CONSIDER CE"
+        else:
+            action = "HOLD"
+    elif bearish_score > bullish_score and bearish_score >= 20:
+        confidence = bearish_score
+        if confidence >= 80:
+            action = "STRONG BUY PE"
+        elif confidence >= 60:
+            action = "BUY PE"
+        elif confidence >= 40:
+            action = "CONSIDER PE"
+        else:
+            action = "HOLD"
     else:
+        # both low – market sideways
+        confidence = max(bullish_score, bearish_score)
         action = "HOLD"
 
-    # Update market state
+    # Update market state (confidence = dominant side's score)
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
@@ -399,7 +433,7 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "timestamp": datetime.now().isoformat()
     })
 
-    logger.info(f"Signal: {action} | RSI={rsi:.1f} | Spread={spread:.2f} | Confidence={confidence}")
+    logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f}")
 
 # --------------------------------------------------
 # Tick processor (called from WebSocket)
@@ -512,7 +546,7 @@ def start_feed():
 
 threading.Thread(target=start_feed, daemon=True).start()
 threading.Thread(target=periodic_id_updater, daemon=True).start()
-logger.info("✅ Background engine started with auto-ATM + signals")
+logger.info("✅ Background engine started with auto-ATM + bidirectional signals")
 
 # --------------------------------------------------
 # Flask endpoints
