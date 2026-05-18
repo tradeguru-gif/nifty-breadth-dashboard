@@ -1,6 +1,6 @@
-# requirements.txt
 flask==2.3.3
 flask-cors==4.0.1
 dhanhq==2.0.2
 gunicorn==21.2.0
 requests==2.31.0
+pandas
