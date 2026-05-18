@@ -581,7 +581,8 @@ def health():
         "status": "ok", 
         "ws_running": ws_running,
         "ce_token": CE_TOKEN,
-        "pe_token": PE_TOKEN
+        "pe_token": PE_TOKEN,
+        "timestamp": datetime.now().isoformat()
     }), 200
 
 @app.route("/debug/ws-status")
