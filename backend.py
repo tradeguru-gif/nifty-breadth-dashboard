@@ -91,7 +91,7 @@ def get_nifty_spot():
         time.sleep(0.5)
         response = session.get(url, headers=headers, timeout=10)
         data = response.json()
-        spot = data['data'][0]['lastPrice']
+        spot = data["data"][0]["lastPrice"]
         logger.info(f"NIFTY spot = {spot}")
         return float(spot)
     except Exception as e:
@@ -125,21 +125,21 @@ def get_current_atm_tokens():
     except Exception as e:
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
-    nifty_opts = df[df['symbol'].astype(str).str.contains('NIFTY', na=False)]
-    nifty_opts['expiry_date'] = pd.to_datetime(nifty_opts['expiry'], errors='coerce')
-    nifty_opts = nifty_opts.dropna(subset=['expiry_date'])
+    nifty_opts = df[df["symbol"].astype(str).str.contains("NIFTY", na=False)]
+    nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], errors="coerce")
+    nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
     today = datetime.now()
-    future_expiries = nifty_opts[nifty_opts['expiry_date'] > today]
+    future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
     if future_expiries.empty:
         return None, None
-    nearest_expiry = future_expiries['expiry_date'].min()
-    atm_opts = nifty_opts[(nifty_opts['strike'] == atm_strike) & (nifty_opts['expiry_date'] == nearest_expiry)]
-    ce_row = atm_opts[atm_opts['symbol'].str.contains('CE', na=False)]
-    pe_row = atm_opts[atm_opts['symbol'].str.contains('PE', na=False)]
+    nearest_expiry = future_expiries["expiry_date"].min()
+    atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+    ce_row = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+    pe_row = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
     if ce_row.empty or pe_row.empty:
         return None, None
-    ce_token = str(ce_row.iloc[0]['token'])
-    pe_token = str(pe_row.iloc[0]['token'])
+    ce_token = str(ce_row.iloc[0]["token"])
+    pe_token = str(pe_row.iloc[0]["token"])
     logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
     return ce_token, pe_token
 
@@ -147,39 +147,40 @@ def get_current_atm_tokens():
 # WebSocket Callbacks
 # --------------------------------------------------
 def on_ws_open(wsapp):
-    logger.info("✅ Angel One WebSocket opened")
+    logger.info("Angel One WebSocket opened")
     correlation_id = "tradeguru_001"
     mode = 2
-    tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]  # 5 = NFO
+    tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
     wsapp.subscribe(correlation_id, mode, tokens)
 
-def on_ws_message(wsapp, message):
+def on_ws_data(wsapp, message, *args):
     global latest_ticks, price_history, tick_counter
     try:
-        data = json.loads(message)
-        for tick in data:
-            token = str(tick.get('tk'))
-            ltp = tick.get('ltp', 0) / 100
+        data = json.loads(message) if isinstance(message, str) else message
+        ticks = data if isinstance(data, list) else [data]
+        for tick in ticks:
+            token = str(tick.get("tk"))
+            ltp = tick.get("ltp", 0) / 100
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_timestamp"] = datetime.now()
+                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
                 price_history.append(ltp)
                 tick_counter += 1
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_timestamp"] = datetime.now()
+                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
 
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
             if ce > 0 and pe > 0 and tick_counter % UPDATE_INTERVAL == 0:
                 run_signal_engine(ce, pe, list(price_history))
     except Exception as e:
-        logger.error(f"WebSocket message error: {e}")
+        logger.error(f"WebSocket data error: {e}")
 
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket error: {error}")
 
-def on_ws_close(wsapp):
+def on_ws_close(wsapp, *args):
     logger.warning("WebSocket closed")
     global ws_running
     ws_running = False
@@ -189,40 +190,47 @@ def on_ws_close(wsapp):
 # --------------------------------------------------
 def start_angel_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN
+    retry_delay = 30
     while True:
         try:
-            # 1. Authenticate
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
             obj = SmartConnect(api_key=ANGEL_API_KEY)
             session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-            if not session['status']:
+            if not session.get("status"):
                 logger.error(f"Login failed: {session}")
-                time.sleep(60)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
                 continue
-            auth_token = session['data']['jwtToken']
+            auth_token = session["data"]["jwtToken"]
             feed_token = obj.getfeedToken()
             logger.info("Authenticated, feed token obtained")
 
-            # 2. Get current ATM tokens
             CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
             if not CE_TOKEN or not PE_TOKEN:
-                logger.error("Could not fetch ATM tokens. Retrying in 60s...")
-                time.sleep(60)
+                logger.error("Could not fetch ATM tokens. Retrying...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
                 continue
 
-            # 3. Setup WebSocket
             ws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             ws.on_open = on_ws_open
-            ws.on_data = on_ws_message
+            ws.on_data = on_ws_data
             ws.on_error = on_ws_error
             ws.on_close = on_ws_close
             ws_running = True
+            retry_delay = 30
+            logger.info("Connecting WebSocket...")
             ws.connect()
+
             while ws_running:
                 time.sleep(1)
+
+            logger.warning("WebSocket loop ended, reconnecting...")
+
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
-            time.sleep(60)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
 
 # --------------------------------------------------
 # Signal Engine
@@ -230,7 +238,7 @@ def start_angel_websocket():
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
         return 50.0
-    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
     avg_gain = sum(gains[:period]) / period
@@ -263,7 +271,7 @@ def calculate_ema(prices, period):
 def calculate_atr(prices, period=14):
     if len(prices) < period + 1:
         return 0
-    trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+    trs = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
     return sum(trs[-period:]) / period
 
 def calculate_vwap(prices):
@@ -324,18 +332,28 @@ def run_signal_engine(ce_price, pe_price, price_list):
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
     bullish_score = 0
-    if ema_signal == "BULLISH": bullish_score += 20
-    if rsi > 60: bullish_score += 20
-    if spread > 0: bullish_score += 20
-    if pcr < 1.0: bullish_score += 20
-    if macd > 0: bullish_score += 20
+    if ema_signal == "BULLISH":
+        bullish_score += 20
+    if rsi > 60:
+        bullish_score += 20
+    if spread > 0:
+        bullish_score += 20
+    if pcr < 1.0:
+        bullish_score += 20
+    if macd > 0:
+        bullish_score += 20
 
     bearish_score = 0
-    if ema_signal == "BEARISH": bearish_score += 20
-    if rsi < 40: bearish_score += 20
-    if spread < 0: bearish_score += 20
-    if pcr > 1.2: bearish_score += 20
-    if macd < 0: bearish_score += 20
+    if ema_signal == "BEARISH":
+        bearish_score += 20
+    if rsi < 40:
+        bearish_score += 20
+    if spread < 0:
+        bearish_score += 20
+    if pcr > 1.2:
+        bearish_score += 20
+    if macd < 0:
+        bearish_score += 20
 
     if bullish_score >= bearish_score and bullish_score >= 20:
         confidence = bullish_score
@@ -423,9 +441,9 @@ def live_signals():
         "institutional": institutional_state
     })
 
-@app.route("/health")
+@app.route("/api/health")
 def health():
-    return "OK", 200
+    return jsonify({"status": "ok", "ws_running": ws_running}), 200
 
 @app.route("/debug/ws-status")
 def debug_ws():
@@ -439,14 +457,20 @@ def debug_ws():
     })
 
 # --------------------------------------------------
-# Start background thread
+# Start background thread (Gunicorn-compatible)
 # --------------------------------------------------
+engine_started = False
+
 def start_background_engine():
-    thread = threading.Thread(target=start_angel_websocket, daemon=True)
-    thread.start()
-    logger.info("✅ Angel One WebSocket engine started (auto-reconnecting)")
+    global engine_started
+    if not engine_started:
+        thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        thread.start()
+        engine_started = True
+        logger.info("Angel One WebSocket engine started (auto-reconnecting)")
+
+start_background_engine()
 
 if __name__ == "__main__":
-    start_background_engine()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
