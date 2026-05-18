@@ -531,25 +531,19 @@ def debug_ws():
     })
 
 # --------------------------------------------------
-# Start background thread (Gunicorn-compatible)
+# Start background engine - runs in master process with --preload
 # --------------------------------------------------
 engine_started = False
-
-def keep_alive_ping():
-    while True:
-        time.sleep(30)
-        logger.debug("Keep-alive ping")
 
 def start_background_engine():
     global engine_started
     if not engine_started:
         ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
         ws_thread.start()
-        ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
-        ping_thread.start()
         engine_started = True
         logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
+# Start the engine at module load - this runs in Gunicorn master with --preload
 start_background_engine()
 
 if __name__ == "__main__":
