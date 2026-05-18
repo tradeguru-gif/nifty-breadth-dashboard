@@ -41,6 +41,7 @@ price_history = deque(maxlen=200)
 tick_counter = 0
 UPDATE_INTERVAL = 10
 ws_running = False
+sws = None
 
 # --------------------------------------------------
 # Market Signal State
@@ -111,9 +112,6 @@ def get_nifty_spot_cached():
 # --------------------------------------------------
 # Fetch current ATM option tokens
 # --------------------------------------------------
-# --------------------------------------------------
-# Fetch current ATM option tokens
-# --------------------------------------------------
 def get_current_atm_tokens():
     spot = get_nifty_spot_cached()
     if not spot:
@@ -129,27 +127,23 @@ def get_current_atm_tokens():
     except Exception as e:
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
-    
-    # Filter NIFTY index options only
-    # Use 'name' field which is exactly "NIFTY" for NIFTY index options
+
     nifty_opts = df[
         (df["name"].astype(str) == "NIFTY") & 
         (df["instrumenttype"].astype(str) == "OPTIDX") &
         (df["exch_seg"].astype(str) == "NFO")
     ].copy()
-    
+
     logger.info(f"NIFTY OPTIDX NFO symbols found: {len(nifty_opts)}")
-    
+
     if nifty_opts.empty:
-        # Fallback: try symbol starts with NIFTY + digit (date)
         nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
         logger.info(f"Fallback NIFTY symbols found: {len(nifty_opts)}")
-    
+
     if nifty_opts.empty:
         logger.error("No NIFTY symbols found")
         return None, None
-    
-    # Try multiple expiry formats
+
     for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
         valid_count = nifty_opts["expiry_date"].notna().sum()
@@ -159,46 +153,40 @@ def get_current_atm_tokens():
     else:
         logger.error("Could not parse any expiry dates")
         return None, None
-    
+
     nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
-    
-    # Strike is in paise - convert to rupees
     nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
     nifty_opts = nifty_opts.dropna(subset=["strike"])
     logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
-    
+
     today = datetime.now()
     future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
     logger.info(f"Future expiries: {len(future_expiries)}")
-    
+
     if future_expiries.empty:
         logger.error("No future expiries found")
         return None, None
-    
+
     nearest_expiry = future_expiries["expiry_date"].min()
     logger.info(f"Nearest expiry: {nearest_expiry}")
-    
-    # Check available strikes for nearest expiry
+
     nearest_opts = nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]
     logger.info(f"Options for nearest expiry: {len(nearest_opts)}")
-    
+
     available_strikes = sorted(nearest_opts["strike"].unique())
     logger.info(f"Available strikes (first 20): {available_strikes[:20]}")
     logger.info(f"Looking for strike: {atm_strike}")
-    
-    # Try exact strike first
+
     atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
     logger.info(f"ATM options found: {len(atm_opts)}")
-    
-    # Case-insensitive CE/PE search on symbol
+
     ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
     pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
-    
+
     logger.info(f"CE matches: {len(ce_row)}, PE matches: {len(pe_row)}")
-    
+
     if ce_row.empty or pe_row.empty:
         logger.error(f"CE or PE not found for strike {atm_strike}, expiry {nearest_expiry}")
-        # Fallback: try nearest available strike
         if available_strikes:
             nearest_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
             logger.info(f"Trying nearest strike: {nearest_strike}")
@@ -211,67 +199,22 @@ def get_current_atm_tokens():
                 logger.info(f"Fallback CE token = {ce_token}, PE token = {pe_token}")
                 return ce_token, pe_token
         return None, None
-    
+
     ce_token = str(ce_row.iloc[0]["token"])
     pe_token = str(pe_row.iloc[0]["token"])
     logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
     return ce_token, pe_token
+
 # --------------------------------------------------
 # WebSocket Callbacks
 # --------------------------------------------------
 def on_ws_open(wsapp):
+    global sws
     logger.info("Angel One WebSocket opened")
-    correlation_id = "tradeguru_001"
-    mode = 2
-    tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
-    wsapp.subscribe(correlation_id, mode, tokens)
-
-def on_ws_data(wsapp, message, *args):
-    global latest_ticks, price_history, tick_counter
-    try:
-        data = json.loads(message) if isinstance(message, str) else message
-        ticks = data if isinstance(data, list) else [data]
-        for tick in ticks:
-            token = str(tick.get("tk"))
-            ltp = tick.get("ltp", 0) / 100
-            if token == CE_TOKEN:
-                latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
-                price_history.append(ltp)
-                tick_counter += 1
-            elif token == PE_TOKEN:
-                latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
-
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and tick_counter % UPDATE_INTERVAL == 0:
-                run_signal_engine(ce, pe, list(price_history))
-    except Exception as e:
-        logger.error(f"WebSocket data error: {e}")
-
-def on_ws_error(wsapp, error):
-    logger.error(f"WebSocket error: {error}")
-
-def on_ws_close(wsapp, *args):
-    logger.warning("WebSocket closed")
-    global ws_running
-    ws_running = False
-
-# --------------------------------------------------
-# Start WebSocket connection
-# --------------------------------------------------
-# --------------------------------------------------
-# WebSocket Callbacks
-# --------------------------------------------------
-def on_ws_open(wsapp):
-    """Called when WebSocket opens. wsapp is the WebSocketApp instance."""
-    logger.info("Angel One WebSocket opened")
-    # Use the global sws instance to subscribe, NOT wsapp
-    if 'sws' in globals() and sws is not None:
+    if sws is not None:
         try:
             correlation_id = "tradeguru_001"
-            mode = 2  # LTP mode
+            mode = 2
             tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
             sws.subscribe(correlation_id, mode, tokens)
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
@@ -279,7 +222,6 @@ def on_ws_open(wsapp):
             logger.error(f"Subscribe error: {e}")
 
 def on_ws_data(wsapp, message, *args):
-    """Called when data arrives."""
     global latest_ticks, price_history, tick_counter
     try:
         data = json.loads(message) if isinstance(message, str) else message
@@ -304,18 +246,13 @@ def on_ws_data(wsapp, message, *args):
         logger.error(f"WebSocket data error: {e}")
 
 def on_ws_error(wsapp, error):
-    """Called on WebSocket error."""
     logger.error(f"WebSocket error: {error}")
 
 def on_ws_close(wsapp, *args):
-    """Called when WebSocket closes. Accepts variable args."""
     logger.warning(f"WebSocket closed, args: {args}")
     global ws_running
     ws_running = False
 
-# --------------------------------------------------
-# Start WebSocket connection
-# --------------------------------------------------
 # --------------------------------------------------
 # Start WebSocket connection
 # --------------------------------------------------
@@ -324,7 +261,6 @@ def start_angel_websocket():
     retry_delay = 30
     while True:
         try:
-            # 1. Authenticate
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
             obj = SmartConnect(api_key=ANGEL_API_KEY)
             session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
@@ -337,7 +273,6 @@ def start_angel_websocket():
             feed_token = obj.getfeedToken()
             logger.info("Authenticated, feed token obtained")
 
-            # 2. Get current ATM tokens
             CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
             if not CE_TOKEN or not PE_TOKEN:
                 logger.error("Could not fetch ATM tokens. Retrying...")
@@ -345,7 +280,6 @@ def start_angel_websocket():
                 retry_delay = min(retry_delay * 2, 300)
                 continue
 
-            # 3. Setup WebSocket
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
@@ -356,7 +290,6 @@ def start_angel_websocket():
             logger.info("Connecting WebSocket...")
             sws.connect()
 
-            # Keep-alive loop with short sleep for responsiveness
             while ws_running:
                 time.sleep(0.1)
 
@@ -366,6 +299,7 @@ def start_angel_websocket():
             logger.error(f"WebSocket connection error: {e}")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 300)
+
 # --------------------------------------------------
 # Signal Engine
 # --------------------------------------------------
@@ -599,15 +533,11 @@ def debug_ws():
 # --------------------------------------------------
 # Start background thread (Gunicorn-compatible)
 # --------------------------------------------------
-# --------------------------------------------------
-# Start background thread (Gunicorn-compatible)
-# --------------------------------------------------
 engine_started = False
 
 def keep_alive_ping():
-    """Prevent Render from killing idle worker."""
     while True:
-        time.sleep(25)
+        time.sleep(30)
         logger.debug("Keep-alive ping")
 
 def start_background_engine():
@@ -621,24 +551,6 @@ def start_background_engine():
         logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
 start_background_engine()
-
-# Keep-alive thread to prevent Render from killing idle worker
-def keep_alive_ping():
-    while True:
-        time.sleep(30)
-        logger.debug("Keep-alive ping")
-
-def start_background_engine():
-    global engine_started
-    if not engine_started:
-        # WebSocket thread
-        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
-        ws_thread.start()
-        # Keep-alive thread
-        ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
-        ping_thread.start()
-        engine_started = True
-        logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
