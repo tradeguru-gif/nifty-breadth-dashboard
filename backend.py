@@ -1,4 +1,4 @@
-# backend.py – Angel One REST Polling (Reliable, no WebSocket)
+# backend.py – Angel One REST API (No external library)
 
 import os
 import time
@@ -6,12 +6,12 @@ import logging
 import threading
 import requests
 import pandas as pd
+import json
+import pyotp
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-import pyotp
-from SmartApi import SmartConnect
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,28 +39,16 @@ PE_TOKEN = None
 latest_ticks = {"ce_price": 0.0, "pe_price": 0.0}
 price_history = deque(maxlen=200)
 tick_counter = 0
-UPDATE_INTERVAL = 10          # Re-run signal engine every 10 polls
+UPDATE_INTERVAL = 10
 
 # --------------------------------------------------
 # Market Signal State
 # --------------------------------------------------
 market_signal = {
-    "signal": "WAITING",
-    "ce_price": 0.0,
-    "pe_price": 0.0,
-    "spread": 0.0,
-    "rsi": 50,
-    "macd": 0.0,
-    "pcr": 1.0,
-    "vwap": 0.0,
-    "atr": 0.0,
-    "ema_fast": 0.0,
-    "ema_slow": 0.0,
-    "delta": 0.0,
-    "gamma": 0.0,
-    "theta": 0.0,
-    "vega": 0.0,
-    "timestamp": ""
+    "signal": "WAITING", "ce_price": 0.0, "pe_price": 0.0, "spread": 0.0,
+    "rsi": 50, "macd": 0.0, "pcr": 1.0, "vwap": 0.0, "atr": 0.0,
+    "ema_fast": 0.0, "ema_slow": 0.0, "delta": 0.0, "gamma": 0.0,
+    "theta": 0.0, "vega": 0.0, "timestamp": ""
 }
 market_state = {
     "rsi": 50, "momentum": "NEUTRAL", "strength": "LOW", "trend": "SIDEWAYS",
@@ -108,7 +96,7 @@ def get_nifty_spot_cached():
     return spot
 
 # --------------------------------------------------
-# Fetch current ATM option tokens
+# Fetch current ATM option tokens (from Angel One master)
 # --------------------------------------------------
 def get_current_atm_tokens():
     spot = get_nifty_spot_cached()
@@ -145,28 +133,69 @@ def get_current_atm_tokens():
     return ce_token, pe_token
 
 # --------------------------------------------------
-# Authenticate and get SmartConnect object with fresh token
+# Angel One Authentication (direct REST)
 # --------------------------------------------------
-def get_smart_connect():
+def get_angelone_session():
+    """Authenticate and return auth token and feed token"""
+    url = "https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword"
     totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-    obj = SmartConnect(api_key=ANGEL_API_KEY)
-    session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-    if not session['status']:
-        logger.error(f"Login failed: {session}")
-        return None
-    logger.info("Authenticated with Angel One")
-    return obj
+    payload = {
+        "clientid": ANGEL_CLIENT_ID,
+        "password": ANGEL_PASSWORD,
+        "totp": totp
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-UserType": "USER",
+        "X-SourceID": "WEB",
+        "X-ClientLocalIP": "127.0.0.1",
+        "X-ClientPublicIP": "127.0.0.1",
+        "X-MACAddress": "00:00:00:00:00:00",
+        "X-PrivateKey": ANGEL_API_KEY
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        data = resp.json()
+        if data.get('status'):
+            auth_token = data['data']['jwtToken']
+            # Feed token is same as auth token for SmartAPI v2
+            return auth_token, auth_token
+        else:
+            logger.error(f"Login failed: {data}")
+            return None, None
+    except Exception as e:
+        logger.error(f"Authentication error: {e}")
+        return None, None
 
 # --------------------------------------------------
-# Fetch LTP using SmartConnect
+# Fetch LTP using direct REST
 # --------------------------------------------------
-def get_ltp(obj, token):
+def get_ltp(auth_token, token):
+    url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/ltp/v1"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-UserType": "USER",
+        "X-SourceID": "WEB",
+        "X-ClientLocalIP": "127.0.0.1",
+        "X-ClientPublicIP": "127.0.0.1",
+        "X-MACAddress": "00:00:00:00:00:00",
+        "X-PrivateKey": ANGEL_API_KEY
+    }
+    payload = {"symbols": [{"symboltoken": token, "exchange": "NFO"}]}
     try:
-        resp = obj.getLTP(f"NFO:{token}")  # Format: "NFO:token"
-        if resp and 'data' in resp:
-            return float(resp['data']['ltp'])
+        resp = requests.post(url, json=payload, headers=headers, timeout=2)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('data') and len(data['data']) > 0:
+                return float(data['data'][0]['ltp'])
+            else:
+                logger.error(f"LTP empty response: {data}")
+                return 0
         else:
-            logger.error(f"LTP error: {resp}")
+            logger.error(f"LTP HTTP {resp.status_code}: {resp.text}")
             return 0
     except Exception as e:
         logger.error(f"LTP exception: {e}")
@@ -177,10 +206,20 @@ def get_ltp(obj, token):
 # --------------------------------------------------
 def polling_feed():
     global CE_TOKEN, PE_TOKEN, latest_ticks, price_history, tick_counter
-    obj = None
+    auth_token = None
+    last_auth = 0
+
     while True:
         try:
-            # Refresh tokens periodically (every 5 minutes) or if not set
+            # Refresh tokens every 20 minutes (token expires daily)
+            if auth_token is None or (time.time() - last_auth) > 1200:
+                auth_token, _ = get_angelone_session()
+                if auth_token is None:
+                    time.sleep(10)
+                    continue
+                last_auth = time.time()
+                logger.info("Authenticated with Angel One")
+
             if CE_TOKEN is None or PE_TOKEN is None:
                 ce, pe = get_current_atm_tokens()
                 if ce and pe:
@@ -190,17 +229,8 @@ def polling_feed():
                     time.sleep(5)
                     continue
 
-            # Re-authenticate every 30 minutes (token expires daily)
-            if obj is None or (time.time() - getattr(obj, 'last_auth', 0)) > 1800:
-                obj = get_smart_connect()
-                if obj is None:
-                    time.sleep(10)
-                    continue
-                obj.last_auth = time.time()
-
-            # Fetch prices
-            ce_price = get_ltp(obj, CE_TOKEN)
-            pe_price = get_ltp(obj, PE_TOKEN)
+            ce_price = get_ltp(auth_token, CE_TOKEN)
+            pe_price = get_ltp(auth_token, PE_TOKEN)
             logger.info(f"CE price = {ce_price}, PE price = {pe_price}")
 
             if ce_price > 0 and pe_price > 0:
@@ -211,13 +241,13 @@ def polling_feed():
                 if tick_counter >= UPDATE_INTERVAL:
                     tick_counter = 0
                     run_signal_engine(ce_price, pe_price, list(price_history))
-            time.sleep(2)  # Poll every 2 seconds
+            time.sleep(2)
         except Exception as e:
             logger.error(f"Polling error: {e}")
             time.sleep(5)
 
 # --------------------------------------------------
-# Signal Engine (full implementation)
+# Signal Engine (same as before)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -425,7 +455,7 @@ def health():
 def start_background_engine():
     thread = threading.Thread(target=polling_feed, daemon=True)
     thread.start()
-    logger.info("✅ REST polling engine started (Angel One)")
+    logger.info("✅ REST polling engine started (Angel One direct API)")
 
 if __name__ == "__main__":
     start_background_engine()
