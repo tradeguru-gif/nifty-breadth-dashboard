@@ -462,9 +462,6 @@ def process_tick(tick):
     except Exception as e:
         logger.error(f"Tick error: {e}")
 
-# --------------------------------------------------
-# WebSocket feed with synchronous run_forever
-# --------------------------------------------------
 def run_feed():
     global need_restart, CE_ID, PE_ID, current_strike
     ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
@@ -472,12 +469,20 @@ def run_feed():
 
     while True:
         try:
-            if CE_ID is None or PE_ID is None:
-                logger.info("Waiting for ATM option IDs...")
+            # --- CRITICAL FIX: Fetch fresh IDs before every connection attempt ---
+            logger.info("Fetching latest ATM option IDs...")
+            ce_id, pe_id = get_current_atm_ids()
+            if ce_id is None or pe_id is None:
+                logger.error("Failed to get current ATM IDs. Retrying in 5 seconds...")
                 time.sleep(5)
                 continue
 
-            logger.info(f"Connecting to MarketFeed CE={CE_ID} PE={PE_ID} (Strike {current_strike})")
+            # Update the global IDs for the rest of the app
+            CE_ID = ce_id
+            PE_ID = pe_id
+            logger.info(f"Using IDs: CE={CE_ID}, PE={PE_ID} (Strike {current_strike})")
+            # ----------------------------------------------------------------
+
             instruments = [
                 (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
@@ -495,7 +500,6 @@ def run_feed():
 
         logger.info(f"Sleeping {reconnect_delay}s before reconnect")
         time.sleep(reconnect_delay)
-
 # --------------------------------------------------
 # Background ID updater
 # --------------------------------------------------
