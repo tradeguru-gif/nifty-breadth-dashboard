@@ -125,8 +125,13 @@ def get_current_atm_tokens():
     except Exception as e:
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
-    nifty_opts = df[df["symbol"].astype(str).str.contains("NIFTY", na=False)]
-    nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], errors="coerce")
+    
+    # FIX 1: Add .copy() here
+    nifty_opts = df[df["symbol"].astype(str).str.contains("NIFTY", na=False)].copy()
+    
+    # FIX 2: Add explicit format here
+    nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
+    
     nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
     today = datetime.now()
     future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
@@ -142,7 +147,6 @@ def get_current_atm_tokens():
     pe_token = str(pe_row.iloc[0]["token"])
     logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
     return ce_token, pe_token
-
 # --------------------------------------------------
 # WebSocket Callbacks
 # --------------------------------------------------
