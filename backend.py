@@ -420,7 +420,7 @@ def health():
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
+# For local development (when run directly)
 if __name__ == "__main__":
-    start_background_engine()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
