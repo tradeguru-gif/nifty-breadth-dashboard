@@ -1,5 +1,4 @@
-# backend.py - Complete Professional Trading Signals with Auto-ATM Selection
-# Uses dhanhq==2.0.2 with synchronous run_forever
+# backend.py - Nifty Options Signal Engine (REST API Polling Version)
 
 import os
 import time
@@ -11,8 +10,6 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import dhanhq
-from dhanhq.marketfeed import MarketFeed
 
 # --------------------------------------------------
 # Logging
@@ -36,12 +33,6 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Spot price cache
-# --------------------------------------------------
-spot_cache = {"value": None, "timestamp": 0}
-CACHE_TTL = 30
-
-# --------------------------------------------------
 # Global state for ATM option IDs
 # --------------------------------------------------
 CE_ID = None
@@ -50,7 +41,6 @@ current_strike = None
 current_expiry = None
 last_id_update = 0
 ID_REFRESH_INTERVAL = 3600       # 1 hour
-need_restart = False
 
 # --------------------------------------------------
 # Live market data store
@@ -64,10 +54,10 @@ latest_ticks = {
 
 price_history = deque(maxlen=200)
 tick_counter = 0
-UPDATE_INTERVAL = 10
+UPDATE_INTERVAL = 10            # recompute indicators every 10 polls
 
 # --------------------------------------------------
-# Trading signals state
+# Trading signals state (same as before)
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
@@ -122,19 +112,11 @@ institutional_state = {
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Helper: Dhan client
+# Helper: Nifty spot (cached)
 # --------------------------------------------------
-def get_dhan_client():
-    try:
-        ctx = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-        return dhanhq(ctx)
-    except Exception as e:
-        logger.error(f"Failed to create Dhan client: {e}")
-        return None
+spot_cache = {"value": None, "timestamp": 0}
+CACHE_TTL = 30
 
-# --------------------------------------------------
-# Nifty spot (cached)
-# --------------------------------------------------
 def get_nifty_spot():
     try:
         url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
@@ -162,7 +144,7 @@ def get_nifty_spot_cached():
     return spot
 
 # --------------------------------------------------
-# Load Dhan scrip master CSV
+# Load Dhan scrip master CSV (for ATM contract IDs)
 # --------------------------------------------------
 def load_instruments():
     url = "https://images.dhan.co/api-data/api-scrip-master.csv"
@@ -170,69 +152,106 @@ def load_instruments():
     logger.info(f"Loaded {len(df)} instruments")
     return df
 
-# --------------------------------------------------
-# Auto ATM selection
-# --------------------------------------------------
-def get_option_contracts():
+def get_current_atm_ids():
+    """Fetch current ATM CE and PE security IDs using CSV master"""
     spot = get_nifty_spot_cached()
-    if spot is None:
-        return {"error": "Could not fetch spot"}
+    if not spot:
+        return None, None
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike}")
     try:
         df = load_instruments()
     except Exception as e:
-        return {"error": f"CSV load failed: {e}"}
-    nifty_options = df[
-        (df["SEM_CUSTOM_SYMBOL"].astype(str).str.contains("NIFTY")) &
-        (df["SEM_STRIKE_PRICE"].fillna(0).astype(float) == float(atm_strike))
-    ]
-    if nifty_options.empty:
-        return {"error": f"No options for strike {atm_strike}"}
-    nifty_options["EXPIRY"] = pd.to_datetime(nifty_options["SEM_EXPIRY_DATE"], errors="coerce")
-    nifty_options = nifty_options.dropna(subset=["EXPIRY"]).sort_values("EXPIRY")
-    if nifty_options.empty:
-        return {"error": "No valid expiry"}
-    nearest_expiry = nifty_options["EXPIRY"].iloc[0]
-    nearest = nifty_options[nifty_options["EXPIRY"] == nearest_expiry]
-    ce_records = nearest[nearest["SEM_OPTION_TYPE"] == "CE"]
-    pe_records = nearest[nearest["SEM_OPTION_TYPE"] == "PE"]
-    if ce_records.empty or pe_records.empty:
-        return {"error": "CE/PE missing"}
-    ce = ce_records.iloc[0]
-    pe = pe_records.iloc[0]
-    return {
-        "spot": spot,
-        "atm_strike": atm_strike,
-        "expiry": str(nearest_expiry.date()),
-        "ce_security_id": str(ce["SEM_SMST_SECURITY_ID"]),
-        "pe_security_id": str(pe["SEM_SMST_SECURITY_ID"]),
-        "ce_symbol": ce["SEM_CUSTOM_SYMBOL"],
-        "pe_symbol": pe["SEM_CUSTOM_SYMBOL"]
-    }
+        logger.error(f"CSV load failed: {e}")
+        return None, None
+    nifty_opts = df[df['SEM_CUSTOM_SYMBOL'].astype(str).str.contains('NIFTY', na=False)]
+    nifty_opts['EXPIRY'] = pd.to_datetime(nifty_opts['SEM_EXPIRY_DATE'], errors='coerce')
+    nifty_opts = nifty_opts.dropna(subset=['EXPIRY'])
+    if nifty_opts.empty:
+        return None, None
+    nearest_expiry = nifty_opts['EXPIRY'].min()
+    atm_opts = nifty_opts[(nifty_opts['SEM_STRIKE_PRICE'] == atm_strike) & (nifty_opts['EXPIRY'] == nearest_expiry)]
+    ce_row = atm_opts[atm_opts['SEM_OPTION_TYPE'] == 'CE']
+    pe_row = atm_opts[atm_opts['SEM_OPTION_TYPE'] == 'PE']
+    if ce_row.empty or pe_row.empty:
+        return None, None
+    ce_id = str(ce_row.iloc[0]['SEM_SMST_SECURITY_ID'])
+    pe_id = str(pe_row.iloc[0]['SEM_SMST_SECURITY_ID'])
+    return ce_id, pe_id
 
 def update_atm_option_ids(force=False):
-    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update, need_restart
+    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update
     now = time.time()
     if not force and (now - last_id_update) < ID_REFRESH_INTERVAL:
         return False
-    data = get_option_contracts()
-    if "error" in data:
+    ce, pe = get_current_atm_ids()
+    if not ce or not pe:
         return False
-    if not force and current_strike == data["atm_strike"] and current_expiry == data["expiry"]:
+    if not force and ce == CE_ID and pe == PE_ID:
         last_id_update = now
         return False
-    CE_ID = data["ce_security_id"]
-    PE_ID = data["pe_security_id"]
-    current_strike = data["atm_strike"]
-    current_expiry = data["expiry"]
+    CE_ID = ce
+    PE_ID = pe
+    # current_strike is derived from spot; we'll update on each poll
+    current_strike = round(get_nifty_spot_cached() / 50) * 50 if get_nifty_spot_cached() else None
+    current_expiry = None   # we could store expiry date if needed
     last_id_update = now
     logger.info(f"Updated ATM options: Strike={current_strike}, CE={CE_ID}, PE={PE_ID}")
-    need_restart = True
     return True
 
 # --------------------------------------------------
-# Technical indicators
+# REST API polling for LTP (replaces WebSocket)
+# --------------------------------------------------
+def get_ltp(security_id):
+    """Fetch last traded price for a security via Dhan REST API"""
+    url = f"https://api.dhan.co/v2/ltp?securityId={security_id}"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=2)
+        if resp.status_code == 200:
+            data = resp.json()
+            return float(data.get("ltp", 0))
+        else:
+            logger.error(f"LTP error {resp.status_code}: {resp.text}")
+            return 0
+    except Exception as e:
+        logger.error(f"LTP request error for {security_id}: {e}")
+        return 0
+
+def polling_feed():
+    """Main polling loop: fetches CE and PE prices every second"""
+    global CE_ID, PE_ID, latest_ticks, price_history, tick_counter, market_signal, market_state, institutional_state
+    while True:
+        try:
+            # Refresh ATM contracts periodically (every ~5 minutes)
+            if not CE_ID or not PE_ID:
+                update_atm_option_ids(force=True)
+            if CE_ID and PE_ID:
+                ce = get_ltp(CE_ID)
+                pe = get_ltp(PE_ID)
+                if ce > 0 and pe > 0:
+                    latest_ticks["ce_price"] = ce
+                    latest_ticks["pe_price"] = pe
+                    latest_ticks["ce_timestamp"] = datetime.now()
+                    latest_ticks["pe_timestamp"] = datetime.now()
+                    price_history.append(ce)
+                    tick_counter += 1
+                    if tick_counter >= UPDATE_INTERVAL:
+                        tick_counter = 0
+                        run_signal_engine(ce, pe, list(price_history))
+            # Also refresh ATM IDs every few minutes (strike may change)
+            if time.time() - last_id_update > 300:   # 5 minutes
+                update_atm_option_ids()
+            time.sleep(1)   # 1 second polling – near real‑time
+        except Exception as e:
+            logger.error(f"Polling loop error: {e}")
+            time.sleep(1)
+
+# --------------------------------------------------
+# Signal engine (unchanged from your original)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -276,7 +295,7 @@ def calculate_atr(prices, period=14):
 def calculate_vwap(prices):
     if not prices:
         return 0
-    vol = [100] * len(prices)   # dummy volume
+    vol = [100] * len(prices)   # dummy volume (since we don't have live volume)
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
     return pv / tv if tv else 0
@@ -288,9 +307,6 @@ def estimate_greeks(ce, pe):
     vega = round((ce + pe) / 500, 2)
     return delta, gamma, theta, vega
 
-# --------------------------------------------------
-# PCR fetcher from NSE
-# --------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
 
@@ -316,9 +332,6 @@ def get_nifty_pcr():
         logger.error(f"PCR fetch failed: {e}")
         return pcr_cache["value"]
 
-# --------------------------------------------------
-# Advanced signal engine
-# --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list):
     global market_signal, market_state, institutional_state
     if len(price_list) < 20:
@@ -337,49 +350,29 @@ def run_signal_engine(ce_price, pe_price, price_list):
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
     bullish_score = 0
-    if ema_signal == "BULLISH":
-        bullish_score += 20
-    if rsi > 60:
-        bullish_score += 20
-    if spread > 0:
-        bullish_score += 20
-    if pcr < 1.0:
-        bullish_score += 20
-    if macd > 0:
-        bullish_score += 20
+    if ema_signal == "BULLISH": bullish_score += 20
+    if rsi > 60: bullish_score += 20
+    if spread > 0: bullish_score += 20
+    if pcr < 1.0: bullish_score += 20
+    if macd > 0: bullish_score += 20
 
     bearish_score = 0
-    if ema_signal == "BEARISH":
-        bearish_score += 20
-    if rsi < 40:
-        bearish_score += 20
-    if spread < 0:
-        bearish_score += 20
-    if pcr > 1.2:
-        bearish_score += 20
-    if macd < 0:
-        bearish_score += 20
+    if ema_signal == "BEARISH": bearish_score += 20
+    if rsi < 40: bearish_score += 20
+    if spread < 0: bearish_score += 20
+    if pcr > 1.2: bearish_score += 20
+    if macd < 0: bearish_score += 20
 
     if bullish_score >= bearish_score and bullish_score >= 20:
         confidence = bullish_score
-        if confidence >= 80:
-            action = "STRONG BUY CE"
-        elif confidence >= 60:
-            action = "BUY CE"
-        elif confidence >= 40:
-            action = "CONSIDER CE"
-        else:
-            action = "HOLD"
+        action = ("STRONG BUY CE" if confidence >= 80 else
+                  "BUY CE" if confidence >= 60 else
+                  "CONSIDER CE" if confidence >= 40 else "HOLD")
     elif bearish_score > bullish_score and bearish_score >= 20:
         confidence = bearish_score
-        if confidence >= 80:
-            action = "STRONG BUY PE"
-        elif confidence >= 60:
-            action = "BUY PE"
-        elif confidence >= 40:
-            action = "CONSIDER PE"
-        else:
-            action = "HOLD"
+        action = ("STRONG BUY PE" if confidence >= 80 else
+                  "BUY PE" if confidence >= 60 else
+                  "CONSIDER PE" if confidence >= 40 else "HOLD")
     else:
         confidence = max(bullish_score, bearish_score)
         action = "HOLD"
@@ -431,117 +424,29 @@ def run_signal_engine(ce_price, pe_price, price_list):
     logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f}")
 
 # --------------------------------------------------
-# Tick processor
-# --------------------------------------------------
-def process_tick(tick):
-    global tick_counter, price_history
-    try:
-        sec_id = str(tick.get("securityId", tick.get("security_id", "")))
-        price = float(tick.get("ltp", tick.get("LTP", 0)))
-        if not sec_id or price == 0:
-            return
-        if CE_ID is None or PE_ID is None:
-            return
-
-        if sec_id == CE_ID:
-            latest_ticks["ce_price"] = price
-            latest_ticks["ce_timestamp"] = datetime.now()
-        elif sec_id == PE_ID:
-            latest_ticks["pe_price"] = price
-            latest_ticks["pe_timestamp"] = datetime.now()
-        else:
-            return
-
-        ce = latest_ticks["ce_price"]
-        pe = latest_ticks["pe_price"]
-        if ce > 0 and pe > 0:
-            price_history.append(ce)
-            tick_counter += 1
-            if tick_counter >= UPDATE_INTERVAL:
-                tick_counter = 0
-                run_signal_engine(ce, pe, list(price_history))
-    except Exception as e:
-        logger.error(f"Tick error: {e}")
-
-def run_feed():
-    global need_restart, CE_ID, PE_ID, current_strike
-    ctx = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-    reconnect_delay = 10
-
-    while True:
-        try:
-            # --- CRITICAL FIX: Fetch fresh IDs before every connection attempt ---
-            logger.info("Fetching latest ATM option IDs...")
-            ce_id, pe_id = get_current_atm_ids()
-            if ce_id is None or pe_id is None:
-                logger.error("Failed to get current ATM IDs. Retrying in 5 seconds...")
-                time.sleep(5)
-                continue
-
-            # Update the global IDs for the rest of the app
-            CE_ID = ce_id
-            PE_ID = pe_id
-            logger.info(f"Using IDs: CE={CE_ID}, PE={PE_ID} (Strike {current_strike})")
-            # ----------------------------------------------------------------
-
-            instruments = [
-                (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
-                (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
-            ]
-            feed = MarketFeed(ctx, instruments, version="v2")
-            feed.on_connect = lambda: logger.info("✅ WebSocket connected")
-            feed.on_message = process_tick
-            feed.on_error = lambda e: logger.error(f"WebSocket error: {e}")
-            feed.on_close = lambda: logger.warning("WebSocket closed")
-
-            feed.run_forever()
-            logger.warning("WebSocket exited unexpectedly")
-        except Exception as e:
-            logger.error(f"Feed crashed: {e}")
-
-        logger.info(f"Sleeping {reconnect_delay}s before reconnect")
-        time.sleep(reconnect_delay)
-# --------------------------------------------------
-# Background ID updater
-# --------------------------------------------------
-def periodic_id_updater():
-    global need_restart
-    while True:
-        time.sleep(300)   # every 5 minutes
-        spot = get_nifty_spot_cached()
-        if spot:
-            new_strike = round(spot / 50) * 50
-            if new_strike != current_strike:
-                logger.info(f"Strike change detected: {current_strike} -> {new_strike}")
-                if update_atm_option_ids(force=True):
-                    need_restart = True
-                    # The running feed will exit and restart
-
-# --------------------------------------------------
-# Start background threads
+# Start background polling thread
 # --------------------------------------------------
 def start_background_engine():
-    # First fetch initial IDs
+    # initial contract fetch
     update_atm_option_ids(force=True)
-    # Start feed thread
-    threading.Thread(target=run_feed, daemon=True).start()
-    # Start periodic updater
-    threading.Thread(target=periodic_id_updater, daemon=True).start()
-    logger.info("✅ Background engine started with auto-ATM + bidirectional signals")
+    thread = threading.Thread(target=polling_feed, daemon=True)
+    thread.start()
+    logger.info("✅ Background polling engine started (REST API, 1 sec refresh)")
 
 # --------------------------------------------------
 # Flask endpoints
 # --------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "NIFTY ATM + Live Signals"})
+    return jsonify({"status": "online", "message": "NIFTY ATM + Live Signals (REST Polling)"})
 
 @app.route("/api/trading-signals")
 def trading_signals():
-    data = get_option_contracts()
-    if "error" in data:
-        return jsonify({"status": "error", "message": data["error"]}), 500
-    return jsonify({"status": "success", "data": data})
+    return jsonify({"status": "success", "data": {
+        "ce_id": CE_ID,
+        "pe_id": PE_ID,
+        "current_strike": current_strike
+    }})
 
 @app.route("/api/live-signals")
 def live_signals():
