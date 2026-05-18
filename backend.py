@@ -122,27 +122,82 @@ def get_current_atm_tokens():
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.DataFrame(resp.json())
+        logger.info(f"Total instruments loaded: {len(df)}")
     except Exception as e:
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
     
-    # FIX 1: Add .copy() here
-    nifty_opts = df[df["symbol"].astype(str).str.contains("NIFTY", na=False)].copy()
+    # Filter NIFTY options (exclude BANKNIFTY, MIDCPNIFTY, etc.)
+    nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\\d', na=False)].copy()
+    logger.info(f"NIFTY symbols found: {len(nifty_opts)}")
     
-    # FIX 2: Add explicit format here
-    nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
+    if nifty_opts.empty:
+        logger.error("No NIFTY symbols found")
+        return None, None
+    
+    # Try multiple expiry formats
+    for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
+        nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
+        valid_count = nifty_opts["expiry_date"].notna().sum()
+        if valid_count > 0:
+            logger.info(f"Parsed expiry with format {fmt}: {valid_count} valid")
+            break
+    else:
+        logger.error("Could not parse any expiry dates")
+        return None, None
     
     nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
+    
+    # Ensure strike is numeric
+    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce")
+    nifty_opts = nifty_opts.dropna(subset=["strike"])
+    logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
+    
     today = datetime.now()
     future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
+    logger.info(f"Future expiries: {len(future_expiries)}")
+    
     if future_expiries.empty:
+        logger.error("No future expiries found")
         return None, None
+    
     nearest_expiry = future_expiries["expiry_date"].min()
+    logger.info(f"Nearest expiry: {nearest_expiry}")
+    
+    # Check available strikes for nearest expiry
+    nearest_opts = nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]
+    logger.info(f"Options for nearest expiry: {len(nearest_opts)}")
+    
+    available_strikes = sorted(nearest_opts["strike"].unique())
+    logger.info(f"Available strikes (first 20): {available_strikes[:20]}")
+    logger.info(f"Looking for strike: {atm_strike}")
+    
+    # Try exact strike first
     atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
-    ce_row = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
-    pe_row = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+    logger.info(f"ATM options found: {len(atm_opts)}")
+    
+    # Case-insensitive CE/PE search
+    ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+    pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
+    
+    logger.info(f"CE matches: {len(ce_row)}, PE matches: {len(pe_row)}")
+    
     if ce_row.empty or pe_row.empty:
+        logger.error(f"CE or PE not found for strike {atm_strike}, expiry {nearest_expiry}")
+        # Fallback: try nearest available strike
+        if available_strikes:
+            nearest_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
+            logger.info(f"Trying nearest strike: {nearest_strike}")
+            atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+            ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+            pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
+            if not ce_row.empty and not pe_row.empty:
+                ce_token = str(ce_row.iloc[0]["token"])
+                pe_token = str(pe_row.iloc[0]["token"])
+                logger.info(f"Fallback CE token = {ce_token}, PE token = {pe_token}")
+                return ce_token, pe_token
         return None, None
+    
     ce_token = str(ce_row.iloc[0]["token"])
     pe_token = str(pe_row.iloc[0]["token"])
     logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
