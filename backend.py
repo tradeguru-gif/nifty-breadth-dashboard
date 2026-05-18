@@ -111,6 +111,9 @@ def get_nifty_spot_cached():
 # --------------------------------------------------
 # Fetch current ATM option tokens
 # --------------------------------------------------
+# --------------------------------------------------
+# Fetch current ATM option tokens
+# --------------------------------------------------
 def get_current_atm_tokens():
     spot = get_nifty_spot_cached()
     if not spot:
@@ -127,9 +130,20 @@ def get_current_atm_tokens():
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
     
-    # Filter NIFTY options (exclude BANKNIFTY, MIDCPNIFTY, etc.)
-    nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\\d', na=False)].copy()
-    logger.info(f"NIFTY symbols found: {len(nifty_opts)}")
+    # Filter NIFTY index options only
+    # Use 'name' field which is exactly "NIFTY" for NIFTY index options
+    nifty_opts = df[
+        (df["name"].astype(str) == "NIFTY") & 
+        (df["instrumenttype"].astype(str) == "OPTIDX") &
+        (df["exch_seg"].astype(str) == "NFO")
+    ].copy()
+    
+    logger.info(f"NIFTY OPTIDX NFO symbols found: {len(nifty_opts)}")
+    
+    if nifty_opts.empty:
+        # Fallback: try symbol starts with NIFTY + digit (date)
+        nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
+        logger.info(f"Fallback NIFTY symbols found: {len(nifty_opts)}")
     
     if nifty_opts.empty:
         logger.error("No NIFTY symbols found")
@@ -148,8 +162,8 @@ def get_current_atm_tokens():
     
     nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
     
-    # Ensure strike is numeric
-    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce")
+    # Strike is in paise - convert to rupees
+    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
     nifty_opts = nifty_opts.dropna(subset=["strike"])
     logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
     
@@ -176,7 +190,7 @@ def get_current_atm_tokens():
     atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
     logger.info(f"ATM options found: {len(atm_opts)}")
     
-    # Case-insensitive CE/PE search
+    # Case-insensitive CE/PE search on symbol
     ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
     pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
     
