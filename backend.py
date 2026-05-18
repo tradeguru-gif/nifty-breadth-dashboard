@@ -405,6 +405,12 @@ def trading_signals():
     }})
 
 
+@app.route("/api/test-reliance")
+def test_reliance():
+    price = get_ltp("18529")
+    return jsonify({"reliance_price": price})
+
+
 @app.route("/api/debug-ltp")
 def debug_ltp():
     ce_price = get_ltp(CE_ID)
