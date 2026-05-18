@@ -1,15 +1,14 @@
 # backend.py - Complete Professional Trading Signals with Auto-ATM Selection
-# Added bidirectional signals: BUY PE / STRONG BUY PE
+# Uses dhanhq==2.0.2 with synchronous run_forever
 
 import os
 import time
 import logging
-import asyncio
 import threading
 import requests
 import pandas as pd
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 from dhanhq import DhanContext, MarketFeed, dhanhq
@@ -36,13 +35,13 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     raise ValueError("Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN")
 
 # --------------------------------------------------
-# Spot price cache (30 seconds TTL)
+# Spot price cache
 # --------------------------------------------------
 spot_cache = {"value": None, "timestamp": 0}
 CACHE_TTL = 30
 
 # --------------------------------------------------
-# Global state for auto‑updated option IDs
+# Global state for ATM option IDs
 # --------------------------------------------------
 CE_ID = None
 PE_ID = None
@@ -53,7 +52,7 @@ ID_REFRESH_INTERVAL = 3600       # 1 hour
 need_restart = False
 
 # --------------------------------------------------
-# Live market data store (updated by WebSocket)
+# Live market data store
 # --------------------------------------------------
 latest_ticks = {
     "ce_price": 0.0,
@@ -62,12 +61,12 @@ latest_ticks = {
     "pe_timestamp": None
 }
 
-price_history = deque(maxlen=200)      # for CE price history
+price_history = deque(maxlen=200)
 tick_counter = 0
-UPDATE_INTERVAL = 10                   # recompute indicators every 10 ticks
+UPDATE_INTERVAL = 10
 
 # --------------------------------------------------
-# Trading signals state (updated periodically)
+# Trading signals state
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
@@ -122,7 +121,7 @@ institutional_state = {
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Helper: Dhan client (for REST API calls)
+# Helper: Dhan client
 # --------------------------------------------------
 def get_dhan_client():
     try:
@@ -171,7 +170,7 @@ def load_instruments():
     return df
 
 # --------------------------------------------------
-# Auto ATM selection (using CSV)
+# Auto ATM selection
 # --------------------------------------------------
 def get_option_contracts():
     spot = get_nifty_spot_cached()
@@ -317,7 +316,7 @@ def get_nifty_pcr():
         return pcr_cache["value"]
 
 # --------------------------------------------------
-# Advanced signal engine (runs every UPDATE_INTERVAL ticks)
+# Advanced signal engine
 # --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list):
     global market_signal, market_state, institutional_state
@@ -336,7 +335,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
 
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
-    # ---------- BULLISH CONFIDENCE (for CE) ----------
     bullish_score = 0
     if ema_signal == "BULLISH":
         bullish_score += 20
@@ -349,7 +347,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
     if macd > 0:
         bullish_score += 20
 
-    # ---------- BEARISH CONFIDENCE (for PE) ----------
     bearish_score = 0
     if ema_signal == "BEARISH":
         bearish_score += 20
@@ -357,12 +354,11 @@ def run_signal_engine(ce_price, pe_price, price_list):
         bearish_score += 20
     if spread < 0:
         bearish_score += 20
-    if pcr > 1.2:        # high PCR indicates put buying
+    if pcr > 1.2:
         bearish_score += 20
     if macd < 0:
         bearish_score += 20
 
-    # Decide action based on which score is higher
     if bullish_score >= bearish_score and bullish_score >= 20:
         confidence = bullish_score
         if confidence >= 80:
@@ -384,11 +380,9 @@ def run_signal_engine(ce_price, pe_price, price_list):
         else:
             action = "HOLD"
     else:
-        # both low – market sideways
         confidence = max(bullish_score, bearish_score)
         action = "HOLD"
 
-    # Update market state (confidence = dominant side's score)
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
@@ -436,7 +430,7 @@ def run_signal_engine(ce_price, pe_price, price_list):
     logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f}")
 
 # --------------------------------------------------
-# Tick processor (called from WebSocket)
+# Tick processor
 # --------------------------------------------------
 def process_tick(tick):
     global tick_counter, price_history
@@ -469,61 +463,38 @@ def process_tick(tick):
         logger.error(f"Tick error: {e}")
 
 # --------------------------------------------------
-# Custom WebSocket feed class
+# WebSocket feed with synchronous run_forever
 # --------------------------------------------------
-class CustomFeed(MarketFeed):
-    def __init__(self, dhan_context, instruments, version="v2"):
-        super().__init__(dhan_context, instruments, version=version)
-
-    def on_connect(self):
-        logger.info("✅ WebSocket connected")
-
-    def on_message(self, message):
-        process_tick(message)
-
-def on_message(instance, tick):
-    logger.info(f"TICK RECEIVED: {tick}")
-    # ... rest of your code ...
-
-    def on_error(self, error):
-        logger.error(f"WebSocket error: {error}")
-
-    def on_close(self):
-        logger.warning("WebSocket closed – reconnecting")
-
-# --------------------------------------------------
-# Async WebSocket loop with auto-restart on ID change
-# --------------------------------------------------
-async def websocket_loop():
+def run_feed():
     global need_restart, CE_ID, PE_ID, current_strike
+    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    reconnect_delay = 10
+
     while True:
         try:
             if CE_ID is None or PE_ID is None:
-                logger.info("Initializing option IDs...")
-                update_atm_option_ids(force=True)
-                if CE_ID is None or PE_ID is None:
-                    await asyncio.sleep(30)
-                    continue
+                logger.info("Waiting for ATM option IDs...")
+                time.sleep(5)
+                continue
 
+            logger.info(f"Connecting to MarketFeed CE={CE_ID} PE={PE_ID} (Strike {current_strike})")
             instruments = [
                 (MarketFeed.NSE_FNO, CE_ID, MarketFeed.Ticker),
                 (MarketFeed.NSE_FNO, PE_ID, MarketFeed.Ticker)
             ]
-            ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-            feed = CustomFeed(ctx, instruments, version="v2")
-            logger.info(f"Subscribing CE={CE_ID} PE={PE_ID} (Strike {current_strike})")
-            await feed.connect()
-            await feed.subscribe_instruments()
-            logger.info("Feed subscribed – waiting for ticks")
-            while not need_restart:
-                await asyncio.sleep(1)
-            logger.info("Restarting feed...")
-            need_restart = False
-            await feed.disconnect()
-            await asyncio.sleep(5)
+            feed = MarketFeed(ctx, instruments, version="v2")
+            feed.on_connect = lambda: logger.info("✅ WebSocket connected")
+            feed.on_message = process_tick
+            feed.on_error = lambda e: logger.error(f"WebSocket error: {e}")
+            feed.on_close = lambda: logger.warning("WebSocket closed")
+
+            feed.run_forever()
+            logger.warning("WebSocket exited unexpectedly")
         except Exception as e:
-            logger.error(f"Feed crashed: {e}, reconnecting in 10s")
-            await asyncio.sleep(10)
+            logger.error(f"Feed crashed: {e}")
+
+        logger.info(f"Sleeping {reconnect_delay}s before reconnect")
+        time.sleep(reconnect_delay)
 
 # --------------------------------------------------
 # Background ID updater
@@ -536,21 +507,22 @@ def periodic_id_updater():
         if spot:
             new_strike = round(spot / 50) * 50
             if new_strike != current_strike:
-                logger.info(f"Strike change: {current_strike} -> {new_strike}")
+                logger.info(f"Strike change detected: {current_strike} -> {new_strike}")
                 if update_atm_option_ids(force=True):
                     need_restart = True
+                    # The running feed will exit and restart
 
 # --------------------------------------------------
 # Start background threads
 # --------------------------------------------------
-def start_feed():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(websocket_loop())
-
-threading.Thread(target=start_feed, daemon=True).start()
-threading.Thread(target=periodic_id_updater, daemon=True).start()
-logger.info("✅ Background engine started with auto-ATM + bidirectional signals")
+def start_background_engine():
+    # First fetch initial IDs
+    update_atm_option_ids(force=True)
+    # Start feed thread
+    threading.Thread(target=run_feed, daemon=True).start()
+    # Start periodic updater
+    threading.Thread(target=periodic_id_updater, daemon=True).start()
+    logger.info("✅ Background engine started with auto-ATM + bidirectional signals")
 
 # --------------------------------------------------
 # Flask endpoints
@@ -561,7 +533,6 @@ def home():
 
 @app.route("/api/trading-signals")
 def trading_signals():
-    """Returns current ATM contract details (static)"""
     data = get_option_contracts()
     if "error" in data:
         return jsonify({"status": "error", "message": data["error"]}), 500
@@ -569,7 +540,6 @@ def trading_signals():
 
 @app.route("/api/live-signals")
 def live_signals():
-    """Returns real-time market signals and institutional state"""
     return jsonify({
         "status": "active",
         "data": market_signal,
@@ -585,5 +555,6 @@ def health():
 # Main
 # --------------------------------------------------
 if __name__ == "__main__":
+    start_background_engine()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
