@@ -316,6 +316,9 @@ def on_ws_close(wsapp, *args):
 # --------------------------------------------------
 # Start WebSocket connection
 # --------------------------------------------------
+# --------------------------------------------------
+# Start WebSocket connection
+# --------------------------------------------------
 def start_angel_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN, sws
     retry_delay = 30
@@ -353,9 +356,9 @@ def start_angel_websocket():
             logger.info("Connecting WebSocket...")
             sws.connect()
 
-            # Keep-alive loop
+            # Keep-alive loop with short sleep for responsiveness
             while ws_running:
-                time.sleep(1)
+                time.sleep(0.1)
 
             logger.warning("WebSocket loop ended, reconnecting...")
 
@@ -595,17 +598,46 @@ def debug_ws():
 # --------------------------------------------------
 # Start background thread (Gunicorn-compatible)
 # --------------------------------------------------
+# --------------------------------------------------
+# Start background thread (Gunicorn-compatible)
+# --------------------------------------------------
 engine_started = False
+
+def keep_alive_ping():
+    """Prevent Render from killing idle worker."""
+    while True:
+        time.sleep(25)
+        logger.debug("Keep-alive ping")
 
 def start_background_engine():
     global engine_started
     if not engine_started:
-        thread = threading.Thread(target=start_angel_websocket, daemon=True)
-        thread.start()
+        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        ws_thread.start()
+        ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
+        ping_thread.start()
         engine_started = True
         logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
 start_background_engine()
+
+# Keep-alive thread to prevent Render from killing idle worker
+def keep_alive_ping():
+    while True:
+        time.sleep(30)
+        logger.debug("Keep-alive ping")
+
+def start_background_engine():
+    global engine_started
+    if not engine_started:
+        # WebSocket thread
+        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        ws_thread.start()
+        # Keep-alive thread
+        ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
+        ping_thread.start()
+        engine_started = True
+        logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
