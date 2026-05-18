@@ -404,6 +404,21 @@ def trading_signals():
         "current_strike": current_strike
     }})
 
+
+@app.route("/api/debug-ltp")
+def debug_ltp():
+    ce_price = get_ltp(CE_ID)
+    pe_price = get_ltp(PE_ID)
+    return jsonify({
+        "ce_id": CE_ID,
+        "pe_id": PE_ID,
+        "ce_price": ce_price,
+        "pe_price": pe_price,
+        "token_prefix": ACCESS_TOKEN[:10] + "..."
+    })
+
+
+
 @app.route("/api/live-signals")
 def live_signals():
     return jsonify({
