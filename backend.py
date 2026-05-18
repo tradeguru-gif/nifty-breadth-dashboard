@@ -203,17 +203,20 @@ def update_atm_option_ids(force=False):
 # REST API polling for LTP (replaces WebSocket)
 # --------------------------------------------------
 def get_ltp(security_id):
-    """Fetch last traded price for a security via Dhan REST API"""
-    url = f"https://api.dhan.co/v2/ltp?securityId={security_id}"
+    url = "https://api.dhan.co/v2/marketfeed/ltp"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
+    payload = {
+        "securityIds": [int(security_id)]
+    }
     try:
-        resp = requests.get(url, headers=headers, timeout=2)
+        resp = requests.post(url, headers=headers, json=payload, timeout=2)
         if resp.status_code == 200:
             data = resp.json()
-            return float(data.get("ltp", 0))
+            ltp_data = data.get("data", {})
+            return float(ltp_data.get(security_id, {}).get("ltp", 0))
         else:
             logger.error(f"LTP error {resp.status_code}: {resp.text}")
             return 0
