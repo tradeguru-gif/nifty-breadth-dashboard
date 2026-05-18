@@ -574,6 +574,16 @@ def live_signals():
 
 @app.route("/api/health")
 def health():
+    return jsonify({
+        "status": "ok", 
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN
+    }), 200
+
+
+@app.route("/api/health")
+def health():
     return jsonify({"status": "ok", "ws_running": ws_running}), 200
 
 @app.route("/debug/ws-status")
