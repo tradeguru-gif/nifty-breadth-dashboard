@@ -35,8 +35,8 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 # --------------------------------------------------
 # Global state for ATM option IDs
 # --------------------------------------------------
-CE_ID = "51364"          # Hardcoded current CE ID
-PE_ID = "51365"          # Hardcoded current PE ID
+CE_ID = "18529"          # Hardcoded current CE ID
+PE_ID = "18529"          # Hardcoded current PE ID
 current_strike = 23650   # matching strike
 
 # --------------------------------------------------
