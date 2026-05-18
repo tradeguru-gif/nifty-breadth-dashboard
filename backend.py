@@ -252,28 +252,35 @@ def polling_feed():
 #-----------------------------------------------
 def polling_feed():
     global CE_ID, PE_ID, latest_ticks, price_history, tick_counter
+    
+    # ✅ Hardcode the current ATM IDs (from your script output)
+    CE_ID = "51364"
+    PE_ID = "51365"
+    # Optionally set current_strike if used elsewhere
+    # current_strike = 23650
+    
     while True:
         try:
-            if CE_ID is None or PE_ID is None:
-                ce, pe = get_current_atm_ids()
-                if ce and pe:
-                    CE_ID, PE_ID = ce, pe
-                    logger.info(f"✅ Initialized IDs: CE={CE_ID}, PE={PE_ID}")
-                else:
-                    logger.warning("⚠️ Could not fetch IDs, retrying...")
-                    time.sleep(5)
-                    continue
-
+            # 🔁 Fetch live prices using the hardcoded IDs
             ce_price = get_ltp(CE_ID)
             pe_price = get_ltp(PE_ID)
-            logger.info(f"📊 LTP -> CE: {ce_price}, PE: {pe_price}")   # ← add this
+            logger.info(f"📊 LTP -> CE: {ce_price}, PE: {pe_price}")
 
             if ce_price > 0 and pe_price > 0:
-                # ... existing code ...
+                latest_ticks["ce_price"] = ce_price
+                latest_ticks["pe_price"] = pe_price
+                latest_ticks["ce_timestamp"] = datetime.now()
+                latest_ticks["pe_timestamp"] = datetime.now()
+
+                price_history.append(ce_price)
+                tick_counter += 1
+                if tick_counter >= UPDATE_INTERVAL:
+                    tick_counter = 0
+                    run_signal_engine(ce_price, pe_price, list(price_history))
             else:
                 logger.warning(f"⚠️ Zero price: CE={ce_price}, PE={pe_price}")
 
-            time.sleep(1)
+            time.sleep(1)   # 1 second polling
         except Exception as e:
             logger.error(f"Polling loop error: {e}")
             time.sleep(1)
