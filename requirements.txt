@@ -3,7 +3,4 @@ flask-cors==4.0.1
 gunicorn==21.2.0
 requests==2.31.0
 pandas
-smartapi-python
 pyotp
-websocket-client
-logzero
