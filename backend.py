@@ -144,7 +144,6 @@ def get_nifty_spot_cached():
 # LTP fetch using correct Dhan API
 # --------------------------------------------------
 def get_ltp(security_id):
-    """Fetch last traded price via Dhan REST API (POST /v2/marketfeed/ltp)"""
     url = "https://api.dhan.co/v2/marketfeed/ltp"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -153,8 +152,10 @@ def get_ltp(security_id):
     payload = {"securityIds": [int(security_id)]}
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=2)
+        logger.info(f"LTP Response Status: {resp.status_code}")  # Log status
         if resp.status_code == 200:
             data = resp.json()
+            logger.info(f"LTP Response Data: {data}")          # Log full JSON
             ltp_data = data.get("data", {})
             ltp = ltp_data.get(str(security_id), {}).get("ltp", 0)
             return float(ltp)
@@ -164,7 +165,6 @@ def get_ltp(security_id):
     except Exception as e:
         logger.error(f"LTP request error for {security_id}: {e}")
         return 0
-
 # --------------------------------------------------
 # Polling loop (hardcoded IDs, no dynamic refresh)
 # --------------------------------------------------
