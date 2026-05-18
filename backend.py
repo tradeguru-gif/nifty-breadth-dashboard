@@ -247,6 +247,36 @@ def polling_feed():
             logger.error(f"Polling loop error: {e}")
             time.sleep(1)
 
+#-------------------------------------------------
+#POLLING FEED TEMPORARY
+#-----------------------------------------------
+def polling_feed():
+    global CE_ID, PE_ID, latest_ticks, price_history, tick_counter
+    while True:
+        try:
+            if CE_ID is None or PE_ID is None:
+                ce, pe = get_current_atm_ids()
+                if ce and pe:
+                    CE_ID, PE_ID = ce, pe
+                    logger.info(f"✅ Initialized IDs: CE={CE_ID}, PE={PE_ID}")
+                else:
+                    logger.warning("⚠️ Could not fetch IDs, retrying...")
+                    time.sleep(5)
+                    continue
+
+            ce_price = get_ltp(CE_ID)
+            pe_price = get_ltp(PE_ID)
+            logger.info(f"📊 LTP -> CE: {ce_price}, PE: {pe_price}")   # ← add this
+
+            if ce_price > 0 and pe_price > 0:
+                # ... existing code ...
+            else:
+                logger.warning(f"⚠️ Zero price: CE={ce_price}, PE={pe_price}")
+
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"Polling loop error: {e}")
+            time.sleep(1)
 # --------------------------------------------------
 # Signal engine (unchanged from earlier)
 # --------------------------------------------------
