@@ -35,9 +35,9 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 # --------------------------------------------------
 # Global state for ATM option IDs
 # --------------------------------------------------
-CE_ID = None
-PE_ID = None
-current_strike = None
+CE_ID = "51364"          # Hardcoded current CE ID
+PE_ID = "51365"          # Hardcoded current PE ID
+current_strike = 23650   # matching strike
 
 # --------------------------------------------------
 # Live market data store
@@ -109,7 +109,7 @@ institutional_state = {
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
-# Helper: Nifty spot (cached)
+# Helper: Nifty spot (cached) – needed for reference only
 # --------------------------------------------------
 spot_cache = {"value": None, "timestamp": 0}
 CACHE_TTL = 30
@@ -141,43 +141,6 @@ def get_nifty_spot_cached():
     return spot
 
 # --------------------------------------------------
-# Load Dhan scrip master CSV (for ATM contract IDs)
-# --------------------------------------------------
-def load_instruments():
-    url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-    df = pd.read_csv(url, low_memory=False)
-    logger.info(f"Loaded {len(df)} instruments")
-    return df
-
-def get_current_atm_ids():
-    """Fetch current ATM CE and PE security IDs using CSV master"""
-    spot = get_nifty_spot_cached()
-    if not spot:
-        return None, None
-    atm_strike = round(spot / 50) * 50
-    logger.info(f"ATM strike = {atm_strike}")
-    try:
-        df = load_instruments()
-    except Exception as e:
-        logger.error(f"CSV load failed: {e}")
-        return None, None
-    nifty_opts = df[df['SEM_CUSTOM_SYMBOL'].astype(str).str.contains('NIFTY', na=False)]
-    nifty_opts['EXPIRY'] = pd.to_datetime(nifty_opts['SEM_EXPIRY_DATE'], errors='coerce')
-    nifty_opts = nifty_opts.dropna(subset=['EXPIRY'])
-    if nifty_opts.empty:
-        return None, None
-    nearest_expiry = nifty_opts['EXPIRY'].min()
-    atm_opts = nifty_opts[(nifty_opts['SEM_STRIKE_PRICE'] == atm_strike) & (nifty_opts['EXPIRY'] == nearest_expiry)]
-    ce_row = atm_opts[atm_opts['SEM_OPTION_TYPE'] == 'CE']
-    pe_row = atm_opts[atm_opts['SEM_OPTION_TYPE'] == 'PE']
-    if ce_row.empty or pe_row.empty:
-        return None, None
-    ce_id = str(ce_row.iloc[0]['SEM_SMST_SECURITY_ID'])
-    pe_id = str(pe_row.iloc[0]['SEM_SMST_SECURITY_ID'])
-    logger.info(f"Found CE={ce_id}, PE={pe_id} for strike {atm_strike}")
-    return ce_id, pe_id
-
-# --------------------------------------------------
 # LTP fetch using correct Dhan API
 # --------------------------------------------------
 def get_ltp(security_id):
@@ -203,65 +166,15 @@ def get_ltp(security_id):
         return 0
 
 # --------------------------------------------------
-# Polling loop (runs in background)
+# Polling loop (hardcoded IDs, no dynamic refresh)
 # --------------------------------------------------
 def polling_feed():
-    global CE_ID, PE_ID, latest_ticks, price_history, tick_counter, market_signal, market_state, institutional_state
-    while True:
-        try:
-            # Refresh ATM IDs every 10 minutes or if missing
-            if CE_ID is None or PE_ID is None:
-                ce, pe = get_current_atm_ids()
-                if ce and pe:
-                    CE_ID, PE_ID = ce, pe
-                    logger.info(f"Initialized IDs: CE={CE_ID}, PE={PE_ID}")
-                else:
-                    time.sleep(5)
-                    continue
-
-            # Fetch live prices
-            ce_price = get_ltp(CE_ID)
-            pe_price = get_ltp(PE_ID)
-
-            if ce_price > 0 and pe_price > 0:
-                latest_ticks["ce_price"] = ce_price
-                latest_ticks["pe_price"] = pe_price
-                latest_ticks["ce_timestamp"] = datetime.now()
-                latest_ticks["pe_timestamp"] = datetime.now()
-
-                price_history.append(ce_price)
-                tick_counter += 1
-                if tick_counter >= UPDATE_INTERVAL:
-                    tick_counter = 0
-                    run_signal_engine(ce_price, pe_price, list(price_history))
-
-            # Optional: refresh IDs every 10 minutes in case strike changes
-            if time.time() % 600 < 1:   # crude every ~10 minutes
-                new_ce, new_pe = get_current_atm_ids()
-                if new_ce and new_pe and (new_ce != CE_ID or new_pe != PE_ID):
-                    CE_ID, PE_ID = new_ce, new_pe
-                    logger.info(f"Updated IDs due to strike change: CE={CE_ID}, PE={PE_ID}")
-
-            time.sleep(1)   # 1 second polling
-        except Exception as e:
-            logger.error(f"Polling loop error: {e}")
-            time.sleep(1)
-
-#-------------------------------------------------
-#POLLING FEED TEMPORARY
-#-----------------------------------------------
-def polling_feed():
     global CE_ID, PE_ID, latest_ticks, price_history, tick_counter
-    
-    # ✅ Hardcode the current ATM IDs (from your script output)
-    CE_ID = "51364"
-    PE_ID = "51365"
-    # Optionally set current_strike if used elsewhere
-    # current_strike = 23650
-    
+    global market_signal, market_state, institutional_state   # needed for signal engine
+
     while True:
         try:
-            # 🔁 Fetch live prices using the hardcoded IDs
+            # Fetch live prices using hardcoded IDs
             ce_price = get_ltp(CE_ID)
             pe_price = get_ltp(PE_ID)
             logger.info(f"📊 LTP -> CE: {ce_price}, PE: {pe_price}")
@@ -284,8 +197,9 @@ def polling_feed():
         except Exception as e:
             logger.error(f"Polling loop error: {e}")
             time.sleep(1)
+
 # --------------------------------------------------
-# Signal engine (unchanged from earlier)
+# Signal engine
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
