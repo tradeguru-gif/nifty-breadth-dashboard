@@ -1,4 +1,4 @@
-# backend.py - Nifty Options Signal Engine (REST API Polling Version)
+# backend.py - Nifty Options Signal Engine with REST API Polling
 
 import os
 import time
@@ -38,9 +38,6 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 CE_ID = None
 PE_ID = None
 current_strike = None
-current_expiry = None
-last_id_update = 0
-ID_REFRESH_INTERVAL = 3600       # 1 hour
 
 # --------------------------------------------------
 # Live market data store
@@ -57,7 +54,7 @@ tick_counter = 0
 UPDATE_INTERVAL = 10            # recompute indicators every 10 polls
 
 # --------------------------------------------------
-# Trading signals state (same as before)
+# Trading signals state
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
@@ -177,46 +174,27 @@ def get_current_atm_ids():
         return None, None
     ce_id = str(ce_row.iloc[0]['SEM_SMST_SECURITY_ID'])
     pe_id = str(pe_row.iloc[0]['SEM_SMST_SECURITY_ID'])
+    logger.info(f"Found CE={ce_id}, PE={pe_id} for strike {atm_strike}")
     return ce_id, pe_id
 
-def update_atm_option_ids(force=False):
-    global CE_ID, PE_ID, current_strike, current_expiry, last_id_update
-    now = time.time()
-    if not force and (now - last_id_update) < ID_REFRESH_INTERVAL:
-        return False
-    ce, pe = get_current_atm_ids()
-    if not ce or not pe:
-        return False
-    if not force and ce == CE_ID and pe == PE_ID:
-        last_id_update = now
-        return False
-    CE_ID = ce
-    PE_ID = pe
-    # current_strike is derived from spot; we'll update on each poll
-    current_strike = round(get_nifty_spot_cached() / 50) * 50 if get_nifty_spot_cached() else None
-    current_expiry = None   # we could store expiry date if needed
-    last_id_update = now
-    logger.info(f"Updated ATM options: Strike={current_strike}, CE={CE_ID}, PE={PE_ID}")
-    return True
-
 # --------------------------------------------------
-# REST API polling for LTP (replaces WebSocket)
+# LTP fetch using correct Dhan API
 # --------------------------------------------------
 def get_ltp(security_id):
+    """Fetch last traded price via Dhan REST API (POST /v2/marketfeed/ltp)"""
     url = "https://api.dhan.co/v2/marketfeed/ltp"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "securityIds": [int(security_id)]
-    }
+    payload = {"securityIds": [int(security_id)]}
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=2)
         if resp.status_code == 200:
             data = resp.json()
             ltp_data = data.get("data", {})
-            return float(ltp_data.get(security_id, {}).get("ltp", 0))
+            ltp = ltp_data.get(str(security_id), {}).get("ltp", 0)
+            return float(ltp)
         else:
             logger.error(f"LTP error {resp.status_code}: {resp.text}")
             return 0
@@ -224,37 +202,53 @@ def get_ltp(security_id):
         logger.error(f"LTP request error for {security_id}: {e}")
         return 0
 
+# --------------------------------------------------
+# Polling loop (runs in background)
+# --------------------------------------------------
 def polling_feed():
-    """Main polling loop: fetches CE and PE prices every second"""
     global CE_ID, PE_ID, latest_ticks, price_history, tick_counter, market_signal, market_state, institutional_state
     while True:
         try:
-            # Refresh ATM contracts periodically (every ~5 minutes)
-            if not CE_ID or not PE_ID:
-                update_atm_option_ids(force=True)
-            if CE_ID and PE_ID:
-                ce = get_ltp(CE_ID)
-                pe = get_ltp(PE_ID)
-                if ce > 0 and pe > 0:
-                    latest_ticks["ce_price"] = ce
-                    latest_ticks["pe_price"] = pe
-                    latest_ticks["ce_timestamp"] = datetime.now()
-                    latest_ticks["pe_timestamp"] = datetime.now()
-                    price_history.append(ce)
-                    tick_counter += 1
-                    if tick_counter >= UPDATE_INTERVAL:
-                        tick_counter = 0
-                        run_signal_engine(ce, pe, list(price_history))
-            # Also refresh ATM IDs every few minutes (strike may change)
-            if time.time() - last_id_update > 300:   # 5 minutes
-                update_atm_option_ids()
-            time.sleep(1)   # 1 second polling – near real‑time
+            # Refresh ATM IDs every 10 minutes or if missing
+            if CE_ID is None or PE_ID is None:
+                ce, pe = get_current_atm_ids()
+                if ce and pe:
+                    CE_ID, PE_ID = ce, pe
+                    logger.info(f"Initialized IDs: CE={CE_ID}, PE={PE_ID}")
+                else:
+                    time.sleep(5)
+                    continue
+
+            # Fetch live prices
+            ce_price = get_ltp(CE_ID)
+            pe_price = get_ltp(PE_ID)
+
+            if ce_price > 0 and pe_price > 0:
+                latest_ticks["ce_price"] = ce_price
+                latest_ticks["pe_price"] = pe_price
+                latest_ticks["ce_timestamp"] = datetime.now()
+                latest_ticks["pe_timestamp"] = datetime.now()
+
+                price_history.append(ce_price)
+                tick_counter += 1
+                if tick_counter >= UPDATE_INTERVAL:
+                    tick_counter = 0
+                    run_signal_engine(ce_price, pe_price, list(price_history))
+
+            # Optional: refresh IDs every 10 minutes in case strike changes
+            if time.time() % 600 < 1:   # crude every ~10 minutes
+                new_ce, new_pe = get_current_atm_ids()
+                if new_ce and new_pe and (new_ce != CE_ID or new_pe != PE_ID):
+                    CE_ID, PE_ID = new_ce, new_pe
+                    logger.info(f"Updated IDs due to strike change: CE={CE_ID}, PE={PE_ID}")
+
+            time.sleep(1)   # 1 second polling
         except Exception as e:
             logger.error(f"Polling loop error: {e}")
             time.sleep(1)
 
 # --------------------------------------------------
-# Signal engine (unchanged from your original)
+# Signal engine (unchanged from earlier)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -298,7 +292,7 @@ def calculate_atr(prices, period=14):
 def calculate_vwap(prices):
     if not prices:
         return 0
-    vol = [100] * len(prices)   # dummy volume (since we don't have live volume)
+    vol = [100] * len(prices)
     pv = sum(p * v for p, v in zip(prices, vol))
     tv = sum(vol)
     return pv / tv if tv else 0
@@ -368,14 +362,24 @@ def run_signal_engine(ce_price, pe_price, price_list):
 
     if bullish_score >= bearish_score and bullish_score >= 20:
         confidence = bullish_score
-        action = ("STRONG BUY CE" if confidence >= 80 else
-                  "BUY CE" if confidence >= 60 else
-                  "CONSIDER CE" if confidence >= 40 else "HOLD")
+        if confidence >= 80:
+            action = "STRONG BUY CE"
+        elif confidence >= 60:
+            action = "BUY CE"
+        elif confidence >= 40:
+            action = "CONSIDER CE"
+        else:
+            action = "HOLD"
     elif bearish_score > bullish_score and bearish_score >= 20:
         confidence = bearish_score
-        action = ("STRONG BUY PE" if confidence >= 80 else
-                  "BUY PE" if confidence >= 60 else
-                  "CONSIDER PE" if confidence >= 40 else "HOLD")
+        if confidence >= 80:
+            action = "STRONG BUY PE"
+        elif confidence >= 60:
+            action = "BUY PE"
+        elif confidence >= 40:
+            action = "CONSIDER PE"
+        else:
+            action = "HOLD"
     else:
         confidence = max(bullish_score, bearish_score)
         action = "HOLD"
@@ -430,8 +434,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
 # Start background polling thread
 # --------------------------------------------------
 def start_background_engine():
-    # initial contract fetch
-    update_atm_option_ids(force=True)
     thread = threading.Thread(target=polling_feed, daemon=True)
     thread.start()
     logger.info("✅ Background polling engine started (REST API, 1 sec refresh)")
