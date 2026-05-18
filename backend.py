@@ -481,6 +481,10 @@ class CustomFeed(MarketFeed):
     def on_message(self, message):
         process_tick(message)
 
+def on_message(instance, tick):
+    logger.info(f"TICK RECEIVED: {tick}")
+    # ... rest of your code ...
+
     def on_error(self, error):
         logger.error(f"WebSocket error: {error}")
 
