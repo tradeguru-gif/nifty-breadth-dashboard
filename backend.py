@@ -261,11 +261,67 @@ def on_ws_close(wsapp, *args):
 # --------------------------------------------------
 # Start WebSocket connection
 # --------------------------------------------------
+# --------------------------------------------------
+# WebSocket Callbacks
+# --------------------------------------------------
+def on_ws_open(wsapp):
+    """Called when WebSocket opens. wsapp is the WebSocketApp instance."""
+    logger.info("Angel One WebSocket opened")
+    # Use the global sws instance to subscribe, NOT wsapp
+    if 'sws' in globals() and sws is not None:
+        try:
+            correlation_id = "tradeguru_001"
+            mode = 2  # LTP mode
+            tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
+            sws.subscribe(correlation_id, mode, tokens)
+            logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
+        except Exception as e:
+            logger.error(f"Subscribe error: {e}")
+
+def on_ws_data(wsapp, message, *args):
+    """Called when data arrives."""
+    global latest_ticks, price_history, tick_counter
+    try:
+        data = json.loads(message) if isinstance(message, str) else message
+        ticks = data if isinstance(data, list) else [data]
+        for tick in ticks:
+            token = str(tick.get("tk"))
+            ltp = tick.get("ltp", 0) / 100
+            if token == CE_TOKEN:
+                latest_ticks["ce_price"] = ltp
+                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
+                price_history.append(ltp)
+                tick_counter += 1
+            elif token == PE_TOKEN:
+                latest_ticks["pe_price"] = ltp
+                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
+
+            ce = latest_ticks["ce_price"]
+            pe = latest_ticks["pe_price"]
+            if ce > 0 and pe > 0 and tick_counter % UPDATE_INTERVAL == 0:
+                run_signal_engine(ce, pe, list(price_history))
+    except Exception as e:
+        logger.error(f"WebSocket data error: {e}")
+
+def on_ws_error(wsapp, error):
+    """Called on WebSocket error."""
+    logger.error(f"WebSocket error: {error}")
+
+def on_ws_close(wsapp, *args):
+    """Called when WebSocket closes. Accepts variable args."""
+    logger.warning(f"WebSocket closed, args: {args}")
+    global ws_running
+    ws_running = False
+
+# --------------------------------------------------
+# Start WebSocket connection
+# --------------------------------------------------
 def start_angel_websocket():
-    global ws_running, CE_TOKEN, PE_TOKEN
+    global ws_running, CE_TOKEN, PE_TOKEN, sws
     retry_delay = 30
     while True:
         try:
+            # 1. Authenticate
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
             obj = SmartConnect(api_key=ANGEL_API_KEY)
             session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
@@ -278,6 +334,7 @@ def start_angel_websocket():
             feed_token = obj.getfeedToken()
             logger.info("Authenticated, feed token obtained")
 
+            # 2. Get current ATM tokens
             CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
             if not CE_TOKEN or not PE_TOKEN:
                 logger.error("Could not fetch ATM tokens. Retrying...")
@@ -285,16 +342,18 @@ def start_angel_websocket():
                 retry_delay = min(retry_delay * 2, 300)
                 continue
 
-            ws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            ws.on_open = on_ws_open
-            ws.on_data = on_ws_data
-            ws.on_error = on_ws_error
-            ws.on_close = on_ws_close
+            # 3. Setup WebSocket
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+            sws.on_open = on_ws_open
+            sws.on_data = on_ws_data
+            sws.on_error = on_ws_error
+            sws.on_close = on_ws_close
             ws_running = True
             retry_delay = 30
             logger.info("Connecting WebSocket...")
-            ws.connect()
+            sws.connect()
 
+            # Keep-alive loop
             while ws_running:
                 time.sleep(1)
 
@@ -304,7 +363,6 @@ def start_angel_websocket():
             logger.error(f"WebSocket connection error: {e}")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 300)
-
 # --------------------------------------------------
 # Signal Engine
 # --------------------------------------------------
