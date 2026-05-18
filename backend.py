@@ -11,7 +11,8 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
-from dhanhq import DhanContext, MarketFeed, dhanhq
+from dhanhq import dhanhq
+from dhanhq.marketfeed import MarketFeed
 
 # --------------------------------------------------
 # Logging
@@ -125,7 +126,7 @@ SPREAD_THRESHOLD = 5.0
 # --------------------------------------------------
 def get_dhan_client():
     try:
-        ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+        ctx = dhanhq(CLIENT_ID, ACCESS_TOKEN)
         return dhanhq(ctx)
     except Exception as e:
         logger.error(f"Failed to create Dhan client: {e}")
@@ -464,7 +465,7 @@ def process_tick(tick):
 
 def run_feed():
     global need_restart, CE_ID, PE_ID, current_strike
-    ctx = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    ctx = dhanhq(CLIENT_ID, ACCESS_TOKEN)
     reconnect_delay = 10
 
     while True:
