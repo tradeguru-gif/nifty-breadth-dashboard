@@ -430,27 +430,58 @@ def estimate_greeks(ce, pe):
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
 
+
 def get_nifty_pcr():
     now = time.time()
     if now - pcr_cache["time"] < PCR_TTL:
         return pcr_cache["value"]
+    
+    # Try NSE first
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        time.sleep(0.5)
-        resp = session.get(url, headers=headers, timeout=5)
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        time.sleep(1)
+        resp = session.get(url, headers=headers, timeout=10)
         data = resp.json()
-        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
-        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
+        
+        if "records" not in data:
+            raise KeyError("No 'records' in response")
+            
+        records = data["records"]["data"]
+        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in records if "CE" in x)
+        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in records if "PE" in x)
         pcr = pe_oi / ce_oi if ce_oi else 1.0
+        
         pcr_cache["value"] = pcr
         pcr_cache["time"] = now
+        logger.info(f"PCR fetched successfully: {pcr:.2f}")
         return pcr
+        
     except Exception as e:
-        logger.error(f"PCR fetch failed: {e}")
-        return pcr_cache["value"]
+        logger.warning(f"NSE PCR fetch failed: {e}")
+        
+    # Fallback: estimate PCR from CE/PE price ratio
+    try:
+        ce = latest_ticks.get("ce_price", 0)
+        pe = latest_ticks.get("pe_price", 0)
+        if ce > 0 and pe > 0:
+            # If PE is more expensive than CE, PCR is likely > 1 (bearish)
+            # If CE is more expensive, PCR is likely < 1 (bullish)
+            price_pcr = pe / ce if ce > 0 else 1.0
+            pcr = round(price_pcr, 2)
+            logger.info(f"Using price-based PCR fallback: {pcr}")
+            return pcr
+    except Exception as e:
+        logger.warning(f"PCR fallback failed: {e}")
+    
+    # Last resort: return cached or default
+    return pcr_cache["value"]
 
 def run_signal_engine(ce_price, pe_price, price_list):
     global market_signal, market_state, institutional_state
