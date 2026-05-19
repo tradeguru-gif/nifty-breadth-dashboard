@@ -37,17 +37,19 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 CE_TOKEN = None
 PE_TOKEN = None
 latest_ticks = {"ce_price": 0.0, "pe_price": 0.0}
-price_history = deque(maxlen=200)
+price_history = deque(maxlen=500)
 tick_counter = 0
-UPDATE_INTERVAL = 10
+UPDATE_INTERVAL = 5
 ws_running = False
 sws = None
 
 # --------------------------------------------------
-# Market Signal State
+# Enhanced Signal State
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
+    "sentiment": "NEUTRAL",
+    "sentiment_score": 0,
     "ce_price": 0.0,
     "pe_price": 0.0,
     "spread": 0.0,
@@ -62,12 +64,25 @@ market_signal = {
     "gamma": 0.0,
     "theta": 0.0,
     "vega": 0.0,
+    "confidence": 0,
+    "confidence_color": "RED",
+    "trend_strength": 0,
+    "volatility_regime": "NORMAL",
+    "market_regime": "SIDEWAYS",
+    "entry_zone": False,
     "timestamp": ""
 }
+
 market_state = {
-    "rsi": 50, "momentum": "NEUTRAL", "strength": "LOW", "trend": "SIDEWAYS",
-    "action": "HOLD", "confidence": 0, "volatility": "NORMAL", "alert": "NONE"
+    "action": "HOLD",
+    "confidence": 0,
+    "momentum": "NEUTRAL",
+    "trend": "SIDEWAYS",
+    "strength": "LOW",
+    "volatility": "NORMAL",
+    "alert": "NONE"
 }
+
 institutional_state = {
     "vwap": 0, "ema_fast": 0, "ema_slow": 0, "ema_signal": "NEUTRAL", "atr": 0,
     "oi_buildup": "NEUTRAL", "iv_state": "NORMAL", "candle_structure": "SIDEWAYS",
@@ -75,6 +90,18 @@ institutional_state = {
     "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
     "institutional_signal": "HOLD", "institutional_confidence": 0
 }
+
+# --------------------------------------------------
+# Professional Signal Parameters
+# --------------------------------------------------
+MIN_CONFIDENCE = 70          # Minimum confidence to generate signal
+MAX_SPREAD_FOR_ENTRY = 15   # Max spread to consider valid entry
+RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 25
+MACD_THRESHOLD = 0.5
+ATR_VOLATILE = 10
+CONFIRMATION_MIN = 3        # Minimum confirming factors required
+
 SPREAD_THRESHOLD = 5.0
 
 # --------------------------------------------------
@@ -301,7 +328,7 @@ def start_angel_websocket():
             retry_delay = min(retry_delay * 2, 300)
 
 # --------------------------------------------------
-# Signal Engine
+# Professional Signal Engine
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -357,6 +384,101 @@ def estimate_greeks(ce, pe):
     vega = round((ce + pe) / 500, 2)
     return delta, gamma, theta, vega
 
+def detect_market_regime(atr, spread, price_list):
+    """Detect if market is trending, ranging, or volatile."""
+    if len(price_list) < 30:
+        return "INSUFFICIENT_DATA"
+
+    recent_range = max(price_list[-30:]) - min(price_list[-30:])
+    avg_price = sum(price_list[-30:]) / 30
+    volatility_pct = (recent_range / avg_price) * 100 if avg_price else 0
+
+    if atr > ATR_VOLATILE and volatility_pct > 2:
+        return "VOLATILE"
+    elif volatility_pct < 0.5:
+        return "SIDEWAYS"
+    else:
+        return "TRENDING"
+
+def calculate_sentiment_score(bullish_score, bearish_score, pcr, rsi, macd, spread, ema_signal, trend_strength):
+    """Calculate sentiment score from -100 (Extreme Fear) to +100 (Extreme Greed)."""
+    sentiment = 0
+
+    # PCR contribution (-30 to +30)
+    if pcr < 0.8:
+        sentiment += 30  # Extreme bullish (low PCR)
+    elif pcr < 1.0:
+        sentiment += 15
+    elif pcr > 1.3:
+        sentiment -= 30  # Extreme bearish (high PCR)
+    elif pcr > 1.1:
+        sentiment -= 15
+
+    # RSI contribution (-25 to +25)
+    if rsi > 70:
+        sentiment += 25
+    elif rsi > 60:
+        sentiment += 15
+    elif rsi < 30:
+        sentiment -= 25
+    elif rsi < 40:
+        sentiment -= 15
+
+    # MACD contribution (-20 to +20)
+    if macd > 2:
+        sentiment += 20
+    elif macd > 0.5:
+        sentiment += 10
+    elif macd < -2:
+        sentiment -= 20
+    elif macd < -0.5:
+        sentiment -= 10
+
+    # Spread contribution (-15 to +15)
+    if spread > 10:
+        sentiment += 15
+    elif spread > 0:
+        sentiment += 5
+    elif spread < -10:
+        sentiment -= 15
+    elif spread < 0:
+        sentiment -= 5
+
+    # EMA contribution (-10 to +10)
+    if ema_signal == "BULLISH":
+        sentiment += 10
+    elif ema_signal == "BEARISH":
+        sentiment -= 10
+
+    # Clamp to -100 to +100
+    return max(-100, min(100, sentiment))
+
+def get_confidence_color(confidence):
+    """Return color zone based on confidence."""
+    if confidence >= 70:
+        return "GREEN"
+    elif confidence >= 40:
+        return "YELLOW"
+    else:
+        return "RED"
+
+def get_sentiment_label(score):
+    """Convert sentiment score to label."""
+    if score >= 80:
+        return "EXTREME_GREED"
+    elif score >= 50:
+        return "GREED"
+    elif score >= 20:
+        return "OPTIMISM"
+    elif score > -20:
+        return "NEUTRAL"
+    elif score > -50:
+        return "FEAR"
+    elif score > -80:
+        return "EXTREME_FEAR"
+    else:
+        return "PANIC"
+
 pcr_cache = {"value": 1.0, "time": 0}
 PCR_TTL = 60
 
@@ -384,7 +506,9 @@ def get_nifty_pcr():
 
 def run_signal_engine(ce_price, pe_price, price_list):
     global market_signal, market_state, institutional_state
-    if len(price_list) < 20:
+
+    # Need minimum data
+    if len(price_list) < 30:
         return
 
     spread = ce_price - pe_price
@@ -398,64 +522,141 @@ def run_signal_engine(ce_price, pe_price, price_list):
     delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
 
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+    market_regime = detect_market_regime(atr, spread, price_list)
 
-    bullish_score = 0
-    if ema_signal == "BULLISH":
-        bullish_score += 20
-    if rsi > 60:
-        bullish_score += 20
-    if spread > 0:
-        bullish_score += 20
-    if pcr < 1.0:
-        bullish_score += 20
-    if macd > 0:
-        bullish_score += 20
+    # --------------------------------------------------
+    # PROFESSIONAL SCORING SYSTEM
+    # --------------------------------------------------
 
-    bearish_score = 0
-    if ema_signal == "BEARISH":
-        bearish_score += 20
-    if rsi < 40:
-        bearish_score += 20
-    if spread < 0:
-        bearish_score += 20
-    if pcr > 1.2:
-        bearish_score += 20
-    if macd < 0:
-        bearish_score += 20
+    # Factor 1: Trend (EMA) - Weight: 25
+    trend_score = 0
+    trend_confirming = False
+    if ema_signal == "BULLISH" and ema_fast > vwap:
+        trend_score = 25
+        trend_confirming = True
+    elif ema_signal == "BEARISH" and ema_fast < vwap:
+        trend_score = -25
+        trend_confirming = True
 
-    if bullish_score >= bearish_score and bullish_score >= 20:
-        confidence = bullish_score
-        if confidence >= 80:
-            action = "STRONG BUY CE"
-        elif confidence >= 60:
-            action = "BUY CE"
-        elif confidence >= 40:
-            action = "CONSIDER CE"
-        else:
-            action = "HOLD"
-    elif bearish_score > bullish_score and bearish_score >= 20:
-        confidence = bearish_score
-        if confidence >= 80:
-            action = "STRONG BUY PE"
-        elif confidence >= 60:
-            action = "BUY PE"
-        elif confidence >= 40:
-            action = "CONSIDER PE"
-        else:
-            action = "HOLD"
+    # Factor 2: Momentum (RSI) - Weight: 20
+    momentum_score = 0
+    momentum_confirming = False
+    if rsi > 60 and rsi < RSI_OVERBOUGHT:
+        momentum_score = 20
+        momentum_confirming = True
+    elif rsi < 40 and rsi > RSI_OVERSOLD:
+        momentum_score = -20
+        momentum_confirming = True
+    elif rsi >= RSI_OVERBOUGHT or rsi <= RSI_OVERSOLD:
+        # Extreme RSI = avoid (overbought/oversold)
+        momentum_score = 0
+
+    # Factor 3: Spread Direction - Weight: 15
+    spread_score = 0
+    spread_confirming = False
+    if spread > 5:
+        spread_score = 15
+        spread_confirming = True
+    elif spread < -5:
+        spread_score = -15
+        spread_confirming = True
+    elif abs(spread) <= 2:
+        # Too tight spread = no clear direction
+        spread_score = 0
+
+    # Factor 4: PCR (Contrarian) - Weight: 15
+    pcr_score = 0
+    pcr_confirming = False
+    if pcr < 0.9:
+        pcr_score = 15  # Low PCR = bullish (CE writers aggressive)
+        pcr_confirming = True
+    elif pcr > 1.2:
+        pcr_score = -15  # High PCR = bearish (PE writers aggressive)
+        pcr_confirming = True
+
+    # Factor 5: MACD - Weight: 15
+    macd_score = 0
+    macd_confirming = False
+    if macd > MACD_THRESHOLD:
+        macd_score = 15
+        macd_confirming = True
+    elif macd < -MACD_THRESHOLD:
+        macd_score = -15
+        macd_confirming = True
+
+    # Factor 6: Volatility Filter - Weight: 10
+    volat_score = 0
+    if atr < ATR_VOLATILE:
+        volat_score = 10  # Low volatility = good for entry
     else:
-        confidence = max(bullish_score, bearish_score)
-        action = "HOLD"
+        volat_score = -10  # High volatility = avoid
 
+    # Calculate total scores
+    bullish_score = max(0, trend_score) + max(0, momentum_score) + max(0, spread_score) + max(0, pcr_score) + max(0, macd_score) + max(0, volat_score)
+    bearish_score = max(0, -trend_score) + max(0, -momentum_score) + max(0, -spread_score) + max(0, -pcr_score) + max(0, -macd_score) + max(0, -volat_score)
+
+    # Count confirming factors
+    confirming_factors = sum([
+        trend_confirming,
+        momentum_confirming,
+        spread_confirming,
+        pcr_confirming,
+        macd_confirming
+    ])
+
+    # Calculate confidence (0-100)
+    raw_confidence = max(bullish_score, bearish_score)
+
+    # Apply penalties for low confirmation or bad regime
+    if confirming_factors < CONFIRMATION_MIN:
+        confidence = raw_confidence * 0.5  # Halve confidence if weak confirmation
+    elif market_regime == "VOLATILE":
+        confidence = raw_confidence * 0.3  # Heavy penalty in volatile markets
+    elif market_regime == "SIDEWAYS":
+        confidence = raw_confidence * 0.6  # Penalty in sideways markets
+    else:
+        confidence = raw_confidence
+
+    confidence = min(100, confidence)
+    confidence_color = get_confidence_color(confidence)
+
+    # Calculate sentiment
+    sentiment_score = calculate_sentiment_score(bullish_score, bearish_score, pcr, rsi, macd, spread, ema_signal, confirming_factors)
+    sentiment_label = get_sentiment_label(sentiment_score)
+
+    # Determine action - STRICT CRITERIA
+    entry_zone = False
+
+    if confidence >= MIN_CONFIDENCE and confirming_factors >= CONFIRMATION_MIN and market_regime in ["TRENDING", "SIDEWAYS"] and abs(spread) <= MAX_SPREAD_FOR_ENTRY:
+        entry_zone = True
+
+        if bullish_score > bearish_score and bullish_score >= 60:
+            if confidence >= 85:
+                action = "STRONG BUY CE"
+            else:
+                action = "BUY CE"
+        elif bearish_score > bullish_score and bearish_score >= 60:
+            if confidence >= 85:
+                action = "STRONG BUY PE"
+            else:
+                action = "BUY PE"
+        else:
+            action = "HOLD"
+            entry_zone = False
+    else:
+        action = "HOLD"
+        entry_zone = False
+
+    # Update market state
     market_state.update({
         "rsi": round(rsi, 2),
-        "momentum": "UPTREND" if spread > 0 else "DOWNTREND",
-        "strength": "HIGH" if confidence > 60 else "LOW",
+        "momentum": "UPTREND" if spread > 0 else "DOWNTREND" if spread < 0 else "NEUTRAL",
+        "strength": "HIGH" if confidence > 70 else "MEDIUM" if confidence > 40 else "LOW",
         "trend": ema_signal,
         "action": action,
-        "confidence": confidence,
-        "volatility": "HIGH" if abs(spread) > 20 else "NORMAL",
-        "alert": action
+        "confidence": round(confidence, 1),
+        "volatility": "HIGH" if atr > ATR_VOLATILE else "NORMAL",
+        "alert": action if entry_zone else "HOLD"
     })
 
     institutional_state.update({
@@ -469,11 +670,13 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "theta": theta,
         "vega": vega,
         "institutional_signal": action,
-        "institutional_confidence": confidence
+        "institutional_confidence": round(confidence, 1)
     })
 
     market_signal.update({
         "signal": "BULLISH" if spread > SPREAD_THRESHOLD else "BEARISH" if spread < -SPREAD_THRESHOLD else "NEUTRAL",
+        "sentiment": sentiment_label,
+        "sentiment_score": round(sentiment_score, 1),
         "ce_price": ce_price,
         "pe_price": pe_price,
         "spread": round(spread, 2),
@@ -488,10 +691,16 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "gamma": gamma,
         "theta": theta,
         "vega": vega,
+        "confidence": round(confidence, 1),
+        "confidence_color": confidence_color,
+        "trend_strength": confirming_factors,
+        "volatility_regime": market_regime,
+        "market_regime": market_regime,
+        "entry_zone": entry_zone,
         "timestamp": datetime.now().isoformat()
     })
 
-    logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f}")
+    logger.info(f"[{market_regime}] {action} | Conf={confidence:.1f}% ({confidence_color}) | Sentiment={sentiment_label}({sentiment_score:+.0f}) | Confirms={confirming_factors}/5 | Spread={spread:.2f}")
 
 # --------------------------------------------------
 # Flask endpoints
@@ -531,7 +740,7 @@ def debug_ws():
     })
 
 # --------------------------------------------------
-# Start background engine - runs in master process with --preload
+# Start background engine
 # --------------------------------------------------
 engine_started = False
 
@@ -543,7 +752,6 @@ def start_background_engine():
         engine_started = True
         logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
-# Start the engine at module load - this runs in Gunicorn master with --preload
 start_background_engine()
 
 if __name__ == "__main__":
