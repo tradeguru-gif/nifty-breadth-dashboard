@@ -5,8 +5,8 @@ import threading
 import json
 import requests
 import pandas as pd
-from collections import deque
-from datetime import datetime
+from collections import deque, defaultdict
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
 import pyotp
@@ -37,14 +37,14 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 CE_TOKEN = None
 PE_TOKEN = None
 latest_ticks = {"ce_price": 0.0, "pe_price": 0.0}
-price_history = deque(maxlen=200)
+price_history = deque(maxlen=500)  # Increased for multi-timeframe analysis
 tick_counter = 0
-UPDATE_INTERVAL = 10
+UPDATE_INTERVAL = 5  # Faster updates for 1min trend
 ws_running = False
 sws = None
 
 # --------------------------------------------------
-# Market Signal State — ALL TRADING SIGNAL PARAMETERS
+# Professional Signal State
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
@@ -62,6 +62,9 @@ market_signal = {
     "gamma": 0.0,
     "theta": 0.0,
     "vega": 0.0,
+    "volume": 0,
+    "volume_avg": 0,
+    "oi_signal": "NEUTRAL",
     "timestamp": ""
 }
 
@@ -73,7 +76,14 @@ market_state = {
     "action": "HOLD",
     "confidence": 0,
     "volatility": "NORMAL",
-    "alert": "NONE"
+    "alert": "NONE",
+    "signal_duration_minutes": 0,
+    "trend_1min": "SIDEWAYS",
+    "trend_5min": "SIDEWAYS",
+    "trend_10min": "SIDEWAYS",
+    "trend_15min": "SIDEWAYS",
+    "trend_20min": "SIDEWAYS",
+    "timeframe_agreement": 0  # How many timeframes agree (0-5)
 }
 
 institutional_state = {
@@ -88,19 +98,47 @@ institutional_state = {
     "market_breadth": "BALANCED",
     "volume_profile": "NORMAL",
     "smart_money_flow": "NEUTRAL",
+    "volume_trend": "FLAT",
     "delta": 0,
     "gamma": 0,
     "theta": 0,
     "vega": 0,
     "institutional_signal": "HOLD",
-    "institutional_confidence": 0
+    "institutional_confidence": 0,
+    "consecutive_confirmations": 0
 }
 
-# Confidence thresholds for CE/PE signals
-SPREAD_THRESHOLD = 5.0
-STRONG_BUY_THRESHOLD = 80
-BUY_THRESHOLD = 60
-CONSIDER_THRESHOLD = 40
+# --------------------------------------------------
+# Signal Persistence & Anti-Flip System
+# --------------------------------------------------
+signal_memory = {
+    "current_action": "HOLD",
+    "current_signal_type": "NONE",  # NONE, TRENDING, MOMENTUM
+    "signal_start_time": None,
+    "last_confirmed_action": "HOLD",
+    "confirmation_count": 0,
+    "required_confirmations": 2,
+    "min_signal_duration_seconds": 180,  # 3 minutes minimum
+    "max_sideways_duration": 600  # 10 minutes before forcing re-evaluation
+}
+
+# Timeframe history storage (price snapshots per minute)
+timeframe_history = {
+    "1min": deque(maxlen=60),
+    "5min": deque(maxlen=20),
+    "10min": deque(maxlen=15),
+    "15min": deque(maxlen=10),
+    "20min": deque(maxlen=10)
+}
+
+last_minute_snapshot = {"time": 0, "price": 0}
+
+# Thresholds
+SPREAD_THRESHOLD = 3.0
+STRONG_BUY_THRESHOLD = 85
+BUY_THRESHOLD = 70
+CONSIDER_THRESHOLD = 55
+HOLD_THRESHOLD = 45
 
 # --------------------------------------------------
 # Helper: Nifty spot
@@ -231,7 +269,7 @@ def get_current_atm_tokens():
     return ce_token, pe_token
 
 # --------------------------------------------------
-# WebSocket Callbacks — FIXED TICK PARSING
+# WebSocket Callbacks
 # --------------------------------------------------
 def on_ws_open(wsapp):
     global sws
@@ -239,9 +277,9 @@ def on_ws_open(wsapp):
     if sws is not None:
         try:
             correlation_id = "tradeguru_001"
-            mode = 2  # LTP mode
+            mode = 2
             token_list = [
-                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}  # NSE = 1, NFO = 2
+                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}
             ]
             sws.subscribe(correlation_id, mode, token_list)
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
@@ -249,22 +287,16 @@ def on_ws_open(wsapp):
             logger.error(f"Subscribe error: {e}")
 
 def on_ws_data(wsapp, message, *args):
-    global latest_ticks, price_history, tick_counter
+    global latest_ticks, price_history, tick_counter, last_minute_snapshot, timeframe_history
     try:
-        # Angel One WebSocket v2 sends data in this format
         if isinstance(message, str):
             data = json.loads(message)
         else:
             data = message
 
-        # Debug: log raw data structure
-        logger.debug(f"Raw tick data: {data}")
-
-        # Handle list of ticks
         ticks = data if isinstance(data, list) else [data]
 
         for tick in ticks:
-            # Try multiple possible field names for token
             token = None
             for key in ["tk", "token", "symbolToken", "instrument_token"]:
                 if key in tick:
@@ -272,48 +304,49 @@ def on_ws_data(wsapp, message, *args):
                     break
 
             if not token:
-                logger.debug(f"No token found in tick: {tick}")
                 continue
 
-            # Try multiple possible field names for LTP
             ltp = None
             for key in ["ltp", "last_traded_price", "lp", "price"]:
                 if key in tick:
                     val = tick.get(key)
-                    # Angel One sends prices multiplied by 100
                     if isinstance(val, (int, float)):
                         ltp = val / 100 if val > 1000 else val
                     break
 
             if ltp is None:
-                logger.debug(f"No LTP found in tick for token {token}: {tick}")
                 continue
 
-            logger.info(f"Tick received - Token: {token}, LTP: {ltp}")
-
+            # Update prices
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_timestamp"] = datetime.now().isoformat()
                 price_history.append(ltp)
                 tick_counter += 1
-                logger.info(f"CE price updated: {ltp}")
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_timestamp"] = datetime.now().isoformat()
-                logger.info(f"PE price updated: {ltp}")
 
+            # Store minute snapshots for timeframe analysis
+            now = time.time()
+            if now - last_minute_snapshot["time"] >= 60:
+                avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
+                last_minute_snapshot["time"] = now
+                last_minute_snapshot["price"] = avg_price
+
+                # Add to all timeframes
+                snapshot = {"time": now, "price": avg_price, "ce": latest_ticks["ce_price"], "pe": latest_ticks["pe_price"]}
+                for tf in timeframe_history:
+                    timeframe_history[tf].append(snapshot)
+
+            # Run signal engine
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
-
-            # Run signal engine when we have both prices and enough history
             if ce > 0 and pe > 0 and len(price_history) >= 20 and tick_counter % UPDATE_INTERVAL == 0:
-                logger.info(f"Running signal engine - CE: {ce}, PE: {pe}, History: {len(price_history)}")
                 run_signal_engine(ce, pe, list(price_history))
 
     except Exception as e:
         logger.error(f"WebSocket data error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
 
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket error: {error}")
@@ -371,7 +404,7 @@ def start_angel_websocket():
             retry_delay = min(retry_delay * 2, 300)
 
 # --------------------------------------------------
-# Signal Engine — ALL TRADING SIGNAL PARAMETERS WITH CONFIDENCE
+# Professional Technical Indicators
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -386,16 +419,19 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def calculate_macd(prices, fast=12, slow=26):
+def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow:
-        return 0.0
+        return 0.0, 0.0
     def ema(data, period):
         alpha = 2 / (period + 1)
         val = data[0]
         for p in data[1:]:
             val = alpha * p + (1 - alpha) * val
         return val
-    return ema(prices, fast) - ema(prices, slow)
+    macd_line = ema(prices, fast) - ema(prices, slow)
+    signal_line = ema(prices[-signal:], signal) if len(prices) >= signal else ema(prices, signal)
+    histogram = macd_line - signal_line
+    return macd_line, histogram
 
 def calculate_ema(prices, period):
     if len(prices) < period:
@@ -412,13 +448,31 @@ def calculate_atr(prices, period=14):
     trs = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
     return sum(trs[-period:]) / period
 
-def calculate_vwap(prices):
+def calculate_vwap(prices, volumes=None):
     if not prices:
         return 0
-    vol = [100] * len(prices)
-    pv = sum(p * v for p, v in zip(prices, vol))
-    tv = sum(vol)
+    if volumes is None:
+        volumes = [100] * len(prices)
+    pv = sum(p * v for p, v in zip(prices, volumes))
+    tv = sum(volumes)
     return pv / tv if tv else 0
+
+def calculate_volume_trend(prices):
+    """Estimate volume trend from price movement intensity"""
+    if len(prices) < 20:
+        return "FLAT", 0
+    recent = prices[-10:]
+    older = prices[-20:-10]
+    recent_volatility = sum(abs(recent[i] - recent[i-1]) for i in range(1, len(recent)))
+    older_volatility = sum(abs(older[i] - older[i-1]) for i in range(1, len(older)))
+    if older_volatility == 0:
+        return "FLAT", 0
+    ratio = recent_volatility / older_volatility
+    if ratio > 1.5:
+        return "INCREASING", ratio
+    elif ratio < 0.7:
+        return "DECREASING", ratio
+    return "FLAT", ratio
 
 def estimate_greeks(ce, pe):
     delta = round((ce - pe) / 100, 2)
@@ -427,16 +481,73 @@ def estimate_greeks(ce, pe):
     vega = round((ce + pe) / 500, 2)
     return delta, gamma, theta, vega
 
-pcr_cache = {"value": 1.0, "time": 0}
-PCR_TTL = 60
+# --------------------------------------------------
+# Timeframe Trend Analysis
+# --------------------------------------------------
+def analyze_timeframe_trend(tf_name, history_deque):
+    """Analyze trend for a specific timeframe"""
+    history = list(history_deque)
+    if len(history) < 2:
+        return "SIDEWAYS", 0, 0
 
+    # Calculate slope using linear regression on minute snapshots
+    n = len(history)
+    if n < 2:
+        return "SIDEWAYS", 0, 0
+
+    prices = [h["price"] for h in history]
+    x = list(range(n))
+    x_mean = sum(x) / n
+    y_mean = sum(prices) / n
+
+    numerator = sum((x[i] - x_mean) * (prices[i] - y_mean) for i in range(n))
+    denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
+
+    if denominator == 0:
+        return "SIDEWAYS", 0, 0
+
+    slope = numerator / denominator
+
+    # Calculate R-squared (trend strength)
+    ss_res = sum((prices[i] - (y_mean + slope * (x[i] - x_mean))) ** 2 for i in range(n))
+    ss_tot = sum((prices[i] - y_mean) ** 2 for i in range(n))
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+    # Determine trend direction and strength
+    slope_threshold = 0.05  # Minimum slope to be considered trending
+    strength = abs(slope) * r_squared * 100  # 0-100 scale
+
+    if abs(slope) < slope_threshold or r_squared < 0.3:
+        return "SIDEWAYS", strength, r_squared
+    elif slope > 0:
+        return "BULLISH", strength, r_squared
+    else:
+        return "BEARISH", strength, r_squared
+
+def get_all_timeframe_trends():
+    """Get trends for all timeframes"""
+    trends = {}
+    for tf_name, tf_deque in timeframe_history.items():
+        trend, strength, r2 = analyze_timeframe_trend(tf_name, tf_deque)
+        trends[tf_name] = {
+            "trend": trend,
+            "strength": round(strength, 2),
+            "confidence": round(r2, 2)
+        }
+    return trends
+
+# --------------------------------------------------
+# PCR with Multiple Fallbacks
+# --------------------------------------------------
+pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
+PCR_TTL = 120  # 2 minutes
 
 def get_nifty_pcr():
     now = time.time()
     if now - pcr_cache["time"] < PCR_TTL:
-        return pcr_cache["value"]
-    
-    # Try NSE first
+        return pcr_cache["value"], pcr_cache["source"]
+
+    # Try NSE Option Chain
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
         headers = {
@@ -449,161 +560,338 @@ def get_nifty_pcr():
         time.sleep(1)
         resp = session.get(url, headers=headers, timeout=10)
         data = resp.json()
-        
-        if "records" not in data:
-            raise KeyError("No 'records' in response")
-            
-        records = data["records"]["data"]
-        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in records if "CE" in x)
-        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in records if "PE" in x)
-        pcr = pe_oi / ce_oi if ce_oi else 1.0
-        
-        pcr_cache["value"] = pcr
-        pcr_cache["time"] = now
-        logger.info(f"PCR fetched successfully: {pcr:.2f}")
-        return pcr
-        
+
+        if "records" in data and "data" in data["records"]:
+            records = data["records"]["data"]
+            ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in records if "CE" in x)
+            pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in records if "PE" in x)
+            pcr = pe_oi / ce_oi if ce_oi else 1.0
+            pcr_cache.update({"value": pcr, "time": now, "source": "nse_oi"})
+            logger.info(f"PCR from NSE OI: {pcr:.2f}")
+            return pcr, "nse_oi"
     except Exception as e:
         logger.warning(f"NSE PCR fetch failed: {e}")
-        
-    # Fallback: estimate PCR from CE/PE price ratio
+
+    # Fallback 1: Price-based PCR
     try:
         ce = latest_ticks.get("ce_price", 0)
         pe = latest_ticks.get("pe_price", 0)
         if ce > 0 and pe > 0:
-            # If PE is more expensive than CE, PCR is likely > 1 (bearish)
-            # If CE is more expensive, PCR is likely < 1 (bullish)
-            price_pcr = pe / ce if ce > 0 else 1.0
-            pcr = round(price_pcr, 2)
-            logger.info(f"Using price-based PCR fallback: {pcr}")
-            return pcr
+            price_pcr = pe / ce
+            pcr = round(max(0.5, min(2.0, price_pcr)), 2)
+            pcr_cache.update({"value": pcr, "time": now, "source": "price_based"})
+            logger.info(f"PCR from price ratio: {pcr:.2f}")
+            return pcr, "price_based"
     except Exception as e:
-        logger.warning(f"PCR fallback failed: {e}")
-    
-    # Last resort: return cached or default
-    return pcr_cache["value"]
+        logger.warning(f"Price PCR fallback failed: {e}")
 
+    # Fallback 2: Historical average
+    pcr_cache["time"] = now
+    return pcr_cache["value"], "cached"
+
+# --------------------------------------------------
+# Professional Signal Engine
+# --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list):
-    global market_signal, market_state, institutional_state
-    if len(price_list) < 20:
+    global market_signal, market_state, institutional_state, signal_memory
+
+    if len(price_list) < 30:
         return
 
+    # Calculate all indicators
     spread = ce_price - pe_price
     rsi = calculate_rsi(price_list)
-    macd = calculate_macd(price_list)
+    macd_line, macd_hist = calculate_macd(price_list)
     vwap = calculate_vwap(price_list)
     ema_fast = calculate_ema(price_list, 9)
     ema_slow = calculate_ema(price_list, 21)
     atr = calculate_atr(price_list)
-    pcr = get_nifty_pcr()
+    pcr, pcr_source = get_nifty_pcr()
+    volume_trend, volume_ratio = calculate_volume_trend(price_list)
     delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
 
-    ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+    # Get timeframe trends
+    tf_trends = get_all_timeframe_trends()
+
+    # Extract individual timeframe directions
+    trend_1min = tf_trends.get("1min", {}).get("trend", "SIDEWAYS")
+    trend_5min = tf_trends.get("5min", {}).get("trend", "SIDEWAYS")
+    trend_10min = tf_trends.get("10min", {}).get("trend", "SIDEWAYS")
+    trend_15min = tf_trends.get("15min", {}).get("trend", "SIDEWAYS")
+    trend_20min = tf_trends.get("20min", {}).get("trend", "SIDEWAYS")
+
+    # Count timeframe agreement
+    bullish_count = sum(1 for t in [trend_1min, trend_5min, trend_10min, trend_15min, trend_20min] if t == "BULLISH")
+    bearish_count = sum(1 for t in [trend_1min, trend_5min, trend_10min, trend_15min, trend_20min] if t == "BEARISH")
+    sideways_count = 5 - bullish_count - bearish_count
+
+    timeframe_agreement = max(bullish_count, bearish_count)
 
     # ============================================================
-    # BULLISH SCORE — Confidence for BUY CE signals
+    # PROFESSIONAL SIGNAL SCORING SYSTEM
     # ============================================================
-    bullish_score = 0
-    if ema_signal == "BULLISH":
-        bullish_score += 20
-    if rsi > 60:
-        bullish_score += 20
-    if spread > 0:
-        bullish_score += 20
-    if pcr < 1.0:
-        bullish_score += 20
-    if macd > 0:
-        bullish_score += 20
+
+    # Base score from timeframes (0-50 points)
+    timeframe_score = 0
+    if trend_1min == "BULLISH":
+        timeframe_score += 10
+    if trend_5min == "BULLISH":
+        timeframe_score += 10
+    if trend_10min == "BULLISH":
+        timeframe_score += 10
+    if trend_15min == "BULLISH":
+        timeframe_score += 10
+    if trend_20min == "BULLISH":
+        timeframe_score += 10
+
+    bearish_timeframe_score = 0
+    if trend_1min == "BEARISH":
+        bearish_timeframe_score += 10
+    if trend_5min == "BEARISH":
+        bearish_timeframe_score += 10
+    if trend_10min == "BEARISH":
+        bearish_timeframe_score += 10
+    if trend_15min == "BEARISH":
+        bearish_timeframe_score += 10
+    if trend_20min == "BEARISH":
+        bearish_timeframe_score += 10
+
+    # Technical indicator scores (0-50 points)
+    tech_bullish = 0
+    tech_bearish = 0
+
+    # RSI (0-10 points)
+    if 55 < rsi < 75:  # Bullish zone, not overbought
+        tech_bullish += 10
+    elif rsi > 75:  # Overbought - reduce score
+        tech_bullish += 3
+    elif 40 < rsi < 55:  # Neutral-bullish
+        tech_bullish += 5
+
+    if 25 < rsi < 45:  # Bearish zone, not oversold
+        tech_bearish += 10
+    elif rsi < 25:  # Oversold - reduce score
+        tech_bearish += 3
+    elif 45 < rsi < 60:  # Neutral-bearish
+        tech_bearish += 5
+
+    # MACD (0-10 points)
+    if macd_hist > 0 and macd_line > 0:
+        tech_bullish += 10
+    elif macd_hist > 0:
+        tech_bullish += 6
+    elif macd_hist < 0 and macd_line < 0:
+        tech_bearish += 10
+    elif macd_hist < 0:
+        tech_bearish += 6
+
+    # PCR (0-10 points)
+    if pcr < 0.9:
+        tech_bullish += 10
+    elif pcr < 1.0:
+        tech_bullish += 7
+    elif pcr > 1.3:
+        tech_bearish += 10
+    elif pcr > 1.2:
+        tech_bearish += 7
+
+    # Volume (0-10 points)
+    if volume_trend == "INCREASING":
+        if bullish_count > bearish_count:
+            tech_bullish += 10
+        elif bearish_count > bullish_count:
+            tech_bearish += 10
+
+    # Price vs EMA/VWAP (0-10 points)
+    avg_price = (ce_price + pe_price) / 2
+    if avg_price > vwap and avg_price > ema_slow:
+        tech_bullish += 10
+    elif avg_price > vwap or avg_price > ema_slow:
+        tech_bullish += 5
+    elif avg_price < vwap and avg_price < ema_slow:
+        tech_bearish += 10
+    elif avg_price < vwap or avg_price < ema_slow:
+        tech_bearish += 5
 
     # ============================================================
-    # BEARISH SCORE — Confidence for BUY PE signals
+    # COMBINED SCORING & SIGNAL DETERMINATION
     # ============================================================
-    bearish_score = 0
-    if ema_signal == "BEARISH":
-        bearish_score += 20
-    if rsi < 40:
-        bearish_score += 20
-    if spread < 0:
-        bearish_score += 20
-    if pcr > 1.2:
-        bearish_score += 20
-    if macd < 0:
-        bearish_score += 20
 
-    # ============================================================
-    # SIGNAL DECISION WITH FULL CONFIDENCE LEVELS
-    # ============================================================
-    if bullish_score >= bearish_score and bullish_score >= CONSIDER_THRESHOLD:
-        confidence = bullish_score
-        if confidence >= STRONG_BUY_THRESHOLD:
-            action = "STRONG BUY CE"
-        elif confidence >= BUY_THRESHOLD:
-            action = "BUY CE"
-        elif confidence >= CONSIDER_THRESHOLD:
-            action = "CONSIDER CE"
+    total_bullish = timeframe_score + tech_bullish
+    total_bearish = bearish_timeframe_score + tech_bearish
+
+    # Determine raw signal
+    now = datetime.now()
+
+    if total_bullish >= total_bearish and total_bullish >= CONSIDER_THRESHOLD:
+        raw_confidence = total_bullish
+        if timeframe_agreement >= 4 and raw_confidence >= STRONG_BUY_THRESHOLD:
+            raw_action = "TRENDING: CE"
+            signal_type = "TRENDING"
+        elif raw_confidence >= STRONG_BUY_THRESHOLD:
+            raw_action = "STRONG BUY CE"
+            signal_type = "MOMENTUM"
+        elif raw_confidence >= BUY_THRESHOLD:
+            raw_action = "BUY CE"
+            signal_type = "MOMENTUM"
+        elif raw_confidence >= CONSIDER_THRESHOLD:
+            raw_action = "CONSIDER CE"
+            signal_type = "MOMENTUM"
         else:
-            action = "HOLD"
-    elif bearish_score > bullish_score and bearish_score >= CONSIDER_THRESHOLD:
-        confidence = bearish_score
-        if confidence >= STRONG_BUY_THRESHOLD:
-            action = "STRONG BUY PE"
-        elif confidence >= BUY_THRESHOLD:
-            action = "BUY PE"
-        elif confidence >= CONSIDER_THRESHOLD:
-            action = "CONSIDER PE"
+            raw_action = "HOLD"
+            signal_type = "NONE"
+    elif total_bearish > total_bullish and total_bearish >= CONSIDER_THRESHOLD:
+        raw_confidence = total_bearish
+        if timeframe_agreement >= 4 and raw_confidence >= STRONG_BUY_THRESHOLD:
+            raw_action = "TRENDING: PE"
+            signal_type = "TRENDING"
+        elif raw_confidence >= STRONG_BUY_THRESHOLD:
+            raw_action = "STRONG BUY PE"
+            signal_type = "MOMENTUM"
+        elif raw_confidence >= BUY_THRESHOLD:
+            raw_action = "BUY PE"
+            signal_type = "MOMENTUM"
+        elif raw_confidence >= CONSIDER_THRESHOLD:
+            raw_action = "CONSIDER PE"
+            signal_type = "MOMENTUM"
         else:
-            action = "HOLD"
+            raw_action = "HOLD"
+            signal_type = "NONE"
     else:
-        confidence = max(bullish_score, bearish_score)
-        action = "HOLD"
+        raw_confidence = max(total_bullish, total_bearish)
+        raw_action = "HOLD"
+        signal_type = "NONE"
 
     # ============================================================
-    # UPDATE market_state — ALL PARAMETERS
+    # ANTI-FLIP & PERSISTENCE LOGIC
     # ============================================================
+
+    current_time = time.time()
+
+    # If same direction as current signal, increment confirmation
+    if raw_action == signal_memory["current_action"] and raw_action != "HOLD":
+        signal_memory["confirmation_count"] += 1
+    else:
+        signal_memory["confirmation_count"] = 0
+
+    # Check minimum duration before allowing signal change
+    min_duration_met = True
+    if signal_memory["signal_start_time"] is not None:
+        elapsed = current_time - signal_memory["signal_start_time"]
+        if elapsed < signal_memory["min_signal_duration_seconds"]:
+            min_duration_met = False
+
+    # Determine final action
+    if signal_memory["current_action"] == "HOLD" or signal_memory["current_action"] == "WAITING":
+        # From HOLD, need 2 consecutive confirmations to change
+        if raw_action != "HOLD" and signal_memory["confirmation_count"] >= signal_memory["required_confirmations"]:
+            final_action = raw_action
+            final_signal_type = signal_type
+            signal_memory["signal_start_time"] = current_time
+            signal_memory["confirmation_count"] = 0
+        else:
+            final_action = "HOLD"
+            final_signal_type = "NONE"
+    else:
+        # Already in a signal - only change if:
+        # 1. Minimum duration met, AND
+        # 2. New signal has enough confirmations, AND
+        # 3. Direction actually changed (not just HOLD)
+        if raw_action == "HOLD":
+            # Check if we should force exit to HOLD (sideways too long)
+            if signal_memory["signal_start_time"] is not None:
+                elapsed = current_time - signal_memory["signal_start_time"]
+                if elapsed > signal_memory["max_sideways_duration"]:
+                    final_action = "HOLD"
+                    final_signal_type = "NONE"
+                    signal_memory["signal_start_time"] = None
+                    signal_memory["confirmation_count"] = 0
+                else:
+                    # Stay in current signal during brief sideways
+                    final_action = signal_memory["current_action"]
+                    final_signal_type = signal_memory["current_signal_type"]
+            else:
+                final_action = "HOLD"
+                final_signal_type = "NONE"
+        elif raw_action != signal_memory["current_action"]:
+            # Direction change requested
+            if min_duration_met and signal_memory["confirmation_count"] >= signal_memory["required_confirmations"]:
+                final_action = raw_action
+                final_signal_type = signal_type
+                signal_memory["signal_start_time"] = current_time
+                signal_memory["confirmation_count"] = 0
+            else:
+                # Stay in current signal
+                final_action = signal_memory["current_action"]
+                final_signal_type = signal_memory["current_signal_type"]
+        else:
+            # Same direction, continue
+            final_action = signal_memory["current_action"]
+            final_signal_type = signal_memory["current_signal_type"]
+
+    # Update memory
+    signal_memory["current_action"] = final_action
+    signal_memory["current_signal_type"] = final_signal_type
+
+    # Calculate signal duration
+    signal_duration = 0
+    if signal_memory["signal_start_time"] is not None:
+        signal_duration = int((current_time - signal_memory["signal_start_time"]) / 60)
+
+    # ============================================================
+    # UPDATE ALL STATE OBJECTS
+    # ============================================================
+
+    # Market state
     market_state.update({
         "rsi": round(rsi, 2),
-        "momentum": "UPTREND" if spread > 0 else "DOWNTREND" if spread < 0 else "NEUTRAL",
-        "strength": "HIGH" if confidence >= BUY_THRESHOLD else "MODERATE" if confidence >= CONSIDER_THRESHOLD else "LOW",
-        "trend": ema_signal,
-        "action": action,
-        "confidence": confidence,
+        "momentum": "UPTREND" if bullish_count > bearish_count else "DOWNTREND" if bearish_count > bullish_count else "NEUTRAL",
+        "strength": "HIGH" if final_signal_type == "TRENDING" else "MODERATE" if final_signal_type == "MOMENTUM" else "LOW",
+        "trend": "BULLISH" if bullish_count > bearish_count else "BEARISH" if bearish_count > bullish_count else "SIDEWAYS",
+        "action": final_action,
+        "confidence": raw_confidence,
         "volatility": "HIGH" if atr > 15 else "NORMAL" if atr > 5 else "LOW",
-        "alert": action
+        "alert": final_action,
+        "signal_duration_minutes": signal_duration,
+        "trend_1min": trend_1min,
+        "trend_5min": trend_5min,
+        "trend_10min": trend_10min,
+        "trend_15min": trend_15min,
+        "trend_20min": trend_20min,
+        "timeframe_agreement": timeframe_agreement
     })
 
-    # ============================================================
-    # UPDATE institutional_state — ALL PARAMETERS
-    # ============================================================
+    # Institutional state
     institutional_state.update({
         "vwap": round(vwap, 2),
         "ema_fast": round(ema_fast, 2),
         "ema_slow": round(ema_slow, 2),
-        "ema_signal": ema_signal,
+        "ema_signal": "BULLISH" if ema_fast > ema_slow else "BEARISH",
         "atr": round(atr, 2),
-        "oi_buildup": "BULLISH" if pcr < 0.8 else "BEARISH" if pcr > 1.2 else "NEUTRAL",
+        "oi_buildup": "BULLISH" if pcr < 0.9 else "BEARISH" if pcr > 1.2 else "NEUTRAL",
         "iv_state": "HIGH" if vega > 2 else "NORMAL",
-        "candle_structure": "BULLISH" if ema_signal == "BULLISH" and rsi > 60 else "BEARISH" if ema_signal == "BEARISH" and rsi < 40 else "SIDEWAYS",
-        "market_breadth": "BULLISH" if bullish_score > bearish_score else "BEARISH" if bearish_score > bullish_score else "BALANCED",
-        "volume_profile": "HIGH" if abs(spread) > 20 else "NORMAL",
-        "smart_money_flow": "BULLISH" if vwap > ema_slow else "BEARISH" if vwap < ema_slow else "NEUTRAL",
+        "candle_structure": "BULLISH" if trend_5min == "BULLISH" and rsi > 55 else "BEARISH" if trend_5min == "BEARISH" and rsi < 45 else "SIDEWAYS",
+        "market_breadth": "BULLISH" if bullish_count >= 3 else "BEARISH" if bearish_count >= 3 else "BALANCED",
+        "volume_profile": volume_trend,
+        "smart_money_flow": "BULLISH" if vwap > ema_slow and volume_trend == "INCREASING" else "BEARISH" if vwap < ema_slow and volume_trend == "INCREASING" else "NEUTRAL",
+        "volume_trend": volume_trend,
         "delta": delta,
         "gamma": gamma,
         "theta": theta,
         "vega": vega,
-        "institutional_signal": action,
-        "institutional_confidence": confidence
+        "institutional_signal": final_action,
+        "institutional_confidence": raw_confidence,
+        "consecutive_confirmations": signal_memory["confirmation_count"]
     })
 
-    # ============================================================
-    # UPDATE market_signal — ALL TRADING PARAMETERS
-    # ============================================================
+    # Market signal
     market_signal.update({
-        "signal": "BULLISH" if spread > SPREAD_THRESHOLD else "BEARISH" if spread < -SPREAD_THRESHOLD else "NEUTRAL",
+        "signal": "BULLISH" if final_action in ["BUY CE", "STRONG BUY CE", "TRENDING: CE", "CONSIDER CE"] else "BEARISH" if final_action in ["BUY PE", "STRONG BUY PE", "TRENDING: PE", "CONSIDER PE"] else "NEUTRAL",
         "ce_price": ce_price,
         "pe_price": pe_price,
         "spread": round(spread, 2),
         "rsi": round(rsi, 2),
-        "macd": round(macd, 2),
+        "macd": round(macd_hist, 2),
         "pcr": round(pcr, 2),
         "vwap": round(vwap, 2),
         "atr": round(atr, 2),
@@ -613,17 +901,20 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "gamma": gamma,
         "theta": theta,
         "vega": vega,
+        "volume": round(volume_ratio * 100, 0),
+        "volume_avg": 100,
+        "oi_signal": institutional_state["oi_buildup"],
         "timestamp": datetime.now().isoformat()
     })
 
-    logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f} | EMA={ema_signal}")
+    logger.info(f"PRO SIGNAL: {final_action} [Type:{final_signal_type}] [Dur:{signal_duration}m] [Conf:{raw_confidence}] [TF:{bullish_count}B/{bearish_count}Be/{sideways_count}S] [PCR:{pcr:.2f}@{pcr_source}] [Vol:{volume_trend}] [RSI:{rsi:.1f}] [MACD:{macd_hist:.2f}]")
 
 # --------------------------------------------------
 # Flask endpoints
 # --------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "Angel One WebSocket Engine"})
+    return jsonify({"status": "online", "message": "Nifty Alpha Engine - Professional Trading Signals"})
 
 @app.route("/api/live-signals")
 def live_signals():
@@ -631,7 +922,13 @@ def live_signals():
         "status": "active",
         "data": market_signal,
         "market": market_state,
-        "institutional": institutional_state
+        "institutional": institutional_state,
+        "timeframes": {k: {"trend": v["trend"], "strength": v["strength"]} for k, v in get_all_timeframe_trends().items()},
+        "signal_memory": {
+            "current_action": signal_memory["current_action"],
+            "signal_type": signal_memory["current_signal_type"],
+            "confirmations": signal_memory["confirmation_count"]
+        }
     })
 
 @app.route("/api/health")
@@ -655,7 +952,9 @@ def debug_ws():
         "pe_token": PE_TOKEN,
         "latest_ce": latest_ticks["ce_price"],
         "latest_pe": latest_ticks["pe_price"],
-        "price_history_len": len(price_history)
+        "price_history_len": len(price_history),
+        "timeframe_data": {k: len(v) for k, v in timeframe_history.items()},
+        "signal_memory": signal_memory
     })
 
 # --------------------------------------------------
