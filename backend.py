@@ -231,7 +231,7 @@ def get_current_atm_tokens():
     return ce_token, pe_token
 
 # --------------------------------------------------
-# WebSocket Callbacks
+# WebSocket Callbacks — FIXED TICK PARSING
 # --------------------------------------------------
 def on_ws_open(wsapp):
     global sws
@@ -239,9 +239,11 @@ def on_ws_open(wsapp):
     if sws is not None:
         try:
             correlation_id = "tradeguru_001"
-            mode = 2
-            tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
-            sws.subscribe(correlation_id, mode, tokens)
+            mode = 2  # LTP mode
+            token_list = [
+                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}  # NSE = 1, NFO = 2
+            ]
+            sws.subscribe(correlation_id, mode, token_list)
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
@@ -249,26 +251,69 @@ def on_ws_open(wsapp):
 def on_ws_data(wsapp, message, *args):
     global latest_ticks, price_history, tick_counter
     try:
-        data = json.loads(message) if isinstance(message, str) else message
+        # Angel One WebSocket v2 sends data in this format
+        if isinstance(message, str):
+            data = json.loads(message)
+        else:
+            data = message
+
+        # Debug: log raw data structure
+        logger.debug(f"Raw tick data: {data}")
+
+        # Handle list of ticks
         ticks = data if isinstance(data, list) else [data]
+
         for tick in ticks:
-            token = str(tick.get("tk"))
-            ltp = tick.get("ltp", 0) / 100
+            # Try multiple possible field names for token
+            token = None
+            for key in ["tk", "token", "symbolToken", "instrument_token"]:
+                if key in tick:
+                    token = str(tick.get(key))
+                    break
+
+            if not token:
+                logger.debug(f"No token found in tick: {tick}")
+                continue
+
+            # Try multiple possible field names for LTP
+            ltp = None
+            for key in ["ltp", "last_traded_price", "lp", "price"]:
+                if key in tick:
+                    val = tick.get(key)
+                    # Angel One sends prices multiplied by 100
+                    if isinstance(val, (int, float)):
+                        ltp = val / 100 if val > 1000 else val
+                    break
+
+            if ltp is None:
+                logger.debug(f"No LTP found in tick for token {token}: {tick}")
+                continue
+
+            logger.info(f"Tick received - Token: {token}, LTP: {ltp}")
+
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_timestamp"] = datetime.now().isoformat()
                 price_history.append(ltp)
                 tick_counter += 1
+                logger.info(f"CE price updated: {ltp}")
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_timestamp"] = datetime.now().isoformat()
+                logger.info(f"PE price updated: {ltp}")
 
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and tick_counter % UPDATE_INTERVAL == 0:
+
+            # Run signal engine when we have both prices and enough history
+            if ce > 0 and pe > 0 and len(price_history) >= 20 and tick_counter % UPDATE_INTERVAL == 0:
+                logger.info(f"Running signal engine - CE: {ce}, PE: {pe}, History: {len(price_history)}")
                 run_signal_engine(ce, pe, list(price_history))
+
     except Exception as e:
         logger.error(f"WebSocket data error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket error: {error}")
@@ -565,6 +610,9 @@ def health():
         "ws_running": ws_running,
         "ce_token": CE_TOKEN,
         "pe_token": PE_TOKEN,
+        "latest_ce": latest_ticks["ce_price"],
+        "latest_pe": latest_ticks["pe_price"],
+        "price_history_len": len(price_history),
         "timestamp": datetime.now().isoformat()
     }), 200
 
