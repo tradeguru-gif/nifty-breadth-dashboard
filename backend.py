@@ -135,6 +135,9 @@ institutional_state = {
 # ------------------------------------------------------------
 # Helper Functions
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Helper Functions
+# ------------------------------------------------------------
 def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
@@ -175,6 +178,8 @@ def get_nifty_spot_cached():
         spot_cache["timestamp"] = now
     return spot
 
+def get_current_atm_tokens():
+    # ... rest of your function unchanged ...
 
     now = time.time()
     if now - spot_cache.get("timestamp", 0) < 15 and spot_cache.get("value"):
