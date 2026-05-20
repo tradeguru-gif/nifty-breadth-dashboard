@@ -564,30 +564,67 @@ def on_close(wsapp, close_status_code=None, close_msg=None):
 # ------------------------------------------------------------
 # Connection Manager
 # ------------------------------------------------------------
+# Global auth token cache for REST fallback
+auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
+AUTH_CACHE_TTL = 3600  # 1 hour
+
+def get_auth_token():
+    """Get cached auth token or generate new one."""
+    now = time.time()
+    if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
+        return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
+
+    try:
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        obj = SmartConnect(api_key=ANGEL_API_KEY)
+        session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+        if not session.get("status"):
+            logger.error("Auth failed")
+            return None, None, None
+
+        auth_token = session["data"]["jwtToken"]
+        feed_token = obj.getfeedToken()
+        auth_cache.update({
+            "token": auth_token,
+            "feed_token": feed_token,
+            "timestamp": now,
+            "obj": obj
+        })
+        logger.info("Auth token refreshed")
+        return auth_token, feed_token, obj
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        return None, None, None
+
 def start_websocket():
-    global ws_running, CE_TOKEN, PE_TOKEN, sws
-    retry_delay = 30
+    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
+    retry_delay = 5  # Start with 5s for faster reconnect
+    consecutive_failures = 0
+
     while engine_active:
         try:
+            # Get tokens if missing
             if not CE_TOKEN or not PE_TOKEN:
                 CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
                 if not CE_TOKEN or not PE_TOKEN:
+                    logger.warning("No tokens, retrying in 60s...")
                     time.sleep(60)
                     continue
 
-            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-            obj = SmartConnect(api_key=ANGEL_API_KEY)
-            session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-            if not session.get("status"):
-                logger.error("Auth failed")
-                time.sleep(retry_delay)
+            # Get auth token
+            auth_token, feed_token, obj = get_auth_token()
+            if not auth_token:
+                consecutive_failures += 1
+                wait = min(retry_delay * (2 ** consecutive_failures), 300)
+                logger.warning(f"Auth failed, waiting {wait}s...")
+                time.sleep(wait)
                 continue
 
-            auth_token = session["data"]["jwtToken"]
-            feed_token = obj.getfeedToken()
+            consecutive_failures = 0
 
+            # Create and patch WebSocket
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws = patch_smartwebsocket(sws)  # APPLY CRITICAL FIX
+            sws = patch_smartwebsocket(sws)
 
             sws.on_open = on_open
             sws.on_data = on_data
@@ -595,62 +632,105 @@ def start_websocket():
             sws.on_close = on_close
 
             ws_running = True
+            last_tick_time = time.time()  # Reset watchdog
             logger.info("Connecting WebSocket...")
             sws.connect()
 
+            # Connection loop with watchdog
+            no_tick_count = 0
             while ws_running:
                 time.sleep(1)
-                if time.time() - last_tick_time > 90 and tick_counter > 0:
-                    logger.warning("Watchdog: no ticks, reconnecting")
-                    ws_running = False
+                age = time.time() - last_tick_time
 
-            logger.warning("WebSocket loop ended, reconnecting...")
-            retry_delay = 30
+                if age > 90:
+                    no_tick_count += 1
+                    if no_tick_count >= 3:  # 3 consecutive failures
+                        logger.warning(f"Watchdog: No ticks for {age:.0f}s, forcing reconnect")
+                        ws_running = False
+                        break
+                else:
+                    no_tick_count = 0
+
+            # Clean disconnect
+            try:
+                if sws and sws.wsapp:
+                    sws.wsapp.close()
+            except:
+                pass
+
+            logger.warning("WebSocket disconnected, reconnecting in 5s...")
+            time.sleep(5)
+            retry_delay = 5
 
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 300)
+            logger.error(f"WebSocket fatal error: {e}")
+            consecutive_failures += 1
+            wait = min(retry_delay * (2 ** consecutive_failures), 300)
+            logger.info(f"Waiting {wait}s before reconnect...")
+            time.sleep(wait)
 
 # ------------------------------------------------------------
 # REST Fallback
 # ------------------------------------------------------------
 def rest_fallback():
+    """REST fallback - only runs when WebSocket is down."""
+    rest_fail_count = 0
     while engine_active:
         time.sleep(10)
-        if ws_running and (time.time() - last_tick_time) < 15:
+
+        # Skip if WebSocket is healthy
+        if ws_running and (time.time() - last_tick_time) < 30:
+            rest_fail_count = 0
             continue
+
         if not CE_TOKEN or not PE_TOKEN:
             continue
+
         try:
-            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-            obj = SmartConnect(api_key=ANGEL_API_KEY)
-            session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-            if not session.get("status"):
+            # Use cached auth, don't re-auth every time
+            auth_token, _, obj = get_auth_token()
+            if not auth_token:
+                rest_fail_count += 1
+                if rest_fail_count > 5:
+                    logger.error("REST fallback: Auth failed 5 times, giving up for now")
+                    time.sleep(60)
+                    rest_fail_count = 0
                 continue
-            auth_token = session["data"]["jwtToken"]
+
             url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/ltp/v1"
             headers = {
                 "Authorization": f"Bearer {auth_token}",
                 "Content-Type": "application/json",
                 "X-PrivateKey": ANGEL_API_KEY
             }
+
+            updated = False
             for token, key in [(CE_TOKEN, "ce"), (PE_TOKEN, "pe")]:
-                resp = requests.post(url, json={"symbols": [{"symboltoken": token, "exchange": "NFO"}]}, headers=headers, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("data"):
-                        ltp = float(data["data"][0]["ltp"])
-                        latest_ticks[f"{key}_price"] = ltp
-                        price_history.append(ltp)
-                        volume_history.append(100)
-                        logger.info(f"[REST] {key.upper()}={ltp}")
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and len(price_history) >= 30:
-                run_signal_engine(ce, pe, list(price_history), list(volume_history))
+                try:
+                    resp = requests.post(url, json={"symbols": [{"symboltoken": token, "exchange": "NFO"}]}, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("data") and len(data["data"]) > 0:
+                            ltp = float(data["data"][0]["ltp"])
+                            latest_ticks[f"{key}_price"] = ltp
+                            price_history.append(ltp)
+                            volume_history.append(100)
+                            updated = True
+                except Exception as e:
+                    logger.debug(f"REST {key} error: {e}")
+
+            if updated:
+                rest_fail_count = 0
+                ce = latest_ticks["ce_price"]
+                pe = latest_ticks["pe_price"]
+                if ce > 0 and pe > 0 and len(price_history) >= 30:
+                    run_signal_engine(ce, pe, list(price_history), list(volume_history))
+                    logger.info(f"[REST FALLBACK] CE={ce}, PE={pe}")
+
         except Exception as e:
-            logger.error(f"REST error: {e}")
+            rest_fail_count += 1
+            if rest_fail_count % 5 == 0:
+                logger.error(f"REST fallback error ({rest_fail_count}x): {e}")
 
 # ------------------------------------------------------------
 # Flask Endpoints
