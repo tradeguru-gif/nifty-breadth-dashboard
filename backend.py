@@ -57,7 +57,7 @@ token_metadata = {
     "pe_token": None,
     "last_updated": 0,
     "expiry_date": None,
-    "frozen_until": 0  # Unix timestamp until which we freeze expiry rollover
+    "frozen_until": 0
 }
 
 # NEW: Tick queue for non-blocking processing (Feature #5)
@@ -69,8 +69,8 @@ last_tick_time = {"value": 0, "lock": threading.Lock()}
 # NEW: REST fallback state (Feature #4)
 rest_fallback = {
     "last_rest_call": 0,
-    "rest_cooldown": 10,  # seconds between REST calls
-    "get_ltp_func": None   # Will hold reference to REST LTP function
+    "rest_cooldown": 10,
+    "get_ltp_func": None
 }
 
 # NEW: Volume tracking from real tick data (Feature #7)
@@ -83,11 +83,12 @@ log_throttle = {
     "last_signal": None
 }
 
-# NEW: Enhanced anti-flip with cooldown (Feature #10)
+# NEW: Enhanced anti-flip with cooldown (Feature #10) - CORRECTED
 anti_flip = {
     "last_signal_change_time": 0,
     "cooldown_seconds": 30,
     "consecutive_raw_signals": 0,
+    "consecutive_non_hold": 0,  # NEW: Counts ANY non-HOLD signal
     "last_raw_action": "HOLD",
     "required_consecutive": 3
 }
@@ -95,7 +96,7 @@ anti_flip = {
 # NEW: PCR smoothing EMA (Feature #6)
 pcr_ema_history = deque(maxlen=5)
 pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
-PCR_TTL = 600  # Extended to 10 minutes when NSE blocked (Feature #6)
+PCR_TTL = 600
 
 # NEW: SmartConnect instance for REST fallback
 smart_obj = None
@@ -194,7 +195,7 @@ last_minute_snapshot = {"time": 0, "price": 0}
 def reauth_timer():
     """Background thread: re-authenticate every 20 hours before 5AM expiry"""
     while True:
-        time.sleep(20 * 3600)  # 20 hours
+        time.sleep(20 * 3600)
         logger.info("[REAUTH] 20-hour timer triggered. Starting graceful re-auth...")
         try:
             graceful_reauth()
@@ -205,10 +206,8 @@ def graceful_reauth():
     """Re-login and restart WebSocket without breaking signal processing"""
     global sws, ws_running, smart_obj, auth_token_global, feed_token_global
 
-    # Store last prices in memory (already in latest_ticks)
     logger.info("[REAUTH] Preserving last prices in memory")
 
-    # Close existing WebSocket gracefully
     if sws is not None:
         try:
             sws.close_connection()
@@ -219,7 +218,6 @@ def graceful_reauth():
     ws_running = False
     time.sleep(2)
 
-    # Fresh login
     try:
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
         smart_obj = SmartConnect(api_key=ANGEL_API_KEY)
@@ -228,7 +226,6 @@ def graceful_reauth():
             auth_token_global = session["data"]["jwtToken"]
             feed_token_global = smart_obj.getfeedToken()
             logger.info("[REAUTH] Fresh login successful")
-            # WebSocket will auto-reconnect via the main loop
         else:
             logger.error(f"[REAUTH] Login failed: {session}")
     except Exception as e:
@@ -247,12 +244,10 @@ def watchdog_thread():
         if last_tick_time["value"] > 0 and elapsed > 90:
             logger.warning(f"[WATCHDOG] No tick for {elapsed:.0f}s. Forcing reconnect...")
             try:
-                # Fallback to REST once before reconnect (Feature #4)
                 rest_price_update()
             except:
                 pass
 
-            # Force WebSocket reconnect
             global ws_running
             ws_running = False
             if sws is not None:
@@ -270,7 +265,6 @@ def get_ltp_rest(token):
     if smart_obj is None:
         return None
     try:
-        # Angel One REST API for LTP
         resp = smart_obj.ltpData("NFO", "", token)
         if resp and resp.get("status") and resp.get("data"):
             ltp = resp["data"].get("ltp", 0)
@@ -314,7 +308,6 @@ def tick_worker():
             tick_data = tick_queue.get(timeout=1)
             process_tick_data(tick_data)
         except queue.Empty:
-            # Check if we should do REST fallback during quiet periods
             with last_tick_time["lock"]:
                 elapsed = time.time() - last_tick_time["value"]
             if elapsed > 10 and last_tick_time["value"] > 0:
@@ -341,7 +334,7 @@ def process_tick_data(data):
                 continue
 
             ltp = None
-            volume = None  # Feature #7: Extract real volume
+            volume = None
 
             for key in ["ltp", "last_traded_price", "lp", "price"]:
                 if key in tick:
@@ -350,7 +343,6 @@ def process_tick_data(data):
                         ltp = val / 100 if val > 1000 else val
                     break
 
-            # Feature #7: Extract real volume if present
             for vkey in ["v", "volume", "tradedVolume", "vol"]:
                 if vkey in tick:
                     vval = tick.get(vkey)
@@ -361,7 +353,6 @@ def process_tick_data(data):
             if ltp is None:
                 continue
 
-            # Update prices
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_timestamp"] = datetime.now().isoformat()
@@ -377,11 +368,9 @@ def process_tick_data(data):
                     real_volume["pe"] = volume
                     real_volume["pe_total"] += volume
 
-            # Update last tick time (Feature #3)
             with last_tick_time["lock"]:
                 last_tick_time["value"] = time.time()
 
-            # Store minute snapshots
             now = time.time()
             if now - last_minute_snapshot["time"] >= 60:
                 avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
@@ -399,7 +388,6 @@ def process_tick_data(data):
                 for tf in timeframe_history:
                     timeframe_history[tf].append(snapshot)
 
-            # Run signal engine
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
             if ce > 0 and pe > 0 and len(price_history) >= 20 and tick_counter % UPDATE_INTERVAL == 0:
@@ -414,8 +402,7 @@ def process_tick_data(data):
 def should_freeze_expiry_rollover():
     """Check if we should freeze expiry during 3:00-3:30 PM"""
     now = datetime.now()
-    # Thursday 15:00-15:30 (or any day last 30 min of trading)
-    if now.weekday() == 3:  # Thursday
+    if now.weekday() == 3:
         if now.hour == 15 and now.minute < 30:
             return True
     return False
@@ -431,20 +418,16 @@ def get_current_atm_tokens_enhanced():
 
     now = time.time()
 
-    # Check if we're in freeze period (3:00-3:30 PM Thursday)
     if should_freeze_expiry_rollover():
         if token_metadata["ce_token"] and token_metadata["pe_token"]:
             logger.info("[EXPIRY FREEZE] Trading in last 30 min. Keeping current expiry.")
             return token_metadata["ce_token"], token_metadata["pe_token"]
 
-    # Check if we already have valid tokens that aren't too old
     if token_metadata["ce_token"] and token_metadata["pe_token"]:
         age = now - token_metadata["last_updated"]
-        # If tokens are <1 hour old and it's before 4 PM, keep them
         if age < 3600 and datetime.now().hour < 16:
             return token_metadata["ce_token"], token_metadata["pe_token"]
 
-    # Fetch fresh tokens
     ce_token, pe_token = get_current_atm_tokens()
 
     if ce_token and pe_token:
@@ -452,7 +435,7 @@ def get_current_atm_tokens_enhanced():
             "ce_token": ce_token,
             "pe_token": pe_token,
             "last_updated": now,
-            "expiry_date": None  # Could parse and store actual expiry
+            "expiry_date": None
         })
 
     return ce_token, pe_token
@@ -474,14 +457,12 @@ def get_nifty_pcr_enhanced():
     """Enhanced PCR with EMA smoothing and extended cache"""
     now = time.time()
 
-    # Extended cache when NSE is unreachable
     if now - pcr_cache["time"] < PCR_TTL:
         return pcr_cache["value"], pcr_cache["source"]
 
     raw_pcr = None
     source = "default"
 
-    # Try NSE Option Chain
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
         headers = {
@@ -505,7 +486,6 @@ def get_nifty_pcr_enhanced():
     except Exception as e:
         logger.warning(f"[PCR] NSE fetch failed: {e}")
 
-    # Fallback: Price-based PCR
     if raw_pcr is None:
         try:
             ce = latest_ticks.get("ce_price", 0)
@@ -520,14 +500,12 @@ def get_nifty_pcr_enhanced():
 
     if raw_pcr is not None:
         pcr_ema_history.append(raw_pcr)
-        # Apply 5-period EMA smoothing
         smoothed_pcr = calculate_ema(list(pcr_ema_history), period=5)
         pcr_cache.update({"value": smoothed_pcr, "time": now, "source": source})
         logger.info(f"[PCR] Smoothed EMA PCR: {smoothed_pcr:.2f} (from {source})")
         return smoothed_pcr, source
 
-    # Return cached value with extended TTL
-    pcr_cache["time"] = now  # Reset timer to extend cache
+    pcr_cache["time"] = now
     return pcr_cache["value"], "cached_extended"
 
 # ============================================================
@@ -541,28 +519,33 @@ def get_dynamic_thresholds(atr):
     dynamic_strong_buy = 50 + (2 * atr)
     dynamic_spread = atr * 0.3
 
-    # Cap within reasonable bounds
     dynamic_strong_buy = min(95, max(70, dynamic_strong_buy))
     dynamic_spread = max(1.0, min(10.0, dynamic_spread))
 
     return dynamic_strong_buy, dynamic_spread
 
 # ============================================================
-# FEATURE #10: Enhanced Anti-Flip with Cooldown
+# FEATURE #10: Enhanced Anti-Flip with Cooldown - CORRECTED
 # ============================================================
 def enhanced_anti_flip_logic(raw_action, raw_confidence, signal_type):
-    """Improved anti-flip with cooldown and consecutive requirements"""
+    """Improved anti-flip: counts consecutive non-HOLD signals to escape HOLD"""
     global anti_flip
 
     now = time.time()
     current_action = signal_memory["current_action"]
 
-    # Count consecutive identical raw signals
+    # Count consecutive identical raw signals (for direction changes within active signal)
     if raw_action == anti_flip["last_raw_action"]:
         anti_flip["consecutive_raw_signals"] += 1
     else:
         anti_flip["consecutive_raw_signals"] = 1
         anti_flip["last_raw_action"] = raw_action
+
+    # Count consecutive non-HOLD signals (for escaping HOLD)
+    if raw_action != "HOLD":
+        anti_flip["consecutive_non_hold"] += 1
+    else:
+        anti_flip["consecutive_non_hold"] = 0
 
     # Check cooldown period after signal change
     time_since_last_change = now - anti_flip["last_signal_change_time"]
@@ -573,25 +556,27 @@ def enhanced_anti_flip_logic(raw_action, raw_confidence, signal_type):
         logger.info(f"[ANTI-FLIP] In cooldown ({time_since_last_change:.0f}s). Blocking change to {raw_action}")
         return current_action, signal_memory["current_signal_type"]
 
-    # From HOLD: require 2 confirmations (original logic)
+    # From HOLD: require 2 consecutive non-HOLD signals (FIXED!)
     if current_action in ["HOLD", "WAITING"]:
-        if raw_action != "HOLD" and anti_flip["consecutive_raw_signals"] >= signal_memory["required_confirmations"]:
+        if raw_action != "HOLD" and anti_flip["consecutive_non_hold"] >= signal_memory["required_confirmations"]:
             anti_flip["last_signal_change_time"] = now
+            anti_flip["consecutive_non_hold"] = 0
+            signal_memory["signal_start_time"] = now  # FIXED: Set start time here
             return raw_action, signal_type
         return "HOLD", "NONE"
 
-    # Already in signal: require 3 consecutive identical signals + min duration
+    # Already in signal: check for exit to HOLD (sideways timeout)
     if raw_action == "HOLD":
-        # Check sideways timeout
         if signal_memory["signal_start_time"] is not None:
             elapsed = now - signal_memory["signal_start_time"]
             if elapsed > signal_memory["max_sideways_duration"]:
                 anti_flip["last_signal_change_time"] = now
+                signal_memory["signal_start_time"] = None
                 return "HOLD", "NONE"
         return current_action, signal_memory["current_signal_type"]
 
+    # Direction change within active signal
     if raw_action != current_action:
-        # Direction change: need cooldown passed + 3 consecutive + min duration
         min_duration_met = True
         if signal_memory["signal_start_time"] is not None:
             elapsed = now - signal_memory["signal_start_time"]
@@ -603,6 +588,7 @@ def enhanced_anti_flip_logic(raw_action, raw_confidence, signal_type):
             min_duration_met):
             anti_flip["last_signal_change_time"] = now
             anti_flip["consecutive_raw_signals"] = 0
+            signal_memory["signal_start_time"] = now  # FIXED: Sync start time
             return raw_action, signal_type
         else:
             return current_action, signal_memory["current_signal_type"]
@@ -622,13 +608,8 @@ def throttled_signal_log(final_action, final_signal_type, signal_duration, raw_c
     log_throttle["tick_count"] += 1
     now = time.time()
 
-    # Always log on signal change
     signal_changed = final_action != log_throttle["last_signal"]
-
-    # Log every 100 ticks for heartbeat
     heartbeat = log_throttle["tick_count"] % 100 == 0
-
-    # Log raw score once per minute
     score_log_time = now - log_throttle["last_score_log"] > 60
 
     if signal_changed:
@@ -794,7 +775,6 @@ def on_ws_data(wsapp, message, *args):
         else:
             data = message
 
-        # Fast enqueue - no blocking calculations (Feature #5)
         try:
             tick_queue.put_nowait(data)
         except queue.Full:
@@ -833,7 +813,6 @@ def start_angel_websocket():
             feed_token_global = smart_obj.getfeedToken()
             logger.info("Authenticated, feed token obtained")
 
-            # Use enhanced token fetch with expiry freeze (Feature #1)
             CE_TOKEN, PE_TOKEN = get_current_atm_tokens_enhanced()
             if not CE_TOKEN or not PE_TOKEN:
                 logger.error("Could not fetch ATM tokens. Retrying...")
@@ -988,11 +967,6 @@ def get_all_timeframe_trends():
             "confidence": round(r2, 2)
         }
     return trends
-
-# ============================================================
-# Original PCR (kept for reference, using enhanced version)
-# ============================================================
-# Replaced by get_nifty_pcr_enhanced() above (Feature #6)
 
 # ============================================================
 # Your Original Signal Engine (UNCHANGED CORE LOGIC)
@@ -1167,7 +1141,7 @@ def run_signal_engine(ce_price, pe_price, price_list):
         signal_type = "NONE"
 
     # ============================================================
-    # ENHANCED ANTI-FLIP LOGIC (Feature #10)
+    # ENHANCED ANTI-FLIP LOGIC (Feature #10) - CORRECTED
     # ============================================================
     final_action, final_signal_type = enhanced_anti_flip_logic(raw_action, raw_confidence, signal_type)
 
@@ -1175,10 +1149,8 @@ def run_signal_engine(ce_price, pe_price, price_list):
     signal_memory["current_action"] = final_action
     signal_memory["current_signal_type"] = final_signal_type
 
-    if final_action != "HOLD" and signal_memory["signal_start_time"] is None:
-        signal_memory["signal_start_time"] = time.time()
-    elif final_action == "HOLD":
-        signal_memory["signal_start_time"] = None
+    # signal_start_time is now set inside enhanced_anti_flip_logic for consistency
+    # No need to set it here anymore
 
     signal_duration = 0
     if signal_memory["signal_start_time"] is not None:
@@ -1259,7 +1231,7 @@ def run_signal_engine(ce_price, pe_price, price_list):
 # ============================================================
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "Nifty Alpha Engine - Professional Trading Signals (Enhanced v2)"})
+    return jsonify({"status": "online", "message": "Nifty Alpha Engine - Professional Trading Signals (Enhanced v2.1)"})
 
 @app.route("/api/live-signals")
 def live_signals():
@@ -1274,7 +1246,6 @@ def live_signals():
             "signal_type": signal_memory["current_signal_type"],
             "confirmations": signal_memory["confirmation_count"]
         },
-        # NEW: Enhanced debug info
         "enhanced": {
             "token_metadata": {
                 "last_updated": datetime.fromtimestamp(token_metadata["last_updated"]).isoformat() if token_metadata["last_updated"] else None,
@@ -1286,6 +1257,11 @@ def live_signals():
             "dynamic_thresholds": {
                 "strong_buy": round(get_dynamic_thresholds(calculate_atr(list(price_history)))[0], 2) if len(price_history) > 14 else None,
                 "spread": round(get_dynamic_thresholds(calculate_atr(list(price_history)))[1], 2) if len(price_history) > 14 else None
+            },
+            "anti_flip": {
+                "consecutive_non_hold": anti_flip["consecutive_non_hold"],
+                "consecutive_raw": anti_flip["consecutive_raw_signals"],
+                "in_cooldown": (time.time() - anti_flip["last_signal_change_time"]) < anti_flip["cooldown_seconds"]
             }
         }
     })
@@ -1301,13 +1277,13 @@ def health():
         "latest_pe": latest_ticks["pe_price"],
         "price_history_len": len(price_history),
         "timestamp": datetime.now().isoformat(),
-        # NEW: Enhanced health info
         "enhanced": {
             "queue_size": tick_queue.qsize(),
             "last_tick_seconds_ago": round(time.time() - last_tick_time["value"], 1) if last_tick_time["value"] > 0 else None,
             "token_age_minutes": round((time.time() - token_metadata["last_updated"]) / 60, 1) if token_metadata["last_updated"] else None,
             "pcr_cache_age_seconds": round(time.time() - pcr_cache["time"], 1),
-            "real_volume": real_volume
+            "real_volume": real_volume,
+            "anti_flip_non_hold": anti_flip["consecutive_non_hold"]
         }
     }), 200
 
@@ -1322,7 +1298,6 @@ def debug_ws():
         "price_history_len": len(price_history),
         "timeframe_data": {k: len(v) for k, v in timeframe_history.items()},
         "signal_memory": signal_memory,
-        # NEW: Enhanced debug
         "enhanced": {
             "tick_queue_size": tick_queue.qsize(),
             "last_tick_time": datetime.fromtimestamp(last_tick_time["value"]).isoformat() if last_tick_time["value"] > 0 else None,
@@ -1342,24 +1317,21 @@ engine_started = False
 def start_background_engine():
     global engine_started
     if not engine_started:
-        # Start WebSocket thread
         ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
         ws_thread.start()
 
-        # NEW: Start tick worker thread (Feature #5)
         worker_thread = threading.Thread(target=tick_worker, daemon=True)
         worker_thread.start()
 
-        # NEW: Start watchdog thread (Feature #3)
         watchdog = threading.Thread(target=watchdog_thread, daemon=True)
         watchdog.start()
 
-        # NEW: Start re-auth timer (Feature #2)
         reauth = threading.Thread(target=reauth_timer, daemon=True)
         reauth.start()
 
         engine_started = True
-        logger.info("✅ Enhanced Angel One engine started:")
+        logger.info("✅ Enhanced Angel One engine v2.1 started:")
+        logger.info("   - FIXED: Anti-flip escape from HOLD using consecutive_non_hold")
         logger.info("   - WebSocket with queue-based processing")
         logger.info("   - 90s watchdog for stale ticks")
         logger.info("   - 20h re-auth timer")
