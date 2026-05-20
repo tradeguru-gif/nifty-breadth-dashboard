@@ -668,6 +668,82 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
         logger.info(f"PRO SIGNAL: {final_action} [{final_signal_type}] Dur:{signal_duration}m Conf:{raw_confidence} TF:{bullish_tf}B/{bearish_tf}Be PCR:{pcr:.2f} RSI:{rsi:.1f}")
         signal_memory["last_logged_action"] = final_action
 
+
+# =============================================================================
+# CRITICAL FIX: WebSocket Runtime Patches for websocket-client >= 1.6.x
+# =============================================================================
+# The smartapi-python library passes on_data=self._on_data to WebSocketApp,
+# but websocket-client >= 1.6.x IGNORES on_data and only supports on_message.
+# This patch overrides connect() to bind on_message -> _on_message which
+# routes binary data through _parse_binary_data -> on_data callback.
+# =============================================================================
+
+def _patch_sws_instance(sws):
+    """Apply runtime fixes to SmartWebSocketV2 for websocket-client >= 1.6.x"""
+    import ssl
+    import websocket
+    import inspect
+
+    # Fix 1: _on_close must accept (wsapp, close_status_code, close_msg)
+    def _safe_on_close(wsapp, close_status_code=None, close_msg=None):
+        try:
+            if hasattr(sws, 'on_close') and sws.on_close:
+                sig = inspect.signature(sws.on_close)
+                if len(sig.parameters) >= 3:
+                    sws.on_close(wsapp, close_status_code, close_msg)
+                else:
+                    sws.on_close(wsapp)
+        except Exception as e:
+            logger.error(f"on_close callback error: {e}")
+    sws._on_close = _safe_on_close
+
+    # Fix 2: _on_error must NOT call internal reconnect (it's broken)
+    original_on_error = sws._on_error
+    def _safe_on_error(wsapp, error):
+        logger.error(f"WebSocket error: {error}")
+        if hasattr(sws, 'on_error') and sws.on_error:
+            try:
+                sws.on_error(wsapp, error)
+            except Exception as e:
+                logger.error(f"User on_error error: {e}")
+        # DO NOT call original_on_error - it triggers broken reconnect loop
+    sws._on_error = _safe_on_error
+
+    # Fix 3: Disable broken internal reconnect
+    sws.MAX_RETRY_ATTEMPT = 0
+    sws.retry_strategy = 0
+    sws.current_retry_attempt = 999  # Prevent any retry
+
+    # Fix 4: Override connect() to use on_message instead of ignored on_data
+    def _patched_connect():
+        headers = {
+            "Authorization": sws.auth_token,
+            "x-api-key": sws.api_key,
+            "x-client-code": sws.client_code,
+            "x-feed-token": sws.feed_token
+        }
+        try:
+            sws.wsapp = websocket.WebSocketApp(
+                sws.ROOT_URI,
+                header=headers,
+                on_open=sws._on_open,
+                on_message=sws._on_message,   # ← KEY FIX: on_message instead of ignored on_data
+                on_error=sws._on_error,
+                on_close=sws._on_close,
+                on_ping=sws._on_ping,
+                on_pong=sws._on_pong
+            )
+            sws.wsapp.run_forever(
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                ping_interval=sws.HEART_BEAT_INTERVAL
+            )
+        except Exception as e:
+            logger.error(f"WebSocket connect error: {e}")
+            raise
+
+    sws.connect = _patched_connect
+    return sws
+
 # ------------------------------------------------------------
 # WebSocket Callbacks with Queue Processing
 # ------------------------------------------------------------
