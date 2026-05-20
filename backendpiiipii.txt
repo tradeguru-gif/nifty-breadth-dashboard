@@ -1,6 +1,7 @@
 # backend.py – Professional Nifty Options Signal Engine
-# Enhanced with volume/spread/volatility filters, consecutive minute bar confirmation,
-# expiry day signal freeze, and spot price in API response.
+# Features: multi‑timeframe, anti‑flip, auto contract rollover, REST fallback,
+#           queue processing, volume tracking, dynamic thresholds, watchdog,
+#           pre‑auth timer, graceful shutdown, metrics endpoint.
 
 import os
 import sys
@@ -91,8 +92,7 @@ signal_memory = {
     "required_confirmations": 2,
     "min_signal_duration_seconds": 180,
     "max_sideways_duration": 600,
-    "cooldown_until": 0,
-    "last_logged_action": ""
+    "cooldown_until": 0
 }
 
 # State dictionaries
@@ -139,11 +139,6 @@ def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False  # weekend
-    # On expiry Thursday, freeze signals during last 30 minutes
-    if now.weekday() == 3:
-        minutes_since_open = (now.hour - 9) * 60 + (now.minute - 15)
-        if minutes_since_open >= 6 * 60 + 15:  # after 3:30 PM
-            return False
     market_start = datetime.strptime(MARKET_HOURS_START, "%H:%M").time()
     market_end = datetime.strptime(MARKET_HOURS_END, "%H:%M").time()
     return market_start <= now.time() <= market_end
@@ -163,27 +158,6 @@ def get_nifty_spot():
     except Exception as e:
         logger.error(f"Spot fetch error: {e}")
         return None
-
-def get_nifty_spot_cached():
-    global spot_cache
-    now = time.time()
-    if now - spot_cache.get("timestamp", 0) < 15 and spot_cache.get("value"):
-        return spot_cache["value"]
-    spot = get_nifty_spot()
-    if spot:
-        spot_cache["value"] = spot
-        spot_cache["timestamp"] = now
-    return spot
-
-
-    now = time.time()
-    if now - spot_cache.get("timestamp", 0) < 15 and spot_cache.get("value"):
-        return spot_cache["value"]
-    spot = get_nifty_spot()
-    if spot:
-        spot_cache["value"] = spot
-        spot_cache["timestamp"] = now
-    return spot
 
 def get_current_atm_tokens():
     """Fetch current ATM CE/PE tokens with fallback for missing strike."""
@@ -268,7 +242,7 @@ def get_ltp_rest(token):
     return 0
 
 # ------------------------------------------------------------
-# Technical Indicators
+# Technical Indicators (unchanged but robust)
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -403,7 +377,7 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # ------------------------------------------------------------
-# Core Signal Engine (professional scoring) – Enhanced with filters
+# Core Signal Engine (professional scoring)
 # ------------------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     global market_signal, market_state, institutional_state, signal_memory
@@ -418,24 +392,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     atr = calculate_atr(price_list)
     pcr, pcr_src = get_nifty_pcr()
     delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
-
-    # ---- NEW: Volume filter ----
-    if len(vol_list) >= 20:
-        avg_vol = sum(vol_list[-20:]) / 20
-        if vol_list[-1] < avg_vol * 0.6:
-            logger.debug("Volume too low – skipping signal")
-            return
-
-    # ---- NEW: Spread sanity ----
-    if atr > 0 and abs(spread) > atr * 1.5:
-        logger.debug("Spread too wide – skipping signal")
-        return
-
-    # ---- NEW: Volatility filter ----
-    atr_pct = (atr / price_list[-1]) * 100 if price_list[-1] > 0 else 0
-    if atr_pct < 0.3:
-        logger.debug("ATR% too low – skipping signal")
-        return
 
     # Volume trend from actual volumes
     if len(vol_list) >= 20:
@@ -507,7 +463,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     total_bull = tf_score_bull + tech_bull
     total_bear = tf_score_bear + tech_bear
     raw_confidence = max(total_bull, total_bear)
-
     # Determine raw action
     if total_bull >= total_bear and total_bull >= CONSIDER_THRESHOLD:
         if bullish_tf >= 4 and raw_confidence >= STRONG_BUY_THRESHOLD:
@@ -546,16 +501,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
         signal_type = "NONE"
         raw_confidence = max(total_bull, total_bear)
 
-    # ---- NEW: consecutive minute bar confirmation ----
-    if len(timeframe_history["1min"]) >= 2:
-        last_two = list(timeframe_history["1min"])[-2:]
-        dir1 = 1 if last_two[0]["ce"] > last_two[0]["pe"] else -1
-        dir2 = 1 if last_two[1]["ce"] > last_two[1]["pe"] else -1
-        if dir1 != dir2 and raw_action != "HOLD":
-            raw_action = "HOLD"
-            raw_confidence = 0
-            signal_type = "NONE"
-
     # Anti‑flip & persistence logic
     now_ts = time.time()
     if raw_action != signal_memory["current_action"]:
@@ -578,15 +523,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
             signal_memory["confirmation_count"] += 1
         final_action = raw_action
         final_signal_type = signal_type
-
-    # ---- NEW: signal expiry (time‑based invalidation) ----
-    if signal_memory["signal_start_time"]:
-        elapsed = now_ts - signal_memory["signal_start_time"]
-        if elapsed > 1800:  # 30 minutes
-            final_action = "HOLD"
-            final_signal_type = "NONE"
-            signal_memory["signal_start_time"] = None
-            logger.info("Signal expired due to time limit")
 
     # Update memory
     signal_memory["current_action"] = final_action
@@ -860,14 +796,12 @@ def home():
 
 @app.route("/api/live-signals")
 def live_signals():
-    spot = get_nifty_spot_cached()
     return jsonify({
         "status": "active",
         "data": market_signal,
         "market": market_state,
         "institutional": institutional_state,
         "timeframes": get_all_timeframe_trends(),
-        "spot_price": spot if spot else 0,
         "signal_memory": {
             "current_action": signal_memory["current_action"],
             "signal_type": signal_memory["current_signal_type"],

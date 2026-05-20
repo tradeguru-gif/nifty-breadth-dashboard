@@ -1,0 +1,987 @@
+import os
+import time
+import logging
+import threading
+import json
+import requests
+import pandas as pd
+from collections import deque
+from datetime import datetime
+from flask import Flask, jsonify
+from flask_cors import CORS
+import pyotp
+from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+
+# ============================================================
+# CRITICAL FIX: Aggressive monkey-patch before ANY SmartWebSocketV2 usage
+# ============================================================
+import websocket as websocket_client_lib
+
+# Patch 1: Fix SmartWebSocketV2._on_close at class level
+_original_on_close = SmartWebSocketV2._on_close
+
+def _patched_on_close(self, wsapp, *args, **kwargs):
+    """Accept any number of positional and keyword arguments"""
+    try:
+        return _original_on_close(self, wsapp)
+    except TypeError as e:
+        logging.getLogger(__name__).warning(f"[PATCH] _on_close TypeError suppressed: {e}")
+        return None
+
+SmartWebSocketV2._on_close = _patched_on_close
+
+# Patch 2: Fix _on_error too (might have similar issues)
+_original_on_error = SmartWebSocketV2._on_error
+
+def _patched_on_error(self, wsapp, error, *args, **kwargs):
+    """Accept any number of arguments"""
+    try:
+        return _original_on_error(self, wsapp, error)
+    except TypeError as e:
+        logging.getLogger(__name__).warning(f"[PATCH] _on_error TypeError suppressed: {e}")
+        return None
+
+SmartWebSocketV2._on_error = _patched_on_error
+
+# Patch 3: Fix _on_open too (defensive)
+_original_on_open = SmartWebSocketV2._on_open
+
+def _patched_on_open(self, wsapp, *args, **kwargs):
+    """Accept any number of arguments"""
+    try:
+        return _original_on_open(self, wsapp)
+    except TypeError as e:
+        logging.getLogger(__name__).warning(f"[PATCH] _on_open TypeError suppressed: {e}")
+        return None
+
+SmartWebSocketV2._on_open = _patched_on_open
+
+# Patch 4: Suppress websocket-client callback errors globally
+_original_run_callback = websocket_client_lib.WebSocketApp._callback
+
+def _patched_run_callback(self, callback, *args):
+    """Wrap callback execution to catch TypeError from argument mismatches"""
+    if callback:
+        try:
+            return _original_run_callback(self, callback, *args)
+        except TypeError as e:
+            if "takes" in str(e) and "positional argument" in str(e):
+                logging.getLogger(__name__).warning(f"[PATCH] Callback arg mismatch suppressed: {e}")
+                return None
+            raise
+    return None
+
+websocket_client_lib.WebSocketApp._callback = _patched_run_callback
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("[PATCH] All SmartApi callbacks patched for argument compatibility")
+
+app = Flask(__name__)
+CORS(app)
+application = app
+
+# --------------------------------------------------
+# Environment variables
+# --------------------------------------------------
+ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
+ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
+ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
+ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
+
+if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
+    raise ValueError("Missing Angel One credentials")
+
+# NEW: Dynamic thresholds from env (Feature #8)
+SPREAD_THRESHOLD = float(os.getenv("SPREAD_THRESHOLD", "5.0"))
+STRONG_BUY_THRESHOLD = float(os.getenv("STRONG_BUY_THRESHOLD", "80"))
+BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "60"))
+CONSIDER_THRESHOLD = float(os.getenv("CONSIDER_THRESHOLD", "40"))
+
+# --------------------------------------------------
+# Global state
+# --------------------------------------------------
+CE_TOKEN = None
+PE_TOKEN = None
+latest_ticks = {"ce_price": 0.0, "pe_price": 0.0}
+price_history = deque(maxlen=200)
+tick_counter = 0
+UPDATE_INTERVAL = 10
+ws_running = False
+sws = None
+
+# NEW: SmartConnect instance for REST fallback (Feature #4)
+smart_obj = None
+auth_token_global = None
+feed_token_global = None
+
+# NEW: Token metadata with timestamp (Feature #1)
+token_metadata = {
+    "ce_token": None,
+    "pe_token": None,
+    "last_updated": 0,
+    "expiry_date": None
+}
+
+# NEW: Last tick timestamp for watchdog (Feature #3)
+last_tick_time = {"value": 0, "lock": threading.Lock()}
+
+# NEW: REST fallback state (Feature #4)
+rest_fallback = {
+    "last_rest_call": 0,
+    "rest_cooldown": 10
+}
+
+# NEW: Volume tracking from real tick data (Feature #7)
+real_volume = {"ce": 0, "pe": 0, "ce_total": 0, "pe_total": 0}
+
+# NEW: Log throttling counters (Feature #9)
+log_throttle = {
+    "tick_count": 0,
+    "last_score_log": 0,
+    "last_signal": None
+}
+
+# NEW: PCR smoothing EMA (Feature #6)
+pcr_ema_history = deque(maxlen=5)
+pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
+PCR_TTL = 300
+
+# --------------------------------------------------
+# Market Signal State — YOUR ORIGINAL (UNCHANGED)
+# --------------------------------------------------
+market_signal = {
+    "signal": "WAITING",
+    "ce_price": 0.0, "pe_price": 0.0, "spread": 0.0,
+    "rsi": 50, "macd": 0.0, "pcr": 1.0, "vwap": 0.0,
+    "atr": 0.0, "ema_fast": 0.0, "ema_slow": 0.0,
+    "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0,
+    "timestamp": ""
+}
+
+market_state = {
+    "rsi": 50, "momentum": "NEUTRAL", "strength": "LOW",
+    "trend": "SIDEWAYS", "action": "HOLD", "confidence": 0,
+    "volatility": "NORMAL", "alert": "NONE"
+}
+
+institutional_state = {
+    "vwap": 0, "ema_fast": 0, "ema_slow": 0, "ema_signal": "NEUTRAL",
+    "atr": 0, "oi_buildup": "NEUTRAL", "iv_state": "NORMAL",
+    "candle_structure": "SIDEWAYS", "market_breadth": "BALANCED",
+    "volume_profile": "NORMAL", "smart_money_flow": "NEUTRAL",
+    "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+    "institutional_signal": "HOLD", "institutional_confidence": 0
+}
+
+# ============================================================
+# FEATURE #2: Daily Re-authentication Timer
+# ============================================================
+def reauth_timer():
+    while True:
+        time.sleep(20 * 3600)
+        logger.info("[REAUTH] 20-hour timer triggered...")
+        try:
+            graceful_reauth()
+        except Exception as e:
+            logger.error(f"[REAUTH] Failed: {e}")
+
+def graceful_reauth():
+    global sws, ws_running, smart_obj, auth_token_global, feed_token_global
+    if sws is not None:
+        try:
+            sws.close_connection()
+        except:
+            pass
+    ws_running = False
+    time.sleep(2)
+    try:
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        smart_obj = SmartConnect(api_key=ANGEL_API_KEY)
+        session = smart_obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+        if session.get("status"):
+            auth_token_global = session["data"]["jwtToken"]
+            feed_token_global = smart_obj.getfeedToken()
+            logger.info("[REAUTH] Fresh login successful")
+        else:
+            logger.error(f"[REAUTH] Login failed: {session}")
+    except Exception as e:
+        logger.error(f"[REAUTH] Login error: {e}")
+
+# ============================================================
+# FEATURE #3: Watchdog Thread for Stale Ticks
+# ============================================================
+def watchdog_thread():
+    while True:
+        time.sleep(5)
+        with last_tick_time["lock"]:
+            elapsed = time.time() - last_tick_time["value"]
+
+        if last_tick_time["value"] > 0 and elapsed > 90:
+            logger.warning(f"[WATCHDOG] No tick for {elapsed:.0f}s. Forcing reconnect...")
+            try:
+                rest_price_update()
+            except:
+                pass
+            global ws_running
+            ws_running = False
+            if sws is not None:
+                try:
+                    sws.close_connection()
+                except:
+                    pass
+
+# ============================================================
+# FEATURE #4: REST Fallback for Prices
+# ============================================================
+def get_ltp_rest(token):
+    global smart_obj
+    if smart_obj is None:
+        return None
+    try:
+        resp = smart_obj.ltpData("NFO", "", token)
+        if resp and resp.get("status") and resp.get("data"):
+            ltp = resp["data"].get("ltp", 0)
+            return float(ltp) if ltp else None
+    except Exception as e:
+        logger.warning(f"[REST] LTP fetch error: {e}")
+    return None
+
+def rest_price_update():
+    now = time.time()
+    if now - rest_fallback["last_rest_call"] < rest_fallback["rest_cooldown"]:
+        return
+    if not CE_TOKEN or not PE_TOKEN:
+        return
+    rest_fallback["last_rest_call"] = now
+
+    ce_ltp = get_ltp_rest(CE_TOKEN)
+    pe_ltp = get_ltp_rest(PE_TOKEN)
+
+    if ce_ltp and ce_ltp != latest_ticks.get("ce_price"):
+        latest_ticks["ce_price"] = ce_ltp
+        latest_ticks["ce_timestamp"] = datetime.now().isoformat()
+        price_history.append(ce_ltp)
+        logger.info(f"[REST FALLBACK] CE updated: {ce_ltp}")
+    elif ce_ltp:
+        latest_ticks["ce_price"] = ce_ltp
+
+    if pe_ltp and pe_ltp != latest_ticks.get("pe_price"):
+        latest_ticks["pe_price"] = pe_ltp
+        latest_ticks["pe_timestamp"] = datetime.now().isoformat()
+        logger.info(f"[REST FALLBACK] PE updated: {pe_ltp}")
+    elif pe_ltp:
+        latest_ticks["pe_price"] = pe_ltp
+
+# --------------------------------------------------
+# Helper: Nifty spot (UNCHANGED)
+# --------------------------------------------------
+spot_cache = {"value": None, "timestamp": 0}
+CACHE_TTL = 30
+
+def get_nifty_spot():
+    try:
+        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        time.sleep(0.5)
+        response = session.get(url, headers=headers, timeout=10)
+        data = response.json()
+        spot = data["data"][0]["lastPrice"]
+        logger.info(f"NIFTY spot = {spot}")
+        return float(spot)
+    except Exception as e:
+        logger.error(f"Spot fetch error: {e}")
+        return None
+
+def get_nifty_spot_cached():
+    now = time.time()
+    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+        return spot_cache["value"]
+    spot = get_nifty_spot()
+    if spot:
+        spot_cache["value"] = spot
+        spot_cache["timestamp"] = now
+    return spot
+
+# ============================================================
+# FEATURE #1: Weekly Expiry Rollover Fix
+# ============================================================
+def should_freeze_expiry_rollover():
+    now = datetime.now()
+    if now.weekday() == 3:
+        if now.hour == 15 and now.minute < 30:
+            return True
+    return False
+
+def get_current_atm_tokens_enhanced():
+    global token_metadata
+    now = time.time()
+    if should_freeze_expiry_rollover():
+        if token_metadata["ce_token"] and token_metadata["pe_token"]:
+            logger.info("[EXPIRY FREEZE] Keeping current expiry.")
+            return token_metadata["ce_token"], token_metadata["pe_token"]
+    if token_metadata["ce_token"] and token_metadata["pe_token"]:
+        age = now - token_metadata["last_updated"]
+        if age < 3600 and datetime.now().hour < 16:
+            return token_metadata["ce_token"], token_metadata["pe_token"]
+    ce_token, pe_token = get_current_atm_tokens()
+    if ce_token and pe_token:
+        token_metadata.update({
+            "ce_token": ce_token, "pe_token": pe_token,
+            "last_updated": now, "expiry_date": None
+        })
+    return ce_token, pe_token
+
+# --------------------------------------------------
+# Fetch current ATM option tokens (UNCHANGED)
+# --------------------------------------------------
+def get_current_atm_tokens():
+    spot = get_nifty_spot_cached()
+    if not spot:
+        return None, None
+    atm_strike = round(spot / 50) * 50
+    logger.info(f"ATM strike = {atm_strike}")
+    url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        df = pd.DataFrame(resp.json())
+        logger.info(f"Total instruments loaded: {len(df)}")
+    except Exception as e:
+        logger.error(f"Failed to load instrument master: {e}")
+        return None, None
+
+    nifty_opts = df[
+        (df["name"].astype(str) == "NIFTY") & 
+        (df["instrumenttype"].astype(str) == "OPTIDX") &
+        (df["exch_seg"].astype(str) == "NFO")
+    ].copy()
+
+    logger.info(f"NIFTY OPTIDX NFO symbols found: {len(nifty_opts)}")
+
+    if nifty_opts.empty:
+        nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
+        logger.info(f"Fallback NIFTY symbols found: {len(nifty_opts)}")
+
+    if nifty_opts.empty:
+        logger.error("No NIFTY symbols found")
+        return None, None
+
+    for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
+        nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
+        valid_count = nifty_opts["expiry_date"].notna().sum()
+        if valid_count > 0:
+            logger.info(f"Parsed expiry with format {fmt}: {valid_count} valid")
+            break
+    else:
+        logger.error("Could not parse any expiry dates")
+        return None, None
+
+    nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
+    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
+    nifty_opts = nifty_opts.dropna(subset=["strike"])
+    logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
+
+    today = datetime.now()
+    future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
+    logger.info(f"Future expiries: {len(future_expiries)}")
+
+    if future_expiries.empty:
+        logger.error("No future expiries found")
+        return None, None
+
+    nearest_expiry = future_expiries["expiry_date"].min()
+    logger.info(f"Nearest expiry: {nearest_expiry}")
+
+    nearest_opts = nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]
+    logger.info(f"Options for nearest expiry: {len(nearest_opts)}")
+
+    available_strikes = sorted(nearest_opts["strike"].unique())
+    logger.info(f"Available strikes (first 20): {available_strikes[:20]}")
+    logger.info(f"Looking for strike: {atm_strike}")
+
+    atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+    logger.info(f"ATM options found: {len(atm_opts)}")
+
+    ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+    pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
+
+    logger.info(f"CE matches: {len(ce_row)}, PE matches: {len(pe_row)}")
+
+    if ce_row.empty or pe_row.empty:
+        logger.error(f"CE or PE not found for strike {atm_strike}, expiry {nearest_expiry}")
+        if available_strikes:
+            nearest_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
+            logger.info(f"Trying nearest strike: {nearest_strike}")
+            atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+            ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+            pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
+            if not ce_row.empty and not pe_row.empty:
+                ce_token = str(ce_row.iloc[0]["token"])
+                pe_token = str(pe_row.iloc[0]["token"])
+                logger.info(f"Fallback CE token = {ce_token}, PE token = {pe_token}")
+                return ce_token, pe_token
+        return None, None
+
+    ce_token = str(ce_row.iloc[0]["token"])
+    pe_token = str(pe_row.iloc[0]["token"])
+    logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
+    return ce_token, pe_token
+
+# --------------------------------------------------
+# WebSocket Callbacks — YOUR ORIGINAL with minor enhancements
+# --------------------------------------------------
+def on_ws_open(wsapp):
+    global sws
+    logger.info("Angel One WebSocket opened")
+    if sws is not None:
+        try:
+            correlation_id = "tradeguru_001"
+            mode = 2
+            token_list = [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}]
+            sws.subscribe(correlation_id, mode, token_list)
+            logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
+        except Exception as e:
+            logger.error(f"Subscribe error: {e}")
+
+def on_ws_data(wsapp, message, *args):
+    global latest_ticks, price_history, tick_counter
+    try:
+        if isinstance(message, str):
+            data = json.loads(message)
+        else:
+            data = message
+
+        logger.debug(f"Raw tick data: {data}")
+        ticks = data if isinstance(data, list) else [data]
+
+        for tick in ticks:
+            token = None
+            for key in ["tk", "token", "symbolToken", "instrument_token"]:
+                if key in tick:
+                    token = str(tick.get(key))
+                    break
+
+            if not token:
+                logger.debug(f"No token found in tick: {tick}")
+                continue
+
+            ltp = None
+            for key in ["ltp", "last_traded_price", "lp", "price"]:
+                if key in tick:
+                    val = tick.get(key)
+                    if isinstance(val, (int, float)):
+                        ltp = val / 100 if val > 1000 else val
+                    break
+
+            # NEW: Feature #7 - Extract real volume
+            volume = None
+            for vkey in ["v", "volume", "tradedVolume", "vol"]:
+                if vkey in tick:
+                    vval = tick.get(vkey)
+                    if isinstance(vval, (int, float)):
+                        volume = int(vval)
+                    break
+
+            if ltp is None:
+                logger.debug(f"No LTP found in tick for token {token}: {tick}")
+                continue
+
+            logger.info(f"Tick received - Token: {token}, LTP: {ltp}")
+
+            if token == CE_TOKEN:
+                latest_ticks["ce_price"] = ltp
+                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
+                price_history.append(ltp)
+                tick_counter += 1
+                if volume:
+                    real_volume["ce"] = volume
+                    real_volume["ce_total"] += volume
+                logger.info(f"CE price updated: {ltp}")
+            elif token == PE_TOKEN:
+                latest_ticks["pe_price"] = ltp
+                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
+                if volume:
+                    real_volume["pe"] = volume
+                    real_volume["pe_total"] += volume
+                logger.info(f"PE price updated: {ltp}")
+
+            # NEW: Feature #3 - Update last tick time
+            with last_tick_time["lock"]:
+                last_tick_time["value"] = time.time()
+
+            ce = latest_ticks["ce_price"]
+            pe = latest_ticks["pe_price"]
+
+            if ce > 0 and pe > 0 and len(price_history) >= 20 and tick_counter % UPDATE_INTERVAL == 0:
+                logger.info(f"Running signal engine - CE: {ce}, PE: {pe}, History: {len(price_history)}")
+                run_signal_engine(ce, pe, list(price_history))
+
+    except Exception as e:
+        logger.error(f"WebSocket data error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+def on_ws_error(wsapp, error):
+    logger.error(f"WebSocket error: {error}")
+
+def on_ws_close(wsapp, *args):
+    logger.warning(f"WebSocket closed, args: {args}")
+    global ws_running
+    ws_running = False
+
+# --------------------------------------------------
+# Start WebSocket connection (MODIFIED for Features #1, #2, #4)
+# --------------------------------------------------
+def start_angel_websocket():
+    global ws_running, CE_TOKEN, PE_TOKEN, sws, smart_obj, auth_token_global, feed_token_global
+    retry_delay = 30
+    while True:
+        try:
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            smart_obj = SmartConnect(api_key=ANGEL_API_KEY)
+            session = smart_obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not session.get("status"):
+                logger.error(f"Login failed: {session}")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
+                continue
+            auth_token_global = session["data"]["jwtToken"]
+            feed_token_global = smart_obj.getfeedToken()
+            logger.info("Authenticated, feed token obtained")
+
+            CE_TOKEN, PE_TOKEN = get_current_atm_tokens_enhanced()
+            if not CE_TOKEN or not PE_TOKEN:
+                logger.error("Could not fetch ATM tokens. Retrying...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
+                continue
+
+            sws = SmartWebSocketV2(auth_token_global, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token_global)
+            sws.on_open = on_ws_open
+            sws.on_data = on_ws_data
+            sws.on_error = on_ws_error
+            sws.on_close = on_ws_close
+            ws_running = True
+            retry_delay = 30
+            logger.info("Connecting WebSocket...")
+
+            try:
+                sws.connect()
+            except Exception as conn_err:
+                logger.error(f"WebSocket connect crashed: {conn_err}")
+                ws_running = False
+                time.sleep(retry_delay)
+                continue
+
+            while ws_running:
+                time.sleep(0.1)
+
+            logger.warning("WebSocket loop ended, reconnecting...")
+
+        except Exception as e:
+            logger.error(f"WebSocket connection error: {e}")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
+
+# --------------------------------------------------
+# Signal Engine — YOUR ORIGINAL (UNCHANGED)
+# --------------------------------------------------
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_macd(prices, fast=12, slow=26):
+    if len(prices) < slow:
+        return 0.0
+    def ema(data, period):
+        alpha = 2 / (period + 1)
+        val = data[0]
+        for p in data[1:]:
+            val = alpha * p + (1 - alpha) * val
+        return val
+    return ema(prices, fast) - ema(prices, slow)
+
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    alpha = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = alpha * p + (1 - alpha) * ema
+    return ema
+
+def calculate_atr(prices, period=14):
+    if len(prices) < period + 1:
+        return 0
+    trs = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
+    return sum(trs[-period:]) / period
+
+def calculate_vwap(prices):
+    if not prices:
+        return 0
+    vol = [100] * len(prices)
+    pv = sum(p * v for p, v in zip(prices, vol))
+    tv = sum(vol)
+    return pv / tv if tv else 0
+
+def estimate_greeks(ce, pe):
+    delta = round((ce - pe) / 100, 2)
+    gamma = round(abs(delta) / 10, 2)
+    theta = round(-(ce + pe) / 1000, 2)
+    vega = round((ce + pe) / 500, 2)
+    return delta, gamma, theta, vega
+
+# ============================================================
+# FEATURE #6: PCR with EMA Smoothing
+# ============================================================
+def calculate_ema_pcr(values, period=5):
+    if not values:
+        return 1.0
+    alpha = 2 / (period + 1)
+    ema = values[0]
+    for val in values[1:]:
+        ema = alpha * val + (1 - alpha) * ema
+    return ema
+
+def get_nifty_pcr_enhanced():
+    now = time.time()
+    if now - pcr_cache["time"] < PCR_TTL:
+        return pcr_cache["value"]
+
+    raw_pcr = None
+    try:
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        time.sleep(1)
+        resp = session.get(url, headers=headers, timeout=10)
+        data = resp.json()
+
+        if "records" in data and "data" in data["records"]:
+            records = data["records"]["data"]
+            ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in records if "CE" in x)
+            pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in records if "PE" in x)
+            raw_pcr = pe_oi / ce_oi if ce_oi else 1.0
+            pcr_cache["source"] = "nse_oi"
+            logger.info(f"[PCR] Raw NSE OI PCR: {raw_pcr:.2f}")
+    except Exception as e:
+        logger.warning(f"[PCR] NSE fetch failed: {e}")
+
+    if raw_pcr is None:
+        try:
+            ce = latest_ticks.get("ce_price", 0)
+            pe = latest_ticks.get("pe_price", 0)
+            if ce > 0 and pe > 0:
+                raw_pcr = pe / ce if ce > 0 else 1.0
+                raw_pcr = max(0.5, min(2.0, raw_pcr))
+                pcr_cache["source"] = "price_based"
+                logger.info(f"[PCR] Raw price-based PCR: {raw_pcr:.2f}")
+        except Exception as e:
+            logger.warning(f"[PCR] Price fallback failed: {e}")
+
+    if raw_pcr is not None:
+        pcr_ema_history.append(raw_pcr)
+        smoothed_pcr = calculate_ema_pcr(list(pcr_ema_history), period=5)
+        pcr_cache.update({"value": smoothed_pcr, "time": now})
+        logger.info(f"[PCR] Smoothed EMA PCR: {smoothed_pcr:.2f}")
+        return smoothed_pcr
+
+    pcr_cache["time"] = now
+    return pcr_cache["value"]
+
+# ============================================================
+# FEATURE #8: Dynamic Thresholds based on ATR
+# ============================================================
+def get_dynamic_thresholds(atr):
+    if atr <= 0:
+        return STRONG_BUY_THRESHOLD, SPREAD_THRESHOLD
+    dynamic_strong_buy = 50 + (2 * atr)
+    dynamic_spread = atr * 0.3
+    dynamic_strong_buy = min(95, max(70, dynamic_strong_buy))
+    dynamic_spread = max(1.0, min(10.0, dynamic_spread))
+    return dynamic_strong_buy, dynamic_spread
+
+# ============================================================
+# FEATURE #9: Throttled Logging
+# ============================================================
+def throttled_signal_log(action, bullish_score, bearish_score, rsi, spread, ema_signal, pcr):
+    global log_throttle
+    log_throttle["tick_count"] += 1
+    now = time.time()
+
+    signal_changed = action != log_throttle["last_signal"]
+    heartbeat = log_throttle["tick_count"] % 100 == 0
+    score_log_time = now - log_throttle["last_score_log"] > 60
+
+    if signal_changed:
+        logger.info(f"🎯 SIGNAL CHANGE: {action} | Bull={bullish_score} Bear={bearish_score} | RSI={rsi:.1f} | Spread={spread:.2f} | EMA={ema_signal}")
+        log_throttle["last_signal"] = action
+    elif heartbeat:
+        logger.info(f"💓 HEARTBEAT: {action} | CE:{latest_ticks['ce_price']:.2f} PE:{latest_ticks['pe_price']:.2f} | Ticks:{log_throttle['tick_count']}")
+    elif score_log_time:
+        logger.info(f"📊 SCORE: {action} | Bull={bullish_score} Bear={bearish_score} | RSI={rsi:.1f} | PCR={pcr:.2f}")
+        log_throttle["last_score_log"] = now
+
+# --------------------------------------------------
+# Signal Engine — YOUR ORIGINAL with minor enhancements
+# --------------------------------------------------
+def run_signal_engine(ce_price, pe_price, price_list):
+    global market_signal, market_state, institutional_state
+    if len(price_list) < 20:
+        return
+
+    spread = ce_price - pe_price
+    rsi = calculate_rsi(price_list)
+    macd = calculate_macd(price_list)
+    vwap = calculate_vwap(price_list)
+    ema_fast = calculate_ema(price_list, 9)
+    ema_slow = calculate_ema(price_list, 21)
+    atr = calculate_atr(price_list)
+
+    # Use enhanced PCR with EMA smoothing (Feature #6)
+    pcr = get_nifty_pcr_enhanced()
+
+    delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
+    ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+    # Get dynamic thresholds based on ATR (Feature #8)
+    dynamic_strong_buy, dynamic_spread = get_dynamic_thresholds(atr)
+    effective_strong_buy = dynamic_strong_buy
+    effective_buy = dynamic_strong_buy - 20
+    effective_consider = dynamic_strong_buy - 40
+
+    # ============================================================
+    # BULLISH SCORE
+    # ============================================================
+    bullish_score = 0
+    if ema_signal == "BULLISH":
+        bullish_score += 20
+    if rsi > 60:
+        bullish_score += 20
+    if spread > 0:
+        bullish_score += 20
+    if pcr < 1.0:
+        bullish_score += 20
+    if macd > 0:
+        bullish_score += 20
+
+    # ============================================================
+    # BEARISH SCORE
+    # ============================================================
+    bearish_score = 0
+    if ema_signal == "BEARISH":
+        bearish_score += 20
+    if rsi < 40:
+        bearish_score += 20
+    if spread < 0:
+        bearish_score += 20
+    if pcr > 1.2:
+        bearish_score += 20
+    if macd < 0:
+        bearish_score += 20
+
+    # ============================================================
+    # SIGNAL DECISION
+    # ============================================================
+    if bullish_score >= bearish_score and bullish_score >= effective_consider:
+        confidence = bullish_score
+        if confidence >= effective_strong_buy:
+            action = "STRONG BUY CE"
+        elif confidence >= effective_buy:
+            action = "BUY CE"
+        elif confidence >= effective_consider:
+            action = "CONSIDER CE"
+        else:
+            action = "HOLD"
+    elif bearish_score > bullish_score and bearish_score >= effective_consider:
+        confidence = bearish_score
+        if confidence >= effective_strong_buy:
+            action = "STRONG BUY PE"
+        elif confidence >= effective_buy:
+            action = "BUY PE"
+        elif confidence >= effective_consider:
+            action = "CONSIDER PE"
+        else:
+            action = "HOLD"
+    else:
+        confidence = max(bullish_score, bearish_score)
+        action = "HOLD"
+
+    # ============================================================
+    # UPDATE market_state
+    # ============================================================
+    market_state.update({
+        "rsi": round(rsi, 2),
+        "momentum": "UPTREND" if spread > 0 else "DOWNTREND" if spread < 0 else "NEUTRAL",
+        "strength": "HIGH" if confidence >= effective_buy else "MODERATE" if confidence >= effective_consider else "LOW",
+        "trend": ema_signal,
+        "action": action,
+        "confidence": confidence,
+        "volatility": "HIGH" if atr > 15 else "NORMAL" if atr > 5 else "LOW",
+        "alert": action
+    })
+
+    # ============================================================
+    # UPDATE institutional_state
+    # ============================================================
+    institutional_state.update({
+        "vwap": round(vwap, 2),
+        "ema_fast": round(ema_fast, 2),
+        "ema_slow": round(ema_slow, 2),
+        "ema_signal": ema_signal,
+        "atr": round(atr, 2),
+        "oi_buildup": "BULLISH" if pcr < 0.8 else "BEARISH" if pcr > 1.2 else "NEUTRAL",
+        "iv_state": "HIGH" if vega > 2 else "NORMAL",
+        "candle_structure": "BULLISH" if ema_signal == "BULLISH" and rsi > 60 else "BEARISH" if ema_signal == "BEARISH" and rsi < 40 else "SIDEWAYS",
+        "market_breadth": "BULLISH" if bullish_score > bearish_score else "BEARISH" if bearish_score > bullish_score else "BALANCED",
+        "volume_profile": "HIGH" if abs(spread) > 20 else "NORMAL",
+        "smart_money_flow": "BULLISH" if vwap > ema_slow else "BEARISH" if vwap < ema_slow else "NEUTRAL",
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "institutional_signal": action,
+        "institutional_confidence": confidence
+    })
+
+    # ============================================================
+    # UPDATE market_signal
+    # ============================================================
+    market_signal.update({
+        "signal": "BULLISH" if spread > dynamic_spread else "BEARISH" if spread < -dynamic_spread else "NEUTRAL",
+        "ce_price": ce_price,
+        "pe_price": pe_price,
+        "spread": round(spread, 2),
+        "rsi": round(rsi, 2),
+        "macd": round(macd, 2),
+        "pcr": round(pcr, 2),
+        "vwap": round(vwap, 2),
+        "atr": round(atr, 2),
+        "ema_fast": round(ema_fast, 2),
+        "ema_slow": round(ema_slow, 2),
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # Throttled logging (Feature #9)
+    throttled_signal_log(action, bullish_score, bearish_score, rsi, spread, ema_signal, pcr)
+
+# --------------------------------------------------
+# Flask endpoints (UNCHANGED + enhanced debug)
+# --------------------------------------------------
+@app.route("/")
+def home():
+    return jsonify({"status": "online", "message": "Nifty Alpha Engine - Robust v2.3"})
+
+@app.route("/api/live-signals")
+def live_signals():
+    return jsonify({
+        "status": "active",
+        "data": market_signal,
+        "market": market_state,
+        "institutional": institutional_state,
+        "enhanced": {
+            "last_tick_seconds_ago": round(time.time() - last_tick_time["value"], 1) if last_tick_time["value"] > 0 else None,
+            "real_volume": real_volume,
+            "pcr_source": pcr_cache.get("source", "default"),
+            "dynamic_thresholds": {
+                "strong_buy": round(get_dynamic_thresholds(calculate_atr(list(price_history)))[0], 2) if len(price_history) > 14 else None,
+                "spread": round(get_dynamic_thresholds(calculate_atr(list(price_history)))[1], 2) if len(price_history) > 14 else None
+            } if len(price_history) > 14 else {}
+        }
+    })
+
+@app.route("/api/health")
+def health():
+    return jsonify({
+        "status": "ok", 
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "latest_ce": latest_ticks["ce_price"],
+        "latest_pe": latest_ticks["pe_price"],
+        "price_history_len": len(price_history),
+        "timestamp": datetime.now().isoformat(),
+        "enhanced": {
+            "last_tick_seconds_ago": round(time.time() - last_tick_time["value"], 1) if last_tick_time["value"] > 0 else None,
+            "token_age_minutes": round((time.time() - token_metadata["last_updated"]) / 60, 1) if token_metadata["last_updated"] else None,
+            "pcr_cache_age_seconds": round(time.time() - pcr_cache["time"], 1),
+            "real_volume": real_volume
+        }
+    }), 200
+
+@app.route("/debug/ws-status")
+def debug_ws():
+    return jsonify({
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "latest_ce": latest_ticks["ce_price"],
+        "latest_pe": latest_ticks["pe_price"],
+        "price_history_len": len(price_history),
+        "enhanced": {
+            "last_tick_time": datetime.fromtimestamp(last_tick_time["value"]).isoformat() if last_tick_time["value"] > 0 else None,
+            "token_metadata": token_metadata,
+            "pcr_ema_history": list(pcr_ema_history),
+            "real_volume": real_volume,
+            "log_throttle": log_throttle
+        }
+    })
+
+# --------------------------------------------------
+# Start background engine (MODIFIED for all features)
+# --------------------------------------------------
+engine_started = False
+
+def start_background_engine():
+    global engine_started
+    if not engine_started:
+        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        ws_thread.start()
+
+        watchdog = threading.Thread(target=watchdog_thread, daemon=True)
+        watchdog.start()
+
+        reauth = threading.Thread(target=reauth_timer, daemon=True)
+        reauth.start()
+
+        engine_started = True
+        logger.info("✅ Robust Angel One engine v2.3 started:")
+        logger.info("   - AGGRESSIVE PATCH: All SmartApi callbacks patched")
+        logger.info("   - WebSocket direct processing (your working method)")
+        logger.info("   - 90s watchdog for stale ticks")
+        logger.info("   - 20h re-auth timer")
+        logger.info("   - REST fallback for prices")
+        logger.info("   - Expiry freeze 3:00-3:30 PM Thu")
+        logger.info("   - PCR EMA smoothing")
+        logger.info("   - Dynamic ATR thresholds")
+        logger.info("   - Throttled logging")
+        logger.info("   - Real volume tracking")
+
+start_background_engine()
+
+if __name__ == "__main__":
+    start_background_engine()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
