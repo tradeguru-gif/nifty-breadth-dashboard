@@ -55,6 +55,7 @@ TOKEN_REFRESH_HOURS = int(os.getenv("TOKEN_REFRESH_HOURS", "20"))
 # ------------------------------------------------------------
 # Global State
 # ------------------------------------------------------------
+spot_cache = {"value": None, "timestamp": 0}
 CE_TOKEN = None
 PE_TOKEN = None
 latest_ticks = {"ce_price": 0.0, "pe_price": 0.0, "ce_volume": 0, "pe_volume": 0}
