@@ -9,3 +9,4 @@ pyotp==2.9.0
 pycryptodome==3.20.0
 logzero==1.7.0
 websocket-client==1.8.0
+gunicorn==21.2.0
