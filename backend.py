@@ -319,11 +319,16 @@ def tick_worker():
 def process_tick_data(data):
     """All heavy processing moved here from WebSocket callback"""
     global latest_ticks, price_history, tick_counter, last_minute_snapshot, timeframe_history
-
+    
     try:
         ticks = data if isinstance(data, list) else [data]
-
+        
+        # DEBUG: Log tick processing (moved AFTER ticks is defined)
+        logger.info(f"[WORKER] Processing {len(ticks)} ticks from queue. Queue size: {tick_queue.qsize()}")
+        
         for tick in ticks:
+            # ... rest of your code
+
             token = None
             for key in ["tk", "token", "symbolToken", "instrument_token"]:
                 if key in tick:
@@ -752,20 +757,25 @@ def get_current_atm_tokens():
 # ============================================================
 # WebSocket Callbacks (MODIFIED for Features #3, #4, #5, #7)
 # ============================================================
-def on_ws_open(wsapp):
-    global sws
-    logger.info("Angel One WebSocket opened")
-    if sws is not None:
+def on_ws_data(wsapp, message, *args):
+    """WebSocket callback: ONLY enqueues to queue. No heavy processing."""
+    try:
+        if isinstance(message, str):
+            data = json.loads(message)
+        else:
+            data = message
+        
+        # DEBUG: Log incoming tick
+        logger.info(f"[WS] Raw tick received, type: {type(data)}, queue size before: {tick_queue.qsize()}")
+        
         try:
-            correlation_id = "tradeguru_001"
-            mode = 2
-            token_list = [
-                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}
-            ]
-            sws.subscribe(correlation_id, mode, token_list)
-            logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
-        except Exception as e:
-            logger.error(f"Subscribe error: {e}")
+            tick_queue.put_nowait(data)
+            logger.info(f"[WS] Tick enqueued successfully, queue size after: {tick_queue.qsize()}")
+        except queue.Full:
+            logger.warning("[QUEUE] Tick queue full, dropping tick")
+            
+    except Exception as e:
+        logger.error(f"WebSocket data enqueue error: {e}")
 
 def on_ws_data(wsapp, message, *args):
     """WebSocket callback: ONLY enqueues to queue. No heavy processing."""
