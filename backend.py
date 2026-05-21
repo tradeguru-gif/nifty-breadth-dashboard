@@ -274,6 +274,8 @@ class Position:
     status: str = "OPEN"
     order_id: str = ""
     mode: str = "PAPER"
+    highest_price_since_entry: float = 0.0      # ← ADD THIS
+    lowest_price_since_entry: float = float("inf")  # ← ADD THIS
     
 @dataclass
 class TradeJournal:
@@ -649,6 +651,7 @@ _worker_lock_fd = None
 
 _reconnecting = False
 _reconnect_lock = threading.Lock()
+_ws_connect_lock = threading.Lock()
 _last_429_time = 0
 
 # Timeframe snapshots
@@ -2207,17 +2210,24 @@ def patch_smartwebsocket(sws_instance):
     
     sws_instance.connect = fixed_connect
     
-    def fixed_on_close(wsapp, *args):
-        logger.warning(f"WebSocket closed: args={args}")
+        sws_instance.connect = fixed_connect
+    
+    def fixed_on_close(wsapp, close_status_code=None, close_msg=None):
+        logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")
         if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
             try:
-                sws_instance.on_close(wsapp, *args)
-            except:
-                sws_instance.on_close(wsapp)
-    
+                sws_instance.on_close(wsapp, close_status_code, close_msg)
+            except TypeError:
+                # Fallback for older signature
+                try:
+                    sws_instance.on_close(wsapp)
+                except:
+                    pass
+
     sws_instance._on_close = fixed_on_close
     sws_instance.MAX_RETRY_ATTEMPT = 0
     sws_instance.retry_strategy = 0
+    sws_instance.HEART_BEAT_INTERVAL = 25  # Keep this
     return sws_instance
 
 def on_open(wsapp):
@@ -2479,6 +2489,23 @@ def start_websocket():
                 continue
             
             consecutive_failures = 0
+
+# BEFORE: sws = SmartWebSocketV2(...)
+# Add this cleanup block:
+
+# Aggressive cleanup of any existing connection
+if sws is not None:
+    try:
+        if hasattr(sws, 'wsapp') and sws.wsapp:
+            sws.wsapp.close()
+            time.sleep(2)  # Wait for server to register disconnect
+    except Exception as e:
+        logger.debug(f"Cleanup error: {e}")
+    sws = None
+
+# Force garbage collection to release socket
+import gc
+time.sleep(3)  # Critical: wait before new connection
             
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws = patch_smartwebsocket(sws)
@@ -2547,15 +2574,19 @@ def start_websocket():
             error_str = str(e)
             logger.error(f"WebSocket fatal error: {e}", exc_info=True)
             
-            if '429' in error_str or 'Connection Limit Exceeded' in error_str or 'Too Many Requests' in error_str:
-                logger.error("RATE LIMIT 429 DETECTED. Entering 5-minute cooldown.")
+            if '429' in error_str or 'Connection Limit Exceeded' in error_str:
+                logger.error("RATE LIMIT 429. Entering 10-minute cooldown.")
                 _last_429_time = time.time()
-                with _reconnect_lock:
-                    _reconnecting = False
-                time.sleep(300)
+                time.sleep(600)  # 10 minutes - Angel One needs this
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
+                wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
+                logger.info(f"Waiting {wait}s before reconnect...")
+                with _reconnect_lock:
+                    _reconnecting = False
+                time.sleep(wait)          
+
                 wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
                 logger.info(f"Waiting {wait}s before reconnect...")
                 with _reconnect_lock:
