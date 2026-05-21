@@ -936,7 +936,7 @@ def on_open(wsapp):
         _reconnecting = False
     if sws and CE_TOKEN and PE_TOKEN:
         try:
-            sws.subscribe("nifty_signal", 2, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
+            sws.subscribe("nifty_signal", 2, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
             logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
