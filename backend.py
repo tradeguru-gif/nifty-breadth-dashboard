@@ -1194,7 +1194,7 @@ def start_websocket():
                 time.sleep(wait)
 
 def rest_fallback():
-    global CE_TOKEN, PE_TOKEN
+    global CE_TOKEN, PE_TOKEN   # <--- MUST BE FIRST LINE
     while engine_active:
         time.sleep(60)
 
@@ -1242,7 +1242,6 @@ def rest_fallback():
 
         except Exception as e:
             logger.error(f"REST fallback error: {e}")
-
 # ------------------------------------------------------------
 # Flask Endpoints
 # ------------------------------------------------------------
