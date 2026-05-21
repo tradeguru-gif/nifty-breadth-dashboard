@@ -953,14 +953,15 @@ def start_websocket():
     consecutive_failures = 0
 
     while engine_active:
+        # ----- ADD THIS -----
+        if not is_market_open():
+            logger.info("Markets closed. Sleeping 5 minutes before checking again.")
+            time.sleep(300)   # 5 minutes
+            continue
+        # --------------------
         ws_running = False
         try:
-            if not CE_TOKEN or not PE_TOKEN:
-                CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
-                if not CE_TOKEN or not PE_TOKEN:
-                    logger.warning("No tokens, retrying in 60s...")
-                    time.sleep(60)
-                    continue
+            # ... rest of your existing code ...
 
             auth_token, feed_token, obj = get_auth_token()
             if not auth_token:
@@ -1019,16 +1020,25 @@ def start_websocket():
             sws = None
             time.sleep(5)
 
-        except Exception as e:
+               except Exception as e:
             logger.error(f"WebSocket fatal error: {e}", exc_info=True)
-            consecutive_failures += 1
-            wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
-            logger.info(f"Waiting {wait}s before reconnect...")
-            time.sleep(wait)
+            # ----- ADD THIS -----
+            if '429' in str(e) or 'Connection Limit Exceeded' in str(e):
+                logger.error("Rate limit hit (429). Waiting 5 minutes before retry.")
+                time.sleep(300)
+                consecutive_failures = 0   # reset counter
+            else:
+                consecutive_failures += 1
+                wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
+                logger.info(f"Waiting {wait}s before reconnect...")
+                time.sleep(wait)
+            # --------------------
 
 def rest_fallback():
     while engine_active:
-        time.sleep(15)
+        time.sleep(60)   # was 15 – increase to 60 seconds
+        # ... rest unchanged
+
         if ws_running and (time.time() - last_tick_time) < 45:
             continue
         if not CE_TOKEN or not PE_TOKEN:
