@@ -35,6 +35,7 @@ import fcntl
 import struct
 import sqlite3
 import hashlib
+import gc
 import uuid
 from collections import deque
 from datetime import datetime, timedelta
@@ -2207,25 +2208,34 @@ def patch_smartwebsocket(sws_instance):
         except Exception as e:
             logger.error(f"WebSocket connect error: {e}")
             raise
-        
-        sws_instance.connect = fixed_connect
     
+    sws_instance.connect = fixed_connect
+
     def fixed_on_close(wsapp, close_status_code=None, close_msg=None):
         logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")
         if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
             try:
                 sws_instance.on_close(wsapp, close_status_code, close_msg)
             except TypeError:
+                # Fallback for older signature
                 try:
                     sws_instance.on_close(wsapp)
                 except:
                     pass
 
-    sws_instance._on_close = fixed_on_close
+    # Patch _on_close to handle websocket-client's 4-arg callback
+    original_on_close = sws_instance._on_close
+    def patched_on_close(wsapp, close_status_code=None, close_msg=None):
+        try:
+            original_on_close(wsapp)
+        except TypeError:
+            pass
+    sws_instance._on_close = patched_on_close
     sws_instance.MAX_RETRY_ATTEMPT = 0
     sws_instance.retry_strategy = 0
-    sws_instance.HEART_BEAT_INTERVAL = 25
+    sws_instance.HEART_BEAT_INTERVAL = 25  # Keep this
     return sws_instance
+
 def on_open(wsapp):
     """WebSocket connection opened."""
     logger.info("WebSocket OPENED")
@@ -2465,8 +2475,16 @@ def start_websocket():
             _reconnecting = True
         
         try:
-
-                        auth_token, feed_token, obj = get_auth_token()
+            if not CE_TOKEN or not PE_TOKEN:
+                get_current_atm_tokens()
+                if not CE_TOKEN or not PE_TOKEN:
+                    logger.warning("No tokens, retrying in 60s...")
+                    with _reconnect_lock:
+                        _reconnecting = False
+                    time.sleep(60)
+                    continue
+            
+            auth_token, feed_token, obj = get_auth_token()
             if not auth_token:
                 consecutive_failures += 1
                 wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
@@ -2486,13 +2504,14 @@ def start_websocket():
                 try:
                     if hasattr(sws, 'wsapp') and sws.wsapp:
                         sws.wsapp.close()
-                        time.sleep(2)
+                        time.sleep(2)  # Wait for server to register disconnect
                 except Exception as e:
                     logger.debug(f"Cleanup error: {e}")
                 sws = None
 
-            import gc
-            time.sleep(3)
+            # Force garbage collection to release socket
+
+            time.sleep(3)  # Critical: wait before new connection
             
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws = patch_smartwebsocket(sws)
@@ -2563,7 +2582,17 @@ def start_websocket():
             
             if '429' in error_str or 'Connection Limit Exceeded' in error_str:
                 logger.error("RATE LIMIT 429. Entering 10-minute cooldown.")
+                # Close any existing connection before cooldown
+                try:
+                    if sws and hasattr(sws, 'wsapp') and sws.wsapp:
+                        sws.wsapp.close()
+                except:
+                    pass
+                sws = None
+                gc.collect()
                 _last_429_time = time.time()
+                with _reconnect_lock:
+                    _reconnecting = False
                 time.sleep(600)  # 10 minutes - Angel One needs this
                 consecutive_failures = 0
             else:
@@ -2574,11 +2603,6 @@ def start_websocket():
                     _reconnecting = False
                 time.sleep(wait)          
 
-                wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
-                logger.info(f"Waiting {wait}s before reconnect...")
-                with _reconnect_lock:
-                    _reconnecting = False
-                time.sleep(wait)
 
 # ============================================================
 # REST FALLBACK
