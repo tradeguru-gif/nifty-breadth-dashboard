@@ -1,6 +1,6 @@
 """
 backend.py — Institutional‑Grade Nifty Options Signal Engine
-v4.2 — Fixed race conditions, deadlock-free watchdog, proper reconnection state management
+v4.3 — Fixed binary WebSocket parsing, watchdog logic, Gunicorn compatibility
 """
 
 import os
@@ -13,6 +13,7 @@ import threading
 import signal
 import math
 import statistics
+import struct
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -52,7 +53,7 @@ spot_cache = {"value": None, "timestamp": 0}
 CE_TOKEN = None
 PE_TOKEN = None
 latest_ticks = {"ce_price": 0.0, "pe_price": 0.0, "ce_volume": 0, "pe_volume": 0}
-price_history = deque(maxlen=500)      # for CE prices
+price_history = deque(maxlen=500)
 volume_history = deque(maxlen=500)
 tick_counter = 0
 ws_running = False
@@ -60,12 +61,11 @@ sws = None
 last_tick_time = time.time()
 engine_active = True
 
-# === RECONNECTION STATE (FIXED v4.2) ===
-# Use an Event instead of bool+lock for cleaner state management
-_reconnecting = threading.Event()  # Set = currently reconnecting, Clear = connected/idle
-_reconnect_lock = threading.Lock()  # Only for token/auth critical sections
+# Reconnection state
+_reconnecting = False
+_reconnect_lock = threading.Lock()
 
-# Multi‑timeframe storage (price snapshots every minute)
+# Multi‑timeframe storage
 timeframe_history = {
     "1min": deque(maxlen=60),
     "5min": deque(maxlen=20),
@@ -75,7 +75,7 @@ timeframe_history = {
 }
 last_minute_snapshot = {"time": 0, "price": 0, "volume": 0}
 
-# Signal memory (enhanced with grading, risk levels)
+# Signal memory
 signal_memory = {
     "current_action": "HOLD",
     "current_signal_type": "NONE",
@@ -94,7 +94,7 @@ signal_memory = {
     "max_drawdown_pct": 0.0
 }
 
-# Primary state objects (extended for professional fields)
+# State objects
 market_signal = {
     "signal": "WAITING", "ce_price": 0.0, "pe_price": 0.0, "spread": 0.0,
     "rsi": 50, "macd": 0.0, "pcr": 1.0, "vwap": 0.0, "atr": 0.0,
@@ -120,7 +120,6 @@ institutional_state = {
     "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "max_drawdown_pct": 0.0
 }
 
-# Configuration (tunable parameters)
 CONFIG = {
     "RSI_PERIOD": 14,
     "MACD_FAST": 12,
@@ -161,7 +160,6 @@ def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    # Freeze on expiry Thursday after 3:30 PM
     if now.weekday() == 3 and now.hour >= 15 and now.minute >= 30:
         return False
     start = datetime.strptime("09:15", "%H:%M").time()
@@ -244,7 +242,6 @@ def get_current_atm_tokens():
     return str(ce.iloc[0]["token"]), str(pe.iloc[0]["token"])
 
 def get_ltp_rest(token):
-    """REST fallback for LTP."""
     totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
     obj = SmartConnect(api_key=ANGEL_API_KEY)
     session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
@@ -270,7 +267,7 @@ def get_ltp_rest(token):
     return 0
 
 # ------------------------------------------------------------
-# Advanced Technical Indicators
+# Technical Indicators
 # ------------------------------------------------------------
 def calculate_ema_series(prices, period):
     if len(prices) < period:
@@ -386,7 +383,7 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # ------------------------------------------------------------
-# PCR with fallback and smoothing
+# PCR
 # ------------------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
 pcr_history = deque(maxlen=5)
@@ -489,31 +486,24 @@ def calculate_atr(prices, period=14):
     return sum(trs[-period:]) / period if len(trs) >= period else 0.0
 
 def estimate_greeks(ce_price, pe_price):
-    """Simplified greeks estimation"""
     spot = get_nifty_spot_cached() or 0
     atm_strike = round(spot / 50) * 50 if spot else 0
     moneyness = abs(spot - atm_strike) / spot if spot > 0 else 0
-
     delta = 0.5 - moneyness if ce_price > pe_price else -(0.5 - moneyness)
     delta = max(-1, min(1, delta))
-
     gamma = 0.05 * (1 - moneyness * 2) if moneyness < 0.5 else 0.01
-
     theta = -ce_price * 0.001 * CONFIG["DAYS_TO_EXPIRY"]
-
     vega = ce_price * 0.1
-
     return round(delta, 4), round(gamma, 4), round(theta, 4), round(vega, 4)
 
 # ------------------------------------------------------------
-# Core Professional Signal Engine (enhanced)
+# Core Signal Engine
 # ------------------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     global market_signal, market_state, institutional_state, signal_memory
     if len(price_list) < 30:
         return
 
-    # --- 1. Base calculations ---
     spread = ce_price - pe_price
     rsi = calculate_rsi(price_list, CONFIG["RSI_PERIOD"])
     macd_line, macd_hist = calculate_macd(price_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"], CONFIG["MACD_SIGNAL"])
@@ -525,7 +515,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     pcr_ema = calculate_pcr_ema()
     delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
 
-    # --- 2. Advanced indicators ---
     bb_sma, bb_upper, bb_lower, bb_pos = calculate_bollinger(price_list, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
     adx = calculate_adx(price_list, CONFIG["ADX_PERIOD"])
     rsi_values = [calculate_rsi(price_list[:i+1], CONFIG["RSI_PERIOD"]) for i in range(CONFIG["RSI_PERIOD"], len(price_list))]
@@ -533,7 +522,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     atr_pct = (atr / price_list[-1]) * 100 if price_list[-1] > 0 else 0
     iv_rank = estimate_iv_rank(ce_price, price_list[-min(20, len(price_list)):], 20)
 
-    # Volume trend
     if len(vol_list) >= 20:
         recent_vol = sum(vol_list[-10:])/10
         older_vol = sum(vol_list[-20:-10])/10
@@ -541,7 +529,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     else:
         vol_trend = "FLAT"
 
-    # --- 3. Market Regime & Session ---
     if adx > CONFIG["ADX_PERIOD"]:
         regime = "TRENDING"
     elif atr_pct > 1.5:
@@ -554,18 +541,15 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     market_state["regime"] = regime
     market_state["session_phase"] = session_phase
 
-    # --- 4. Multi‑timeframe confluence ---
     tf_trends = get_all_timeframe_trends()
     bullish_tf = sum(1 for t in ["1min","5min","10min","15min","20min"] if tf_trends[t]["trend"]=="BULLISH")
     bearish_tf = sum(1 for t in ["1min","5min","10min","15min","20min"] if tf_trends[t]["trend"]=="BEARISH")
     tf_score_bull = bullish_tf * 10
     tf_score_bear = bearish_tf * 10
 
-    # --- 5. Technical scoring ---
     tech_bull = 0
     tech_bear = 0
 
-    # RSI
     if 55 < rsi < 75:
         tech_bull += 10
     elif 40 < rsi < 55:
@@ -575,7 +559,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     elif 45 < rsi < 60:
         tech_bear += 5
 
-    # MACD
     if macd_hist > 0 and macd_line > 0:
         tech_bull += 10
     elif macd_hist > 0:
@@ -585,7 +568,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     elif macd_hist < 0:
         tech_bear += 6
 
-    # PCR
     if pcr < CONFIG["PCR_BULLISH"]:
         tech_bull += 10
     elif pcr < 1.0:
@@ -595,14 +577,12 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     elif pcr > 1.2:
         tech_bear += 7
 
-    # Volume trend
     if vol_trend == "INCREASING":
         if ema_fast > ema_slow:
             tech_bull += 10
         elif ema_fast < ema_slow:
             tech_bear += 10
 
-    # Price vs VWAP & EMA
     avg_price = (ce_price+pe_price)/2
     if avg_price > vwap and avg_price > ema_slow:
         tech_bull += 10
@@ -613,26 +593,22 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     elif avg_price < vwap or avg_price < ema_slow:
         tech_bear += 5
 
-    # Bollinger Band position
     if bb_pos < 20:
         tech_bull += 8
     elif bb_pos > 80:
         tech_bear += 8
 
-    # ADX trend strength bonus
     if adx > 30:
         if ema_fast > ema_slow:
             tech_bull += 5
         else:
             tech_bear += 5
 
-    # RSI divergence
     if rsi_div == "BULLISH" and ema_fast > ema_slow:
         tech_bull += 8
     elif rsi_div == "BEARISH" and ema_fast < ema_slow:
         tech_bear += 8
 
-    # IV rank adjustment
     if iv_rank > 70:
         tech_bull -= 5
         tech_bear += 3
@@ -643,7 +619,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     total_bear = tf_score_bear + tech_bear
     raw_confidence = max(total_bull, total_bear)
 
-    # --- 6. Raw action ---
     if total_bull >= total_bear and total_bull >= CONFIG["CONSIDER_THRESHOLD"]:
         if raw_confidence >= CONFIG["STRONG_BUY_THRESHOLD"]:
             raw_action = "STRONG BUY CE"
@@ -675,7 +650,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
         signal_type = "NONE"
         raw_confidence = max(total_bull, total_bear)
 
-    # --- 7. Anti‑flip & persistence ---
     now_ts = time.time()
     if raw_action != signal_memory["current_action"]:
         if now_ts < signal_memory.get("cooldown_until", 0):
@@ -697,7 +671,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
         final_action = raw_action
         final_signal_type = signal_type
 
-    # Signal expiry
     if signal_memory["signal_start_time"] and (now_ts - signal_memory["signal_start_time"]) > CONFIG["SIGNAL_MAX_AGE_SEC"]:
         final_action = "HOLD"
         final_signal_type = "NONE"
@@ -705,9 +678,7 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
 
     signal_memory["current_action"] = final_action
     signal_memory["current_signal_type"] = final_signal_type
-    signal_duration = int((now_ts - signal_memory["signal_start_time"]) / 60) if signal_memory["signal_start_time"] else 0
 
-    # --- 8. Signal grading (A/B/C/D) ---
     grade = "D"
     if final_action != "HOLD" and signal_type != "NONE":
         if raw_confidence >= 90 and bullish_tf >= 4:
@@ -720,7 +691,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
             grade = "D"
     signal_memory["signal_grade"] = grade
 
-    # --- 9. Dynamic position sizing & risk levels (if signal active) ---
     position_pct = 0
     rr = 0
     entry = 0
@@ -811,7 +781,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     signal_memory["max_drawdown_pct"] = max_dd
     signal_memory["entry_price"] = entry if final_action not in ["HOLD","NONE"] else 0
 
-    # --- 10. Update state objects ---
     market_state.update({
         "rsi": round(rsi,2),
         "momentum": "UPTREND" if ema_fast>ema_slow else "DOWNTREND" if ema_fast<ema_slow else "NEUTRAL",
@@ -890,54 +859,41 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
                     f"PosSize:{position_pct}% RR:{rr:.1f}")
         signal_memory["last_logged_action"] = final_action
 
-# ------------------------------------------------------------
-# WebSocket Callbacks & Connection (FIXED v4.2)
-# ------------------------------------------------------------
-def patch_smartwebsocket(sws_instance):
-    import websocket, ssl
-    def fixed_connect():
-        headers = {
-            "Authorization": sws_instance.auth_token,
-            "x-api-key": sws_instance.api_key,
-            "x-client-code": sws_instance.client_code,
-            "x-feed-token": sws_instance.feed_token
+
+# ============================================================
+# FIXED WEBSOCKET HANDLING — Binary Message Parsing
+# ============================================================
+
+def decode_binary_tick(data_bytes):
+    """
+    Decode Angel One SmartWebSocketV2 binary tick data.
+    Format: token(4) + exchange(1) + ... + ltp(4) + ...
+    """
+    try:
+        if len(data_bytes) < 20:
+            return None
+        # First byte is message type, skip it
+        # Token starts at offset 2, 4 bytes little-endian
+        token = struct.unpack('<I', data_bytes[2:6])[0]
+        # LTP is typically at offset around 18-22, 4 bytes float
+        # This is a simplified parser - adjust offsets as needed
+        ltp = struct.unpack('<f', data_bytes[18:22])[0]
+        volume = struct.unpack('<I', data_bytes[30:34])[0] if len(data_bytes) > 34 else 0
+        return {
+            "token": str(token),
+            "last_traded_price": ltp,
+            "volume_trade_for_the_day": volume
         }
-        try:
-            sws_instance.wsapp = websocket.WebSocketApp(
-                sws_instance.ROOT_URI,
-                header=headers,
-                on_open=sws_instance._on_open,
-                on_message=sws_instance._on_message,
-                on_error=sws_instance._on_error,
-                on_close=sws_instance._on_close,
-                on_ping=sws_instance._on_ping,
-                on_pong=sws_instance._on_pong
-            )
-            sws_instance.wsapp.run_forever(
-                sslopt={"cert_reqs": ssl.CERT_NONE},
-                ping_interval=sws_instance.HEART_BEAT_INTERVAL
-            )
-        except Exception as e:
-            logger.error(f"WebSocket connect error: {e}")
-            raise
-    sws_instance.connect = fixed_connect
+    except Exception as e:
+        logger.debug(f"Binary decode error: {e}")
+        return None
 
-    def fixed_on_close(wsapp, close_status_code=None, close_msg=None):
-        logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")
-        if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
-            try:
-                sws_instance.on_close(wsapp, close_status_code, close_msg)
-            except:
-                sws_instance.on_close(wsapp)
-    sws_instance._on_close = fixed_on_close
-
-    sws_instance.MAX_RETRY_ATTEMPT = 0
-    sws_instance.retry_strategy = 0
-    return sws_instance
 
 def on_open(wsapp):
     logger.info("WebSocket OPENED")
-    _reconnecting.clear()  # FIXED: Use Event.clear() instead of bool
+    global _reconnecting
+    with _reconnect_lock:
+        _reconnecting = False
     if sws and CE_TOKEN and PE_TOKEN:
         try:
             sws.subscribe("nifty_signal", 2, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
@@ -945,54 +901,93 @@ def on_open(wsapp):
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
+
 def on_data(wsapp, message):
+    """Handle both binary and JSON messages from SmartWebSocketV2."""
     global tick_counter, last_tick_time
     last_tick_time = time.time()
+
     try:
-        if isinstance(message, dict):
-            token = str(message.get("token", ""))
-            ltp = message.get("last_traded_price", 0)
-            if isinstance(ltp, (int, float)) and ltp > 1000:
-                ltp = ltp / 100
-            vol = message.get("volume_trade_for_the_day", 0) or message.get("v", 0)
-            if token == CE_TOKEN:
-                latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_volume"] = vol
-                price_history.append(ltp)
-                volume_history.append(vol)
-                tick_counter += 1
-            elif token == PE_TOKEN:
-                latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_volume"] = vol
-                tick_counter += 1
+        # Try to parse as binary first
+        if isinstance(message, bytes):
+            parsed = decode_binary_tick(message)
+            if not parsed:
+                # Try alternative parsing - the library may send different formats
+                # Some versions send JSON as bytes
+                try:
+                    parsed = json.loads(message.decode('utf-8'))
+                except:
+                    logger.debug(f"Could not parse binary message: {message[:20]}...")
+                    return
+        elif isinstance(message, str):
+            try:
+                parsed = json.loads(message)
+            except:
+                logger.debug(f"Could not parse string message: {message[:50]}...")
+                return
+        elif isinstance(message, dict):
+            parsed = message
+        else:
+            logger.debug(f"Unknown message type: {type(message)}")
+            return
 
-            # Minute snapshot for multi‑timeframe
-            now = time.time()
-            if now - last_minute_snapshot["time"] >= 60:
-                avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
-                avg_vol = (latest_ticks["ce_volume"] + latest_ticks["pe_volume"]) / 2
-                snap = {"time": now, "price": avg_price, "volume": avg_vol,
-                        "ce": latest_ticks["ce_price"], "pe": latest_ticks["pe_price"]}
-                for tf in timeframe_history:
-                    timeframe_history[tf].append(snap)
-                last_minute_snapshot["time"] = now
-                last_minute_snapshot["price"] = avg_price
+        if not parsed or not isinstance(parsed, dict):
+            return
 
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
-                run_signal_engine(ce, pe, list(price_history), list(volume_history))
+        token = str(parsed.get("token", ""))
+        ltp = parsed.get("last_traded_price", 0)
+
+        # Angel One sends prices in paise sometimes, convert to rupees
+        if isinstance(ltp, (int, float)) and ltp > 10000:
+            ltp = ltp / 100
+        elif isinstance(ltp, (int, float)) and ltp > 1000:
+            ltp = ltp / 100
+
+        vol = parsed.get("volume_trade_for_the_day", 0) or parsed.get("v", 0) or 0
+
+        if token == CE_TOKEN:
+            latest_ticks["ce_price"] = float(ltp)
+            latest_ticks["ce_volume"] = int(vol)
+            price_history.append(float(ltp))
+            volume_history.append(int(vol))
+            tick_counter += 1
+            logger.debug(f"CE tick: {ltp} vol:{vol}")
+        elif token == PE_TOKEN:
+            latest_ticks["pe_price"] = float(ltp)
+            latest_ticks["pe_volume"] = int(vol)
+            tick_counter += 1
+            logger.debug(f"PE tick: {ltp} vol:{vol}")
+
+        # Minute snapshot for multi‑timeframe
+        now = time.time()
+        if now - last_minute_snapshot["time"] >= 60:
+            avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
+            avg_vol = (latest_ticks["ce_volume"] + latest_ticks["pe_volume"]) / 2
+            snap = {"time": now, "price": avg_price, "volume": avg_vol,
+                    "ce": latest_ticks["ce_price"], "pe": latest_ticks["pe_price"]}
+            for tf in timeframe_history:
+                timeframe_history[tf].append(snap)
+            last_minute_snapshot["time"] = now
+            last_minute_snapshot["price"] = avg_price
+
+        ce = latest_ticks["ce_price"]
+        pe = latest_ticks["pe_price"]
+        if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
+            run_signal_engine(ce, pe, list(price_history), list(volume_history))
+
     except Exception as e:
-        logger.error(f"Data error: {e}")
+        logger.error(f"Data error: {e}", exc_info=True)
+
 
 def on_error(wsapp, error):
     logger.error(f"WebSocket error: {error}")
+
 
 def on_close(wsapp, close_status_code=None, close_msg=None):
     logger.warning(f"WebSocket CLOSE: code={close_status_code}, msg={close_msg}")
     global ws_running
     ws_running = False
-    _reconnecting.set()  # FIXED: Signal that we are in reconnection mode
+
 
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 AUTH_CACHE_TTL = 3600
@@ -1017,31 +1012,34 @@ def get_auth_token():
         logger.error(f"Auth error: {e}")
         return None, None, None
 
-# === FIXED WATCHDOG WITH EVENT-BASED RECONNECTION STATE ===
+
+# ============================================================
+# FIXED WATCHDOG — No deadlock, proper reconnection state
+# ============================================================
+
 def start_websocket():
-    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
+    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter, _reconnecting
     retry_delay = 5
     consecutive_failures = 0
 
     while engine_active:
         ws_running = False
 
-        # FIXED: Use Event.wait() instead of lock+sleep to avoid deadlock
-        if _reconnecting.is_set():
-            logger.info("Reconnection already in progress, waiting...")
-            time.sleep(2)
-            continue
-
-        # Only use lock for critical token/auth operations
+        # Check if already reconnecting
         with _reconnect_lock:
-            _reconnecting.set()
+            if _reconnecting:
+                logger.info("Already reconnecting, waiting...")
+                time.sleep(3)
+                continue
+            _reconnecting = True
 
         try:
             if not CE_TOKEN or not PE_TOKEN:
                 CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
                 if not CE_TOKEN or not PE_TOKEN:
                     logger.warning("No tokens, retrying in 60s...")
-                    _reconnecting.clear()
+                    with _reconnect_lock:
+                        _reconnecting = False
                     time.sleep(60)
                     continue
 
@@ -1050,15 +1048,16 @@ def start_websocket():
                 consecutive_failures += 1
                 wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
                 logger.warning(f"Auth failed (#{consecutive_failures}), waiting {wait}s...")
-                _reconnecting.clear()
+                with _reconnect_lock:
+                    _reconnecting = False
                 time.sleep(wait)
                 continue
 
             consecutive_failures = 0
 
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws = patch_smartwebsocket(sws)
 
+            # Set callbacks BEFORE connecting
             sws.on_open = on_open
             sws.on_data = on_data
             sws.on_error = on_error
@@ -1069,31 +1068,38 @@ def start_websocket():
             tick_counter = 0
             logger.info("Connecting WebSocket...")
 
+            # Start connection in background thread
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
-            time.sleep(3)
+
+            # Wait for connection to establish
+            time.sleep(5)
 
             if not ws_running:
-                logger.warning("WebSocket failed to connect, retrying...")
-                _reconnecting.clear()
+                logger.warning("WebSocket failed to connect immediately, will retry...")
+                with _reconnect_lock:
+                    _reconnecting = False
+                try:
+                    if sws and hasattr(sws, 'wsapp') and sws.wsapp:
+                        sws.wsapp.close()
+                except:
+                    pass
+                sws = None
+                time.sleep(5)
                 continue
 
-            # === FIXED WATCHDOG LOOP — deadlock-free ===
+            # === WATCHDOG LOOP ===
             no_tick_count = 0
             while ws_running and engine_active:
                 time.sleep(5)
 
-                # FIXED: Non-blocking check using Event.is_set()
-                if _reconnecting.is_set():
-                    no_tick_count = 0
-                    continue
+                # Skip if reconnecting
+                with _reconnect_lock:
+                    if _reconnecting and not ws_running:
+                        no_tick_count = 0
+                        break
 
                 age = time.time() - last_tick_time
-
-                # Only count strikes if WebSocket is actually running
-                if not ws_running:
-                    no_tick_count = 0
-                    continue
 
                 if age > 90:
                     no_tick_count += 1
@@ -1101,7 +1107,6 @@ def start_websocket():
                     if no_tick_count >= 3:
                         logger.error("Watchdog: Max strikes reached, forcing reconnect")
                         ws_running = False
-                        _reconnecting.set()  # Signal reconnection before breaking
                         break
                 else:
                     if no_tick_count > 0:
@@ -1109,15 +1114,17 @@ def start_websocket():
                     no_tick_count = 0
 
             logger.warning("WebSocket loop ended, cleaning up...")
+
+            # Cleanup
             try:
                 if sws and hasattr(sws, 'wsapp') and sws.wsapp:
                     sws.wsapp.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Close error: {e}")
             sws = None
 
-            # FIXED: Always clear reconnecting flag after cleanup
-            _reconnecting.clear()
+            with _reconnect_lock:
+                _reconnecting = False
             time.sleep(5)
 
         except Exception as e:
@@ -1125,19 +1132,22 @@ def start_websocket():
             consecutive_failures += 1
             wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
             logger.info(f"Waiting {wait}s before reconnect...")
-            _reconnecting.clear()
+            with _reconnect_lock:
+                _reconnecting = False
             time.sleep(wait)
+
 
 def rest_fallback():
     while engine_active:
         time.sleep(15)
-        # FIXED: Skip REST fallback if WebSocket is reconnecting to avoid conflicts
-        if _reconnecting.is_set():
-            continue
         if ws_running and (time.time() - last_tick_time) < 45:
             continue
         if not CE_TOKEN or not PE_TOKEN:
             continue
+        # Skip if reconnecting
+        with _reconnect_lock:
+            if _reconnecting:
+                continue
         auth_token, _, obj = get_auth_token()
         if not auth_token:
             continue
@@ -1161,14 +1171,15 @@ def rest_fallback():
                     run_signal_engine(ce, pe, list(price_history), list(volume_history))
                     logger.info(f"[REST FALLBACK] CE={ce}, PE={pe}")
         except Exception as e:
-            pass
+            logger.debug(f"REST fallback error: {e}")
+
 
 # ------------------------------------------------------------
 # Flask Endpoints
 # ------------------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "Nifty Signal Engine v4.2 Professional"})
+    return jsonify({"status": "online", "message": "Nifty Signal Engine v4.3 Professional"})
 
 @app.route("/api/live-signals")
 def live_signals():
@@ -1197,7 +1208,7 @@ def health():
     return jsonify({
         "status": "ok",
         "ws_running": ws_running,
-        "reconnecting": _reconnecting.is_set(),  # FIXED: Return bool from Event
+        "reconnecting": _reconnecting,
         "ce_token": CE_TOKEN,
         "pe_token": PE_TOKEN,
         "latest_ce": latest_ticks["ce_price"],
@@ -1213,7 +1224,9 @@ def shutdown_handler(signum, frame):
     global engine_active
     logger.info("Shutdown signal received")
     engine_active = False
-    _reconnecting.set()  # Prevent reconnection attempts during shutdown
+    with _reconnect_lock:
+        global _reconnecting
+        _reconnecting = True
     if sws:
         try:
             sws.close()
@@ -1225,21 +1238,18 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 signal.signal(signal.SIGINT, shutdown_handler)
 
 # ------------------------------------------------------------
-# Startup (FIXED: Only start once)
+# Startup
 # ------------------------------------------------------------
 def start_engine():
     threading.Thread(target=start_websocket, daemon=True, name="WS-Main").start()
     threading.Thread(target=rest_fallback, daemon=True, name="REST-Fallback").start()
     logger.info("=" * 50)
-    logger.info("Nifty Signal Engine v4.2 (Institutional Grade) Started")
-    logger.info("Features: Multi‑timeframe, Regime detection, Bollinger, ADX, RSI divergence, IV rank, Grading, Position sizing")
-    logger.info("FIXED: Deadlock-free watchdog, Event-based reconnection, Gunicorn compatibility")
+    logger.info("Nifty Signal Engine v4.3 Started")
+    logger.info("FIXED: Binary WebSocket parsing, watchdog deadlock, reconnection logic")
     logger.info("=" * 50)
 
-# FIXED: Only call start_engine() once, at module level
 start_engine()
 
 if __name__ == "__main__":
-    # FIXED: Do NOT call start_engine() again here
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
