@@ -2207,9 +2207,7 @@ def patch_smartwebsocket(sws_instance):
         except Exception as e:
             logger.error(f"WebSocket connect error: {e}")
             raise
-    
-    sws_instance.connect = fixed_connect
-    
+        
         sws_instance.connect = fixed_connect
     
     def fixed_on_close(wsapp, close_status_code=None, close_msg=None):
@@ -2218,7 +2216,6 @@ def patch_smartwebsocket(sws_instance):
             try:
                 sws_instance.on_close(wsapp, close_status_code, close_msg)
             except TypeError:
-                # Fallback for older signature
                 try:
                     sws_instance.on_close(wsapp)
                 except:
@@ -2227,9 +2224,8 @@ def patch_smartwebsocket(sws_instance):
     sws_instance._on_close = fixed_on_close
     sws_instance.MAX_RETRY_ATTEMPT = 0
     sws_instance.retry_strategy = 0
-    sws_instance.HEART_BEAT_INTERVAL = 25  # Keep this
+    sws_instance.HEART_BEAT_INTERVAL = 25
     return sws_instance
-
 def on_open(wsapp):
     """WebSocket connection opened."""
     logger.info("WebSocket OPENED")
@@ -2469,16 +2465,8 @@ def start_websocket():
             _reconnecting = True
         
         try:
-            if not CE_TOKEN or not PE_TOKEN:
-                get_current_atm_tokens()
-                if not CE_TOKEN or not PE_TOKEN:
-                    logger.warning("No tokens, retrying in 60s...")
-                    with _reconnect_lock:
-                        _reconnecting = False
-                    time.sleep(60)
-                    continue
-            
-            auth_token, feed_token, obj = get_auth_token()
+
+                        auth_token, feed_token, obj = get_auth_token()
             if not auth_token:
                 consecutive_failures += 1
                 wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
@@ -2490,22 +2478,21 @@ def start_websocket():
             
             consecutive_failures = 0
 
-# BEFORE: sws = SmartWebSocketV2(...)
-# Add this cleanup block:
+            # BEFORE: sws = SmartWebSocketV2(...)
+            # Add this cleanup block:
 
-# Aggressive cleanup of any existing connection
-if sws is not None:
-    try:
-        if hasattr(sws, 'wsapp') and sws.wsapp:
-            sws.wsapp.close()
-            time.sleep(2)  # Wait for server to register disconnect
-    except Exception as e:
-        logger.debug(f"Cleanup error: {e}")
-    sws = None
+            # Aggressive cleanup of any existing connection
+            if sws is not None:
+                try:
+                    if hasattr(sws, 'wsapp') and sws.wsapp:
+                        sws.wsapp.close()
+                        time.sleep(2)
+                except Exception as e:
+                    logger.debug(f"Cleanup error: {e}")
+                sws = None
 
-# Force garbage collection to release socket
-import gc
-time.sleep(3)  # Critical: wait before new connection
+            import gc
+            time.sleep(3)
             
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws = patch_smartwebsocket(sws)
