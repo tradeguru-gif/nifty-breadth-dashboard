@@ -943,87 +943,127 @@ def on_open(wsapp):
 
 def on_data(wsapp, message):
     """Callback when a tick arrives."""
-    global tick_counter, last_tick_time, _last_ce_pe_zero_start
+    global tick_counter, last_tick_time, _last_ce_pe_zero_start, CE_TOKEN, PE_TOKEN
+
     last_tick_time = time.time()
+
     try:
         # message may be string or bytes; Angel One sends binary data (protobuf)
         # For simplicity, we rely on the library's parsing; it should call on_data with a dict.
-        # But we also log raw if needed.
         if isinstance(message, bytes):
-            # Try to decode as string (fallback)
             try:
                 msg_str = message.decode('utf-8', errors='ignore')
             except:
                 msg_str = str(message)
+
             logger.debug(f"Raw binary message length: {len(message)}")
-            # Not parsing binary directly; library's internal parser should have converted it.
             return
+
         if isinstance(message, str):
             try:
                 data = json.loads(message)
-            except:
+            except Exception:
                 logger.error(f"Failed to parse JSON: {message[:200]}")
                 return
         else:
             data = message
 
-        # Angel One tick structure may be a list or dict.
+        # Angel One tick structure may be list or dict
         ticks = data if isinstance(data, list) else [data]
 
         for tick in ticks:
             token = str(tick.get("tk") or tick.get("token") or "")
+
             if not token:
                 continue
+
             ltp = tick.get("ltp", 0)
+
             if isinstance(ltp, (int, float)) and ltp > 1000:
                 ltp = ltp / 100
+
             vol = tick.get("v", 0) or tick.get("volume", 0)
 
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_volume"] = vol
+
                 price_history.append(ltp)
                 volume_history.append(vol)
+
                 tick_counter += 1
+
                 logger.debug(f"CE TICK: {ltp} vol={vol}")
+
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_volume"] = vol
+
                 tick_counter += 1
+
                 logger.debug(f"PE TICK: {ltp} vol={vol}")
 
             # Minute snapshot
             now = time.time()
+
             if now - last_minute_snapshot["time"] >= 60:
-                avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
-                avg_vol = (latest_ticks["ce_volume"] + latest_ticks["pe_volume"]) / 2
-                snap = {"time": now, "price": avg_price, "volume": avg_vol,
-                        "ce": latest_ticks["ce_price"], "pe": latest_ticks["pe_price"]}
+                avg_price = (
+                    latest_ticks["ce_price"] +
+                    latest_ticks["pe_price"]
+                ) / 2
+
+                avg_vol = (
+                    latest_ticks["ce_volume"] +
+                    latest_ticks["pe_volume"]
+                ) / 2
+
+                snap = {
+                    "time": now,
+                    "price": avg_price,
+                    "volume": avg_vol,
+                    "ce": latest_ticks["ce_price"],
+                    "pe": latest_ticks["pe_price"]
+                }
+
                 for tf in timeframe_history:
                     timeframe_history[tf].append(snap)
+
                 last_minute_snapshot["time"] = now
                 last_minute_snapshot["price"] = avg_price
 
         # Run signal engine periodically
         ce = latest_ticks["ce_price"]
         pe = latest_ticks["pe_price"]
-        if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
-            run_signal_engine(ce, pe, list(price_history), list(volume_history))
 
-        # Check for zero prices to refresh tokens
+        if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
+            run_signal_engine(
+                ce,
+                pe,
+                list(price_history),
+                list(volume_history)
+            )
+
+        # Detect stale tokens
         if ce == 0 or pe == 0:
+
             if _last_ce_pe_zero_start is None:
                 _last_ce_pe_zero_start = time.time()
+
             elif time.time() - _last_ce_pe_zero_start > 300:
-                logger.warning("Both CE/PE prices zero for 5 minutes. Forcing token refresh.")
-                global CE_TOKEN, PE_TOKEN
-                CE_TOKEN, PE_TOKEN = None, None
+                logger.warning(
+                    "Both CE/PE prices zero for 5 minutes. Forcing token refresh."
+                )
+
+                CE_TOKEN = None
+                PE_TOKEN = None
+
                 _last_ce_pe_zero_start = None
+
         else:
             _last_ce_pe_zero_start = None
 
     except Exception as e:
-        logger.error(f"Data error: {e}")
+        logger.error(f"Data error: {e}", exc_info=True)
 
 def on_error(wsapp, error):
     logger.error(f"WebSocket error: {error}")
@@ -1194,7 +1234,7 @@ def start_websocket():
                 time.sleep(wait)
 
 def rest_fallback():
-    global CE_TOKEN, PE_TOKEN   # <--- MUST BE THE FIRST LINE
+    global CE_TOKEN, PE_TOKEN
     while engine_active:
         time.sleep(60)
 
@@ -1335,7 +1375,7 @@ def start_engine():
     logger.info("=" * 50)
     logger.info("Nifty Signal Engine v4.4 (Institutional Grade) Started")
     logger.info(f"Worker type: {'PRIMARY (WebSocket)' if _is_primary_worker else 'SECONDARY (REST-only)'}")
-    logger.info("FIXED: WebSocket exchangeType=5, mode=1, Thursday expiry rollover")
+    logger.info("FIXED: WebSocket exchangeType=2, mode=1, Thursday expiry rollover")
     logger.info("=" * 50)
 
 start_engine()
