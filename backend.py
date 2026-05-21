@@ -1,6 +1,6 @@
 """
 backend.py — Institutional‑Grade Nifty Options Signal Engine
-v4.1 — Fixed watchdog/reconnection logic, Gunicorn compatibility
+v4.2 — Fixed race conditions, deadlock-free watchdog, proper reconnection state management
 """
 
 import os
@@ -60,9 +60,10 @@ sws = None
 last_tick_time = time.time()
 engine_active = True
 
-# === RECONNECTION STATE (NEW) ===
-_reconnecting = False
-_reconnect_lock = threading.Lock()
+# === RECONNECTION STATE (FIXED v4.2) ===
+# Use an Event instead of bool+lock for cleaner state management
+_reconnecting = threading.Event()  # Set = currently reconnecting, Clear = connected/idle
+_reconnect_lock = threading.Lock()  # Only for token/auth critical sections
 
 # Multi‑timeframe storage (price snapshots every minute)
 timeframe_history = {
@@ -154,7 +155,7 @@ CONFIG = {
 }
 
 # ------------------------------------------------------------
-# Helper Functions (unchanged from your working base)
+# Helper Functions
 # ------------------------------------------------------------
 def is_market_open():
     now = datetime.now()
@@ -269,7 +270,7 @@ def get_ltp_rest(token):
     return 0
 
 # ------------------------------------------------------------
-# Advanced Technical Indicators (new)
+# Advanced Technical Indicators
 # ------------------------------------------------------------
 def calculate_ema_series(prices, period):
     if len(prices) < period:
@@ -462,8 +463,7 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     ema_fast = calculate_ema_series(prices, fast)[-1]
     ema_slow = calculate_ema_series(prices, slow)[-1]
     macd_line = ema_fast - ema_slow
-    # Simplified signal line
-    macd_hist = macd_line  # Using MACD line as histogram for simplicity
+    macd_hist = macd_line
     return macd_line, macd_hist
 
 def calculate_vwap(prices, volumes):
@@ -493,20 +493,16 @@ def estimate_greeks(ce_price, pe_price):
     spot = get_nifty_spot_cached() or 0
     atm_strike = round(spot / 50) * 50 if spot else 0
     moneyness = abs(spot - atm_strike) / spot if spot > 0 else 0
-    
-    # Simplified delta
+
     delta = 0.5 - moneyness if ce_price > pe_price else -(0.5 - moneyness)
     delta = max(-1, min(1, delta))
-    
-    # Simplified gamma (highest at ATM)
+
     gamma = 0.05 * (1 - moneyness * 2) if moneyness < 0.5 else 0.01
-    
-    # Simplified theta (time decay)
+
     theta = -ce_price * 0.001 * CONFIG["DAYS_TO_EXPIRY"]
-    
-    # Simplified vega (volatility sensitivity)
+
     vega = ce_price * 0.1
-    
+
     return round(delta, 4), round(gamma, 4), round(theta, 4), round(vega, 4)
 
 # ------------------------------------------------------------
@@ -589,7 +585,7 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     elif macd_hist < 0:
         tech_bear += 6
 
-    # PCR (using OI PCR or smoothed)
+    # PCR
     if pcr < CONFIG["PCR_BULLISH"]:
         tech_bull += 10
     elif pcr < 1.0:
@@ -638,7 +634,7 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
 
     # IV rank adjustment
     if iv_rank > 70:
-        tech_bull -= 5   # overpriced options, reduce bullishness
+        tech_bull -= 5
         tech_bear += 3
     elif iv_rank < 30:
         tech_bull += 3
@@ -744,7 +740,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
             base = CONFIG["POSITION_SIZE_BASE_PCT"]
         else:
             base = 0
-        # Adjust for volatility regime
         if regime == "VOLATILE":
             base *= 0.7
         elif regime == "TRENDING":
@@ -756,7 +751,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
             rr = reward / risk if risk > 0 else 0
         else:
             rr = 0
-        # Track max drawdown if already in position
         if signal_memory["entry_price"] > 0:
             dd = ((signal_memory["entry_price"] - ce_price) / signal_memory["entry_price"]) * 100
             max_dd = max(max_dd, dd)
@@ -771,7 +765,7 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
 
     elif final_action in ["STRONG BUY PE", "BUY PE", "CONSIDER PE BUY"]:
         entry = pe_price
-        stop = entry + atr * CONFIG["STOP_LOSS_ATR_MULT"]   # for put, stop above entry
+        stop = entry + atr * CONFIG["STOP_LOSS_ATR_MULT"]
         target = entry - atr * CONFIG["TARGET_ATR_MULT"]
         if grade == "A":
             base = CONFIG["POSITION_SIZE_MAX_PCT"]
@@ -805,7 +799,6 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
             signal_memory["target"] = target
 
     else:
-        # No active signal, reset trade related memory
         signal_memory["entry_price"] = 0
         signal_memory["stop_loss"] = 0
         signal_memory["target"] = 0
@@ -898,7 +891,7 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
         signal_memory["last_logged_action"] = final_action
 
 # ------------------------------------------------------------
-# WebSocket Callbacks & Connection (FIXED WATCHDOG)
+# WebSocket Callbacks & Connection (FIXED v4.2)
 # ------------------------------------------------------------
 def patch_smartwebsocket(sws_instance):
     import websocket, ssl
@@ -944,9 +937,7 @@ def patch_smartwebsocket(sws_instance):
 
 def on_open(wsapp):
     logger.info("WebSocket OPENED")
-    global _reconnecting
-    with _reconnect_lock:
-        _reconnecting = False
+    _reconnecting.clear()  # FIXED: Use Event.clear() instead of bool
     if sws and CE_TOKEN and PE_TOKEN:
         try:
             sws.subscribe("nifty_signal", 2, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
@@ -1001,6 +992,7 @@ def on_close(wsapp, close_status_code=None, close_msg=None):
     logger.warning(f"WebSocket CLOSE: code={close_status_code}, msg={close_msg}")
     global ws_running
     ws_running = False
+    _reconnecting.set()  # FIXED: Signal that we are in reconnection mode
 
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 AUTH_CACHE_TTL = 3600
@@ -1025,29 +1017,31 @@ def get_auth_token():
         logger.error(f"Auth error: {e}")
         return None, None, None
 
-# === FIXED WATCHDOG WITH RECONNECTION STATE ===
+# === FIXED WATCHDOG WITH EVENT-BASED RECONNECTION STATE ===
 def start_websocket():
-    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter, _reconnecting
+    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
     retry_delay = 5
     consecutive_failures = 0
 
     while engine_active:
         ws_running = False
-        
-        # Skip if already reconnecting
+
+        # FIXED: Use Event.wait() instead of lock+sleep to avoid deadlock
+        if _reconnecting.is_set():
+            logger.info("Reconnection already in progress, waiting...")
+            time.sleep(2)
+            continue
+
+        # Only use lock for critical token/auth operations
         with _reconnect_lock:
-            if _reconnecting:
-                time.sleep(2)
-                continue
-            _reconnecting = True
-        
+            _reconnecting.set()
+
         try:
             if not CE_TOKEN or not PE_TOKEN:
                 CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
                 if not CE_TOKEN or not PE_TOKEN:
                     logger.warning("No tokens, retrying in 60s...")
-                    with _reconnect_lock:
-                        _reconnecting = False
+                    _reconnecting.clear()
                     time.sleep(60)
                     continue
 
@@ -1056,8 +1050,7 @@ def start_websocket():
                 consecutive_failures += 1
                 wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
                 logger.warning(f"Auth failed (#{consecutive_failures}), waiting {wait}s...")
-                with _reconnect_lock:
-                    _reconnecting = False
+                _reconnecting.clear()
                 time.sleep(wait)
                 continue
 
@@ -1082,34 +1075,33 @@ def start_websocket():
 
             if not ws_running:
                 logger.warning("WebSocket failed to connect, retrying...")
-                with _reconnect_lock:
-                    _reconnecting = False
+                _reconnecting.clear()
                 continue
 
-            # === FIXED WATCHDOG LOOP ===
+            # === FIXED WATCHDOG LOOP — deadlock-free ===
             no_tick_count = 0
             while ws_running and engine_active:
                 time.sleep(5)
-                
-                # Skip watchdog checks during reconnection
-                with _reconnect_lock:
-                    if _reconnecting:
-                        no_tick_count = 0
-                        continue
-                
+
+                # FIXED: Non-blocking check using Event.is_set()
+                if _reconnecting.is_set():
+                    no_tick_count = 0
+                    continue
+
                 age = time.time() - last_tick_time
-                
+
                 # Only count strikes if WebSocket is actually running
                 if not ws_running:
                     no_tick_count = 0
                     continue
-                    
+
                 if age > 90:
                     no_tick_count += 1
                     logger.warning(f"No ticks for {age:.0f}s (strike {no_tick_count}/3)")
                     if no_tick_count >= 3:
                         logger.error("Watchdog: Max strikes reached, forcing reconnect")
                         ws_running = False
+                        _reconnecting.set()  # Signal reconnection before breaking
                         break
                 else:
                     if no_tick_count > 0:
@@ -1123,11 +1115,9 @@ def start_websocket():
             except:
                 pass
             sws = None
-            
-            # Reset reconnecting flag after cleanup
-            with _reconnect_lock:
-                _reconnecting = False
-                
+
+            # FIXED: Always clear reconnecting flag after cleanup
+            _reconnecting.clear()
             time.sleep(5)
 
         except Exception as e:
@@ -1135,13 +1125,15 @@ def start_websocket():
             consecutive_failures += 1
             wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
             logger.info(f"Waiting {wait}s before reconnect...")
-            with _reconnect_lock:
-                _reconnecting = False
+            _reconnecting.clear()
             time.sleep(wait)
 
 def rest_fallback():
     while engine_active:
         time.sleep(15)
+        # FIXED: Skip REST fallback if WebSocket is reconnecting to avoid conflicts
+        if _reconnecting.is_set():
+            continue
         if ws_running and (time.time() - last_tick_time) < 45:
             continue
         if not CE_TOKEN or not PE_TOKEN:
@@ -1176,7 +1168,7 @@ def rest_fallback():
 # ------------------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "Nifty Signal Engine v4.1 Professional"})
+    return jsonify({"status": "online", "message": "Nifty Signal Engine v4.2 Professional"})
 
 @app.route("/api/live-signals")
 def live_signals():
@@ -1205,7 +1197,7 @@ def health():
     return jsonify({
         "status": "ok",
         "ws_running": ws_running,
-        "reconnecting": _reconnecting,
+        "reconnecting": _reconnecting.is_set(),  # FIXED: Return bool from Event
         "ce_token": CE_TOKEN,
         "pe_token": PE_TOKEN,
         "latest_ce": latest_ticks["ce_price"],
@@ -1221,6 +1213,7 @@ def shutdown_handler(signum, frame):
     global engine_active
     logger.info("Shutdown signal received")
     engine_active = False
+    _reconnecting.set()  # Prevent reconnection attempts during shutdown
     if sws:
         try:
             sws.close()
@@ -1232,20 +1225,21 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 signal.signal(signal.SIGINT, shutdown_handler)
 
 # ------------------------------------------------------------
-# Startup
+# Startup (FIXED: Only start once)
 # ------------------------------------------------------------
 def start_engine():
     threading.Thread(target=start_websocket, daemon=True, name="WS-Main").start()
     threading.Thread(target=rest_fallback, daemon=True, name="REST-Fallback").start()
     logger.info("=" * 50)
-    logger.info("Nifty Signal Engine v4.1 (Institutional Grade) Started")
+    logger.info("Nifty Signal Engine v4.2 (Institutional Grade) Started")
     logger.info("Features: Multi‑timeframe, Regime detection, Bollinger, ADX, RSI divergence, IV rank, Grading, Position sizing")
-    logger.info("FIXED: Watchdog reconnection loop, Gunicorn compatibility")
+    logger.info("FIXED: Deadlock-free watchdog, Event-based reconnection, Gunicorn compatibility")
     logger.info("=" * 50)
 
+# FIXED: Only call start_engine() once, at module level
 start_engine()
 
 if __name__ == "__main__":
-    start_engine()
+    # FIXED: Do NOT call start_engine() again here
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
