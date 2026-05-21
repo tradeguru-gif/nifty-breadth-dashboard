@@ -1,6 +1,6 @@
 """
 backend.py — Institutional‑Grade Nifty Options Signal Engine v4.4
-FIXED: WebSocket subscription (exchangeType=5, mode=1), token refresh logic,
+FIXED: WebSocket subscription (exchangeType=2, mode=1), token refresh logic,
        Thursday expiry rollover, debug endpoints, robust tick reception.
 """
 
@@ -935,9 +935,9 @@ def on_open(wsapp):
         _reconnecting = False
     if sws and CE_TOKEN and PE_TOKEN:
         try:
-            # mode=1 (ticker), exchangeType=5 (NFO)
-            sws.subscribe("nifty_signal", 1, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
-            logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN} (exchange=5, mode=1)")
+            # FIXED: exchangeType=2 (NFO), mode=1 (ticker)
+            sws.subscribe("nifty_signal", 1, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
+            logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN} (exchange=2, mode=1)")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
@@ -1233,6 +1233,9 @@ def start_websocket():
                     _reconnecting = False
                 time.sleep(wait)
 
+# ============================================================
+# FIXED: rest_fallback – global declaration at the top
+# ============================================================
 def rest_fallback():
     global CE_TOKEN, PE_TOKEN
     while engine_active:
@@ -1282,6 +1285,7 @@ def rest_fallback():
 
         except Exception as e:
             logger.error(f"REST fallback error: {e}")
+
 # ------------------------------------------------------------
 # Flask Endpoints
 # ------------------------------------------------------------
