@@ -26,8 +26,8 @@ import pandas as pd
 import pyotp
 from flask import Flask, jsonify
 from flask_cors import CORS
-from SmartApi import SmartConnect
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+from libs.SmartApi import SmartConnect
+from libs.SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ------------------------------------------------------------
 # Logging
