@@ -1,7 +1,7 @@
 """
-backend.py — Institutional‑Grade Nifty Options Signal Engine
-v4.3 — FIXED: Gunicorn multi-worker WebSocket collision, 429 rate limiting, 
-              market-hours gate, REST fallback, signal generation
+backend.py — Institutional‑Grade Nifty Options Signal Engine v4.4
+FIXED: WebSocket subscription (exchangeType=5, mode=1), token refresh logic,
+       Thursday expiry rollover, debug endpoints, robust tick reception.
 """
 
 import os
@@ -14,7 +14,7 @@ import threading
 import signal
 import math
 import statistics
-import fcntl  # NEW: File locking for Gunicorn worker coordination
+import fcntl
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -48,7 +48,7 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
     raise ValueError("Missing Angel One credentials")
 
 # ------------------------------------------------------------
-# Global State (shared across threads, NOT across Gunicorn workers)
+# Global State
 # ------------------------------------------------------------
 spot_cache = {"value": None, "timestamp": 0}
 CE_TOKEN = None
@@ -61,32 +61,14 @@ ws_running = False
 sws = None
 last_tick_time = time.time()
 engine_active = True
+_last_ce_pe_zero_start = None   # for detecting stale tokens
 
-# === WORKER COORDINATION (NEW) ===
-# Gunicorn runs multiple workers; each imports this module.
-# We use a file lock so only ONE worker starts the WebSocket.
+# Gunicorn worker coordination
 _LOCK_FILE = "/tmp/nifty_signal_engine.lock"
 _is_primary_worker = False
 _worker_lock_fd = None
 
-def _acquire_primary_lock():
-    """Try to become the primary worker (the one that runs WebSocket)."""
-    global _is_primary_worker, _worker_lock_fd
-    try:
-        fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_RDWR)
-        # Non-blocking exclusive lock
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _worker_lock_fd = fd
-        _is_primary_worker = True
-        logger.info("[WORKER] Acquired primary lock — this worker will run WebSocket")
-        return True
-    except (IOError, OSError):
-        # Another worker holds the lock
-        logger.info("[WORKER] Primary lock held by another worker — this worker runs REST-only")
-        _is_primary_worker = False
-        return False
-
-# === RECONNECTION STATE ===
+# Reconnection state
 _reconnecting = False
 _reconnect_lock = threading.Lock()
 _last_429_time = 0
@@ -120,7 +102,6 @@ signal_memory = {
     "max_drawdown_pct": 0.0
 }
 
-# State objects
 market_signal = {
     "signal": "WAITING", "ce_price": 0.0, "pe_price": 0.0, "spread": 0.0,
     "rsi": 50, "macd": 0.0, "pcr": 1.0, "vwap": 0.0, "atr": 0.0,
@@ -186,7 +167,8 @@ def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    if now.weekday() == 3 and now.hour >= 15 and now.minute >= 30:
+    # On Thursday, disable last 30 minutes (avoid expiry chaos)
+    if now.weekday() == 3 and now.hour == 15 and now.minute >= 30:
         return False
     start = datetime.strptime("09:15", "%H:%M").time()
     end = datetime.strptime("15:30", "%H:%M").time()
@@ -219,12 +201,15 @@ def get_nifty_spot_cached():
     return spot
 
 def get_current_atm_tokens():
+    """Return (ce_token, pe_token) for the most liquid ATM strike (nearest expiry)."""
     spot = get_nifty_spot_cached()
     if not spot:
         logger.error("Cannot get ATM tokens: spot price unavailable")
         return None, None
+
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike} (spot={spot})")
+
     try:
         url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
         resp = requests.get(url, timeout=30)
@@ -242,9 +227,10 @@ def get_current_atm_tokens():
     if nifty_opts.empty:
         nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
     if nifty_opts.empty:
-        logger.error("No NIFTY options found in instrument master")
+        logger.error("No NIFTY options found")
         return None, None
 
+    # Parse expiry dates
     for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
         if nifty_opts["expiry_date"].notna().sum() > 0:
@@ -254,30 +240,39 @@ def get_current_atm_tokens():
     nifty_opts = nifty_opts.dropna(subset=["strike"])
 
     today = datetime.now()
-    future = nifty_opts[nifty_opts["expiry_date"] > today]
-    if future.empty:
-        logger.error("No future expiry dates found")
+    # Determine which expiry to use: if Thursday after 3:30 PM, skip to next week
+    if today.weekday() == 3 and today.hour >= 15 and today.minute >= 30:
+        # Use expiry after today (next week)
+        future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
+    else:
+        # Use the first expiry after today (nearest)
+        future_expiries = nifty_opts[nifty_opts["expiry_date"] >= today]
+    if future_expiries.empty:
+        logger.error("No future expiry found")
         return None, None
-    nearest = future["expiry_date"].min()
-    logger.info(f"Nearest expiry: {nearest}")
-    atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest)]
+    nearest_expiry = future_expiries["expiry_date"].min()
+    logger.info(f"Using expiry: {nearest_expiry.date()}")
+
+    atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
     if atm_opts.empty:
-        strikes = sorted(nifty_opts[nifty_opts["expiry_date"] == nearest]["strike"].unique())
+        strikes = sorted(nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]["strike"].unique())
         nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
-        logger.info(f"Adjusted strike: {nearest_strike}")
-        atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest)]
+        logger.info(f"ATM strike not found, using nearest: {nearest_strike}")
+        atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+
     ce = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
     pe = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
     if ce.empty or pe.empty:
-        logger.error(f"CE or PE empty. CE={len(ce)}, PE={len(pe)}")
+        logger.error(f"CE/PE not found. CE count={len(ce)}, PE count={len(pe)}")
         return None, None
+
     ce_token = str(ce.iloc[0]["token"])
     pe_token = str(pe.iloc[0]["token"])
     logger.info(f"Tokens resolved: CE={ce_token}, PE={pe_token}")
     return ce_token, pe_token
 
 # ------------------------------------------------------------
-# Technical Indicators
+# Technical Indicators (unchanged)
 # ------------------------------------------------------------
 def calculate_ema_series(prices, period):
     if len(prices) < period:
@@ -364,9 +359,6 @@ def get_session_phase():
     else:
         return "POST_MARKET"
 
-# ------------------------------------------------------------
-# Multi‑timeframe Trend Analysis
-# ------------------------------------------------------------
 def analyze_timeframe_trend(history):
     n = len(history)
     if n < 2:
@@ -392,9 +384,6 @@ def get_all_timeframe_trends():
                  "strength": round(analyze_timeframe_trend(list(hist))[1],2)}
             for tf, hist in timeframe_history.items()}
 
-# ------------------------------------------------------------
-# PCR with fallback and smoothing
-# ------------------------------------------------------------
 pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
 pcr_history = deque(maxlen=5)
 
@@ -459,7 +448,7 @@ def calculate_pcr_ema():
     return ema
 
 # ------------------------------------------------------------
-# Core Technical Calculations
+# Core Calculations
 # ------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -519,13 +508,9 @@ def estimate_greeks(ce_price, pe_price):
     vega = ce_price * 0.1
     return round(delta, 4), round(gamma, 4), round(theta, 4), round(vega, 4)
 
-# ------------------------------------------------------------
-# Core Professional Signal Engine
-# ------------------------------------------------------------
 def run_signal_engine(ce_price, pe_price, price_list, vol_list):
     global market_signal, market_state, institutional_state, signal_memory
     if len(price_list) < 30:
-        logger.debug(f"Signal engine waiting for data: {len(price_list)}/30 points")
         return
 
     spread = ce_price - pe_price
@@ -887,6 +872,20 @@ def run_signal_engine(ce_price, pe_price, price_list, vol_list):
 # ------------------------------------------------------------
 # WebSocket Callbacks & Connection
 # ------------------------------------------------------------
+def _acquire_primary_lock():
+    global _is_primary_worker, _worker_lock_fd
+    try:
+        fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _worker_lock_fd = fd
+        _is_primary_worker = True
+        logger.info("[WORKER] Acquired primary lock — this worker runs WebSocket")
+        return True
+    except (IOError, OSError):
+        logger.info("[WORKER] Primary lock held by another worker — REST-only mode")
+        _is_primary_worker = False
+        return False
+
 def patch_smartwebsocket(sws_instance):
     import websocket, ssl
     def fixed_connect():
@@ -901,7 +900,7 @@ def patch_smartwebsocket(sws_instance):
                 sws_instance.ROOT_URI,
                 header=headers,
                 on_open=sws_instance._on_open,
-                on_message=sws_instance._on_message,
+                on_message=sws_instance._on_message,  # <-- will call our on_data
                 on_error=sws_instance._on_error,
                 on_close=sws_instance._on_close,
                 on_ping=sws_instance._on_ping,
@@ -936,32 +935,64 @@ def on_open(wsapp):
         _reconnecting = False
     if sws and CE_TOKEN and PE_TOKEN:
         try:
-            sws.subscribe("nifty_signal", 2, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
-            logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}")
+            # mode=1 (ticker), exchangeType=5 (NFO)
+            sws.subscribe("nifty_signal", 1, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
+            logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN} (exchange=5, mode=1)")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
 def on_data(wsapp, message):
-    global tick_counter, last_tick_time
+    """Callback when a tick arrives."""
+    global tick_counter, last_tick_time, _last_ce_pe_zero_start
     last_tick_time = time.time()
     try:
-        if isinstance(message, dict):
-            token = str(message.get("token", ""))
-            ltp = message.get("last_traded_price", 0)
+        # message may be string or bytes; Angel One sends binary data (protobuf)
+        # For simplicity, we rely on the library's parsing; it should call on_data with a dict.
+        # But we also log raw if needed.
+        if isinstance(message, bytes):
+            # Try to decode as string (fallback)
+            try:
+                msg_str = message.decode('utf-8', errors='ignore')
+            except:
+                msg_str = str(message)
+            logger.debug(f"Raw binary message length: {len(message)}")
+            # Not parsing binary directly; library's internal parser should have converted it.
+            return
+        if isinstance(message, str):
+            try:
+                data = json.loads(message)
+            except:
+                logger.error(f"Failed to parse JSON: {message[:200]}")
+                return
+        else:
+            data = message
+
+        # Angel One tick structure may be a list or dict.
+        ticks = data if isinstance(data, list) else [data]
+
+        for tick in ticks:
+            token = str(tick.get("tk") or tick.get("token") or "")
+            if not token:
+                continue
+            ltp = tick.get("ltp", 0)
             if isinstance(ltp, (int, float)) and ltp > 1000:
                 ltp = ltp / 100
-            vol = message.get("volume_trade_for_the_day", 0) or message.get("v", 0)
+            vol = tick.get("v", 0) or tick.get("volume", 0)
+
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_volume"] = vol
                 price_history.append(ltp)
                 volume_history.append(vol)
                 tick_counter += 1
+                logger.debug(f"CE TICK: {ltp} vol={vol}")
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_volume"] = vol
                 tick_counter += 1
+                logger.debug(f"PE TICK: {ltp} vol={vol}")
 
+            # Minute snapshot
             now = time.time()
             if now - last_minute_snapshot["time"] >= 60:
                 avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
@@ -973,10 +1004,24 @@ def on_data(wsapp, message):
                 last_minute_snapshot["time"] = now
                 last_minute_snapshot["price"] = avg_price
 
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
-                run_signal_engine(ce, pe, list(price_history), list(volume_history))
+        # Run signal engine periodically
+        ce = latest_ticks["ce_price"]
+        pe = latest_ticks["pe_price"]
+        if ce > 0 and pe > 0 and len(price_history) >= 30 and tick_counter % 5 == 0:
+            run_signal_engine(ce, pe, list(price_history), list(volume_history))
+
+        # Check for zero prices to refresh tokens
+        if ce == 0 or pe == 0:
+            if _last_ce_pe_zero_start is None:
+                _last_ce_pe_zero_start = time.time()
+            elif time.time() - _last_ce_pe_zero_start > 300:
+                logger.warning("Both CE/PE prices zero for 5 minutes. Forcing token refresh.")
+                global CE_TOKEN, PE_TOKEN
+                CE_TOKEN, PE_TOKEN = None, None
+                _last_ce_pe_zero_start = None
+        else:
+            _last_ce_pe_zero_start = None
+
     except Exception as e:
         logger.error(f"Data error: {e}")
 
@@ -1011,11 +1056,9 @@ def get_auth_token():
         logger.error(f"Auth error: {e}")
         return None, None, None
 
-# === FIXED START_WEBSOCKET WITH WORKER COORDINATION ===
 def start_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter, _reconnecting, _last_429_time
 
-    # === NEW: Only primary worker runs WebSocket ===
     if not _is_primary_worker:
         logger.info("[WORKER] Not primary — WebSocket thread exiting")
         return
@@ -1026,7 +1069,6 @@ def start_websocket():
     while engine_active:
         ws_running = False
 
-        # Market hours gate
         if not is_market_open():
             logger.info("Market closed. Sleeping 5 minutes...")
             CE_TOKEN = None
@@ -1034,7 +1076,6 @@ def start_websocket():
             time.sleep(300)
             continue
 
-        # 429 cooldown
         now = time.time()
         if now - _last_429_time < 300:
             remaining = int(300 - (now - _last_429_time))
@@ -1094,7 +1135,6 @@ def start_websocket():
                 time.sleep(10)
                 continue
 
-            # Watchdog loop
             no_tick_count = 0
             while ws_running and engine_active:
                 time.sleep(5)
@@ -1105,7 +1145,6 @@ def start_websocket():
                         continue
 
                 age = time.time() - last_tick_time
-
                 if not ws_running:
                     no_tick_count = 0
                     continue
@@ -1154,7 +1193,6 @@ def start_websocket():
                     _reconnecting = False
                 time.sleep(wait)
 
-# === FIXED REST FALLBACK (runs on ALL workers, but only fetches data) ===
 def rest_fallback():
     global CE_TOKEN, PE_TOKEN
     while engine_active:
@@ -1163,7 +1201,6 @@ def rest_fallback():
         if not is_market_open():
             continue
 
-        # If WebSocket is healthy, skip REST
         if ws_running and (time.time() - last_tick_time) < 45:
             continue
 
@@ -1213,7 +1250,7 @@ def rest_fallback():
 def home():
     return jsonify({
         "status": "online", 
-        "message": "Nifty Signal Engine v4.3 Professional",
+        "message": "Nifty Signal Engine v4.4 Professional",
         "worker_type": "PRIMARY (WebSocket)" if _is_primary_worker else "SECONDARY (REST-only)",
         "market_open": is_market_open()
     })
@@ -1256,6 +1293,22 @@ def health():
         "timestamp": datetime.now().isoformat()
     })
 
+@app.route("/api/debug/tokens")
+def debug_tokens():
+    """Check current token LTP via REST."""
+    auth_token, _, obj = get_auth_token()
+    if not obj:
+        return jsonify({"error": "Auth failed"}), 500
+    ce_ltp = obj.ltpData("NFO", "NIFTY", CE_TOKEN) if CE_TOKEN else None
+    pe_ltp = obj.ltpData("NFO", "NIFTY", PE_TOKEN) if PE_TOKEN else None
+    return jsonify({
+        "CE_TOKEN": CE_TOKEN,
+        "PE_TOKEN": PE_TOKEN,
+        "CE_LTP": ce_ltp,
+        "PE_LTP": pe_ltp,
+        "timestamp": datetime.now().isoformat()
+    })
+
 # ------------------------------------------------------------
 # Graceful shutdown
 # ------------------------------------------------------------
@@ -1274,21 +1327,16 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 signal.signal(signal.SIGINT, shutdown_handler)
 
 # ------------------------------------------------------------
-# Startup — FIXED: Worker coordination
+# Startup
 # ------------------------------------------------------------
 def start_engine():
-    # === NEW: Acquire lock BEFORE starting threads ===
     _acquire_primary_lock()
-
-    # Primary worker runs WebSocket + REST fallback
-    # Secondary workers run REST fallback only (as backup data source)
     threading.Thread(target=start_websocket, daemon=True, name="WS-Main").start()
     threading.Thread(target=rest_fallback, daemon=True, name="REST-Fallback").start()
-
     logger.info("=" * 50)
-    logger.info("Nifty Signal Engine v4.3 (Institutional Grade) Started")
+    logger.info("Nifty Signal Engine v4.4 (Institutional Grade) Started")
     logger.info(f"Worker type: {'PRIMARY (WebSocket)' if _is_primary_worker else 'SECONDARY (REST-only)'}")
-    logger.info("FIXED: Gunicorn multi-worker collision, 429 rate limiting, market-hours gate")
+    logger.info("FIXED: WebSocket exchangeType=5, mode=1, Thursday expiry rollover")
     logger.info("=" * 50)
 
 start_engine()
