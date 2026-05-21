@@ -947,20 +947,12 @@ def get_auth_token():
         logger.error(f"Auth error: {e}")
         return None, None, None
 
-  def start_websocket():
+def start_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
     retry_delay = 5
     consecutive_failures = 0
 
     while engine_active:
-        # ----------------------------------------------------
-        # ADD THIS MARKET‑OPEN CHECK FIRST
-        # ----------------------------------------------------
-        if not is_market_open():
-            logger.info("Markets closed. Sleeping 5 minutes before checking again.")
-            time.sleep(300)   # 5 minutes
-            continue
-        # ----------------------------------------------------
         ws_running = False
         try:
             if not CE_TOKEN or not PE_TOKEN:
@@ -969,13 +961,6 @@ def get_auth_token():
                     logger.warning("No tokens, retrying in 60s...")
                     time.sleep(60)
                     continue
-            # ... rest of your existing connection logic ...
-        except Exception as e:
-            # ... error handling (including 429 special case)
-    # --------------------
-    ws_running = False
-    try:
-        # ... rest of your existing code ...
 
             auth_token, feed_token, obj = get_auth_token()
             if not auth_token:
@@ -1034,18 +1019,12 @@ def get_auth_token():
             sws = None
             time.sleep(5)
 
-       except Exception as e:
-    logger.error(f"WebSocket fatal error: {e}", exc_info=True)
-    # ----- ADD THIS -----
-    if '429' in str(e) or 'Connection Limit Exceeded' in str(e):
-        logger.error("Rate limit hit (429). Waiting 5 minutes before retry.")
-        time.sleep(300)
-    else:
-        consecutive_failures += 1
-        wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
-        logger.info(f"Waiting {wait}s before reconnect...")
-        time.sleep(wait)
-    # --------------------
+        except Exception as e:
+            logger.error(f"WebSocket fatal error: {e}", exc_info=True)
+            consecutive_failures += 1
+            wait = min(retry_delay * (2 ** min(consecutive_failures, 6)), 300)
+            logger.info(f"Waiting {wait}s before reconnect...")
+            time.sleep(wait)
 
 def rest_fallback():
     while engine_active:
