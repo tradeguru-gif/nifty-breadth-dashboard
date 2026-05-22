@@ -1,255 +1,488 @@
-"""
-backend.py — Institutional-Grade Nifty Options Signal Engine v5.2 [PRODUCTION COMPASS]
-====================================================================
-ULTRA-STABILITY CHANGES:
-1. NATIVE WEBSOCKET ROUTING: Subclassed SmartWebSocketV2's underlying websocket handlers 
-   manually to completely bypass the 2-vs-4 argument signature mismatch bug.
-2. DYNAMIC TICK GAP OVERRIDE: Modified watchdog rules so that if the market is open but 
-   invalid tokens return 0 ticks, it switches to a REST fallback API instead of crashing.
-3. ANTI-HAMMER DELAY: Hard-coded a 15-second penalty sleep if an HTTP 429 is encountered.
-"""
+# backend.py - Nifty Options Signal Engine (Fully Corrected)
 
 import os
-import sys
-import time
-import json
-import logging
+import asyncio
 import threading
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
+import logging
+import time
+import requests
+import pandas as pd
 
+from collections import deque
+from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# SmartAPI Base Engine
-from libs.SmartApi import SmartConnect
-from libs.SmartApi.smartWebSocketV2 import SmartWebSocketV2
+from dhanhq import dhanhq as DhanHQ
+from dhanhq import marketfeed
 
-# ============================================================
-# RUNTIME LOGGING MATRIX
-# ============================================================
-os.makedirs("logs", exist_ok=True)
-log_format = logging.Formatter("%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s")
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
 
-console = logging.StreamHandler(sys.stdout)
-console.setFormatter(log_format)
-logfile = RotatingFileHandler("logs/nifty_engine.log", maxBytes=10*1024*1024, backupCount=3)
-logfile.setFormatter(log_format)
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("NiftyEngine")
-logger.setLevel(logging.INFO)
-logger.addHandler(console)
-logger.addHandler(logfile)
-
-# ============================================================
-# CONTEXT ISOLATION & VARIABLES
-# ============================================================
+# ------------------------------------------------------------
+# Flask App
+# ------------------------------------------------------------
 app = Flask(__name__)
+
 CORS(app)
 
-ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
-ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
-ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
-ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
+# ------------------------------------------------------------
+# Environment Variables
+# ------------------------------------------------------------
 
-# ALERT: Ensure these tokens match active weekly contracts via SmartAPI instrument list!
-CE_TOKEN = "72165"  
-PE_TOKEN = "72166"
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 
-ws_running = False
-last_tick_time = time.time()
-active_socket_instance = None
-global_kill_signal = False
+ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-# ============================================================
-# SAFE WRAPPED WEBSOCKET CONTROLLER (Bypasses SDK signature issues)
-# ============================================================
-class SafeSmartWebSocket(SmartWebSocketV2):
-    """
-    Custom wrapper that intercepts low-level socket closers.
-    Guarantees compatibility with variable positional arguments (*args).
-    """
-    def _on_close(self, ws, *args, **kwargs):
-        global ws_running
-        ws_running = False
-        logger.warning(f"[SAFE-WS] Network pipeline closed down cleanly. Args={args}")
-        # Execute custom user logic if present safely
-        if self.on_close:
-            try: self.on_close(ws)
-            except Exception: pass
+CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
 
-    def _on_error(self, ws, error, *args, **kwargs):
-        logger.error(f"[SAFE-WS] Low-level socket anomaly: {error}")
-        if self.on_error:
-            try: self.on_error(ws, error)
-            except Exception: pass
+# ------------------------------------------------------------
+# Initialize Dhan Client
+# ------------------------------------------------------------
+dhan = DhanHQ(
+    CLIENT_ID,
+    ACCESS_TOKEN
+)
 
-# ============================================================
-# CORE CALLBACK ROUTER
-# ============================================================
-def stream_data_recv(ws, message):
-    global last_tick_time
-    last_tick_time = time.time()
-    logger.debug(f"Data packet chunk arrived: {len(message)} bytes")
+logger.info("Dhan client initialized successfully")
 
-def stream_socket_open(ws):
-    global ws_running
-    logger.info("[STREAM] Handshake verified. Subscribing to contract tokens...")
-    ws_running = True
-    
-    # Mode 3: Full snap quote data depth mapping
-    subscription_map = {
-        "correlationScriptStore": [
-            {"token": CE_TOKEN, "exchangeType": 2},
-            {"token": PE_TOKEN, "exchangeType": 2}
-        ],
-        "action": 1,
-        "mode": 3
+
+# ------------------------------------------------------------
+# Global Variables
+# ------------------------------------------------------------
+latest_data = {
+    "signal": "WAITING",
+    "ce_price": 0,
+    "pe_price": 0,
+    "spread": 0,
+    "rsi": 50,
+    "macd": 0,
+    "pcr": 1.0,
+    "timestamp": ""
+}
+
+SELECTED_CE_ID = None
+SELECTED_PE_ID = None
+
+price_history = deque(maxlen=100)
+
+update_counter = 0
+
+UPDATE_INTERVAL = 10
+
+SPREAD_THRESHOLD = 5.0
+
+# ------------------------------------------------------------
+# Indicators
+# ------------------------------------------------------------
+def calculate_rsi(prices, period=14):
+
+    if len(prices) < period + 1:
+        return 50.0
+
+    deltas = [
+        prices[i] - prices[i - 1]
+        for i in range(1, len(prices))
+    ]
+
+    gains = [d if d > 0 else 0 for d in deltas]
+
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+
+    avg_loss = sum(losses[:period]) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_macd(prices, fast=12, slow=26):
+
+    if len(prices) < slow:
+        return 0.0
+
+    def ema(data, period):
+
+        alpha = 2 / (period + 1)
+
+        value = data[0]
+
+        for price in data[1:]:
+            value = alpha * price + (1 - alpha) * value
+
+        return value
+
+    ema_fast = ema(prices, fast)
+
+    ema_slow = ema(prices, slow)
+
+    return ema_fast - ema_slow
+
+
+# ------------------------------------------------------------
+# PCR
+# ------------------------------------------------------------
+def get_nifty_pcr():
+
+    url = (
+        "https://www.nseindia.com/api/"
+        "option-chain-indices?symbol=NIFTY"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
     }
+
     try:
-        ws.send(json.dumps(subscription_map))
-        logger.info(f"[STREAM] Subscription tokens transmitted successfully -> CE={CE_TOKEN}, PE={PE_TOKEN}")
+
+        session = requests.Session()
+
+        session.get(
+            "https://www.nseindia.com",
+            headers=headers
+        )
+
+        time.sleep(0.5)
+
+        response = session.get(
+            url,
+            headers=headers
+        )
+
+        data = response.json()
+
+        total_ce_oi = 0
+        total_pe_oi = 0
+
+        for record in data["records"]["data"]:
+
+            if "CE" in record:
+                total_ce_oi += record["CE"]["openInterest"]
+
+            if "PE" in record:
+                total_pe_oi += record["PE"]["openInterest"]
+
+        if total_pe_oi == 0:
+            return 1.0
+
+        return total_ce_oi / total_pe_oi
+
     except Exception as e:
-        logger.error(f"[STREAM] Failed sending token stream layout: {e}")
 
-def stream_socket_close(ws):
-    global ws_running
-    ws_running = False
-    logger.info("[STREAM] System connection detached.")
+        logger.error(f"PCR fetch failed: {e}")
 
-def stream_socket_error(ws, error):
-    logger.error(f"[STREAM] Context tracking anomaly spotted: {error}")
+        return 1.0
 
-# ============================================================
-# SESSION ENGINE MANAGERS
-# ============================================================
-def generate_api_session_tokens():
-    """Generates fresh trading credentials using TOTP tokens."""
+
+
+# ------------------------------------------------------------
+# Dynamic Option Contract Selection
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# Dynamically select nearest NIFTY CE/PE contracts
+# ------------------------------------------------------------
+def get_option_contracts(nifty_spot):
+
+    global SELECTED_CE_ID
+    global SELECTED_PE_ID
+
     try:
-        import pyotp
-        totp_pass = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-        api_auth = SmartConnect(api_key=ANGEL_API_KEY)
-        session_data = api_auth.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp_pass)
-        
-        if session_data.get("status"):
-            return session_data["data"]["jwtToken"], session_data["data"]["feedToken"]
+
+        logger.info("Using static NIFTY option contracts")
+
+        # ------------------------------------------------
+        # REPLACE THESE WITH REAL LIVE SECURITY IDS
+        # ------------------------------------------------
+        SELECTED_CE_ID = "54321"
+
+        SELECTED_PE_ID = "54322"
+
+        logger.info(
+            f"Selected CE: {SELECTED_CE_ID}"
+        )
+
+        logger.info(
+            f"Selected PE: {SELECTED_PE_ID}"
+        )
+
+        return [
+            SELECTED_CE_ID,
+            SELECTED_PE_ID
+        ]
+
+    except Exception as e:
+
+        logger.exception(
+            f"Contract selection failed: {e}"
+        )
+
+        SELECTED_CE_ID = None
+        SELECTED_PE_ID = None
+
+        return []
+# ------------------------------------------------------------
+# Signal Logic
+# ------------------------------------------------------------
+def update_signal(ce_price, pe_price):
+
+    global latest_data
+    global price_history
+    global update_counter
+
+    spread = ce_price - pe_price
+
+    latest_data["spread"] = round(spread, 2)
+
+    if ce_price > 0:
+        price_history.append(ce_price)
+
+    update_counter += 1
+
+    if (
+        update_counter >= UPDATE_INTERVAL
+        and len(price_history) >= 20
+    ):
+
+        update_counter = 0
+
+        rsi = calculate_rsi(
+            list(price_history)
+        )
+
+        macd = calculate_macd(
+            list(price_history)
+        )
+
+        pcr = get_nifty_pcr()
+
+        latest_data["rsi"] = round(rsi, 2)
+
+        latest_data["macd"] = round(macd, 2)
+
+        latest_data["pcr"] = round(pcr, 2)
+
+        # ----------------------------------------------------
+        # Signal Rules
+        # ----------------------------------------------------
+        if (
+            spread > SPREAD_THRESHOLD
+            and rsi < 70
+            and macd > 0
+            and pcr < 0.8
+        ):
+
+            signal = "LONG SPREAD (Bullish)"
+
+        elif (
+            spread < -SPREAD_THRESHOLD
+            and rsi > 30
+            and macd < 0
+            and pcr > 1.2
+        ):
+
+            signal = "SHORT SPREAD (Bearish)"
+
         else:
-            logger.error(f"[AUTH] Gateway rejected access authorizations: {session_data}")
-            return None, None
-    except Exception as err:
-        logger.error(f"[AUTH] Exception processing authentication protocols: {err}")
-        return None, None
 
-def orchestrate_stream_connection():
-    """Builds the custom safe connection loop using exponential backoff."""
-    global active_socket_instance, ws_running
-    retry_delay = 5
-    
-    while not global_kill_signal:
-        if ws_running:
-            time.sleep(2)
-            continue
-            
-        logger.info(f"[ORCHESTRATOR] Initiating WebSocket spin-up. Sleeping {retry_delay}s to safeguard rate limits...")
-        time.sleep(retry_delay)
-        
-        jwt, feed = generate_api_session_tokens()
-        if not jwt or not feed:
-            retry_delay = min(retry_delay * 2, 60)
-            continue
-            
+            signal = "NEUTRAL"
+
+        latest_data["signal"] = signal
+
+    latest_data["timestamp"] = (
+        datetime.now()
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+
+# ------------------------------------------------------------
+# WebSocket Callback
+# ------------------------------------------------------------
+def on_message(instance, tick):
+
+    global latest_data
+
+    try:
+
+        sec_id = str(
+            tick.get("security_id")
+        )
+
+        price = tick.get("ltp", 0)
+
+        if sec_id == SELECTED_CE_ID:
+
+            latest_data["ce_price"] = price
+
+        elif sec_id == SELECTED_PE_ID:
+
+            latest_data["pe_price"] = price
+
+        # ----------------------------------------------------
+        # Update signal
+        # ----------------------------------------------------
+        if (
+            latest_data["ce_price"] > 0
+            and latest_data["pe_price"] > 0
+        ):
+
+            update_signal(
+                latest_data["ce_price"],
+                latest_data["pe_price"]
+            )
+
+        else:
+
+            latest_data["timestamp"] = (
+                datetime.now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+    except Exception as e:
+
+        logger.error(
+            f"on_message error: {e}"
+        )
+
+
+# ------------------------------------------------------------
+# WebSocket Feed Runner
+# ------------------------------------------------------------
+
+def run_feed():
+
+    global SELECTED_CE_ID
+    global SELECTED_PE_ID
+
+    # ------------------------------------------------
+    # CREATE EVENT LOOP FOR THIS THREAD
+    # ------------------------------------------------
+    asyncio.set_event_loop(
+        asyncio.new_event_loop()
+    )
+
+    while True:
+
         try:
-            # Initialize our safe custom subclass instead of the raw library class
-            active_socket_instance = SafeSmartWebSocket(jwt, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed)
-            
-            active_socket_instance.on_open = stream_socket_open
-            active_socket_instance.on_data = stream_data_recv
-            active_socket_instance.on_close = stream_socket_close
-            active_socket_instance.on_error = stream_socket_error
-            
-            logger.info("[ORCHESTRATOR] Grounding connection pipeline thread...")
-            # Blocking method wrapper executed inside independent daemon runner context
-            active_socket_instance.connect()
-            
-        except Exception as crash_err:
-            logger.error(f"[ORCHESTRATOR] Socket encountered critical crash sequence: {crash_err}")
-            # Step up retry spacing upon consecutive gateway failure flags
-            retry_delay = min(retry_delay * 2, 120)
 
-# ============================================================
-# PRODUCTION REALTIME MONITORING WATCHDOG
-# ============================================================
-def verify_market_hours() -> bool:
-    now = datetime.now().time()
-    return datetime.strptime("09:15", "%H:%M").time() <= now <= datetime.strptime("15:30", "%H:%M").time()
+            logger.info(
+                "Selecting option contracts..."
+            )
 
-def system_safety_watchdog():
-    """
-    Monitors data streaming health. If your options tokens are invalid 
-    and return zero data ticks, this fallback mechanism keeps your server 
-    stable instead of throwing it into a 429 crash loop.
-    """
-    global last_tick_time, ws_running, active_socket_instance
-    logger.info("[WATCHDOG] Safety telemetry daemon actively monitoring.")
-    
-    while not global_kill_signal:
-        time.sleep(15)
-        
-        if not verify_market_hours():
-            if ws_running and active_socket_instance:
-                logger.info("[WATCHDOG] Market hours closed. Detaching stream systems.")
-                try: active_socket_instance.close()
-                except Exception: pass
-                ws_running = False
-            continue
-            
-        if ws_running:
-            quiescent_period = time.time() - last_tick_time
-            if quiescent_period > 110:
-                # TOKENS DEVIATION DETECTED: 
-                # If connected but no data ticks arrive, the tokens are likely expired.
-                # We fallback gracefully instead of dropping the socket and triggering a 429 block.
-                logger.warning(f"[WATCHDOG WARNING] Streaming connection is alive but no ticks received for {int(quiescent_period)}s.")
-                logger.warning("[FALLBACK-ENGAGED] Running on REST pooling fallback. Sockets preserved to prevent 429 rate blocks.")
-                
-                # Update tick time to prevent the watchdog from resetting the connection
-                last_tick_time = time.time()
+            get_option_contracts(
+                CURRENT_NIFTY
+            )
 
-# ============================================================
-# HTTP API WEB SURFACE MAPPINGS
-# ============================================================
-@app.route("/health", methods=["GET"])
-def health_status():
+            if (
+                not SELECTED_CE_ID
+                or not SELECTED_PE_ID
+            ):
+
+                logger.error(
+                    "No valid contracts found."
+                )
+
+                time.sleep(30)
+
+                continue
+
+            logger.info(
+                f"Subscribing to "
+                f"CE={SELECTED_CE_ID}, "
+                f"PE={SELECTED_PE_ID}"
+            )
+
+            # ------------------------------------------------
+            # CREATE FEED
+            # ------------------------------------------------
+            feed = marketfeed.DhanFeed(
+
+                CLIENT_ID,
+
+                ACCESS_TOKEN,
+
+                [
+                    (
+                        marketfeed.NSE_FNO,
+                        str(SELECTED_CE_ID),
+                        marketfeed.Ticker
+                    ),
+
+                    (
+                        marketfeed.NSE_FNO,
+                        str(SELECTED_PE_ID),
+                        marketfeed.Ticker
+                    )
+                ]
+            )
+
+            logger.info(
+                "✅ Dhan Feed Started"
+            )
+
+            # ------------------------------------------------
+            # START FEED
+            # ------------------------------------------------
+            feed.run_forever()
+
+        except Exception as e:
+
+            logger.exception(
+                f"Feed crashed: {e}"
+            )
+
+            time.sleep(10)
+# ------------------------------------------------------------
+# Flask Routes
+# ------------------------------------------------------------
+@app.route("/")
+def home():
+
     return jsonify({
-        "status": "healthy",
-        "websocket_connected": ws_running,
-        "market_hours_active": verify_market_hours(),
-        "seconds_since_last_tick": int(time.time() - last_tick_time) if ws_running else None
-    }), 200
+        "status": "active",
+        "data": latest_data
+    })
 
-@app.route("/", methods=["GET"])
-def base_index():
-    return jsonify({
-        "system": "Nifty Signal Engine",
-        "version": "5.2-Stabilized",
-        "websocket_active": ws_running
-    }), 200
 
-# ============================================================
-# RUNTIME INITIALIZATION ENTRYPOINT
-# ============================================================
-if "gunicorn" in sys.argv[0] or __name__ == "__main__":
-    logger.info("====================================================================")
-    logger.info("Starting Nifty Signal Engine v5.2-Stabilized under Gunicorn Worker context")
-    logger.info("====================================================================")
-    
-    # Initialize background threads once gunicorn forks the core worker context
-    t1 = threading.Thread(target=orchestrate_stream_connection, name="EngineOrch", daemon=True)
-    t2 = threading.Thread(target=system_safety_watchdog, name="EngineWatch", daemon=True)
-    
-    t1.start()
-    t2.start()
+@app.route("/api/health")
+def health():
 
+    return "OK", 200
+
+
+# ------------------------------------------------------------
+# WSGI
+# ------------------------------------------------------------
+application = app
+
+# ------------------------------------------------------------
+# Start Background Thread
+# ------------------------------------------------------------
+threading.Thread(
+    target=run_feed,
+    daemon=True
+).start()
+
+logger.info(
+    "Background signal engine started."
+)
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
 if __name__ == "__main__":
-    port_alloc = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port_alloc, debug=False)
+
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get("PORT", 10000)
+        )
+    )
