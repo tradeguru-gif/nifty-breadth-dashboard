@@ -10,8 +10,42 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 import pyotp
-from libs.SmartApi import SmartConnect
-from libs.SmartApi.smartWebSocketV2 import SmartWebSocketV2
+
+# ============================================================
+# MONKEY‑PATCH FOR SmartWebSocketV2 (fixes token parsing)
+# ============================================================
+from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+
+# Save the original _parse_binary_data method
+_original_parse = SmartWebSocketV2._parse_binary_data
+
+def _patched_parse(self, binary_data):
+    # Call the original first to get all fields except token
+    try:
+        result = _original_parse(self, binary_data)
+    except:
+        result = {}
+    # Manually extract the token from bytes 2 to 26 (little‑endian int)
+    try:
+        token_bytes = binary_data[2:26]
+        token_int = int.from_bytes(token_bytes, byteorder='little')
+        result['token'] = str(token_int)
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Token extraction failed: {e}")
+    return result
+
+# Replace the method with our patched version
+SmartWebSocketV2._parse_binary_data = _patched_parse
+# Also fix the _on_close signature mismatch
+_original_on_close = SmartWebSocketV2._on_close
+def _patched_on_close(self, wsapp, *args):
+    try:
+        _original_on_close(self, wsapp)
+    except:
+        pass
+SmartWebSocketV2._on_close = _patched_on_close
+# ============================================================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,7 +78,7 @@ ws_running = False
 sws = None
 
 # --------------------------------------------------
-# Market Signal State — ALL TRADING SIGNAL PARAMETERS
+# Market Signal State
 # --------------------------------------------------
 market_signal = {
     "signal": "WAITING",
@@ -96,7 +130,7 @@ institutional_state = {
     "institutional_confidence": 0
 }
 
-# Confidence thresholds for CE/PE signals
+# Confidence thresholds
 SPREAD_THRESHOLD = 5.0
 STRONG_BUY_THRESHOLD = 80
 BUY_THRESHOLD = 60
@@ -148,7 +182,6 @@ def get_current_atm_tokens():
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.DataFrame(resp.json())
-        logger.info(f"Total instruments loaded: {len(df)}")
     except Exception as e:
         logger.error(f"Failed to load instrument master: {e}")
         return None, None
@@ -158,71 +191,37 @@ def get_current_atm_tokens():
         (df["instrumenttype"].astype(str) == "OPTIDX") &
         (df["exch_seg"].astype(str) == "NFO")
     ].copy()
-
-    logger.info(f"NIFTY OPTIDX NFO symbols found: {len(nifty_opts)}")
-
     if nifty_opts.empty:
         nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
-        logger.info(f"Fallback NIFTY symbols found: {len(nifty_opts)}")
-
     if nifty_opts.empty:
         logger.error("No NIFTY symbols found")
         return None, None
 
-    for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
+    for fmt in ["%d%b%Y", "%d-%b%Y", "%Y-%m-%d", "%d%m%Y"]:
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
-        valid_count = nifty_opts["expiry_date"].notna().sum()
-        if valid_count > 0:
-            logger.info(f"Parsed expiry with format {fmt}: {valid_count} valid")
+        if nifty_opts["expiry_date"].notna().sum() > 0:
             break
-    else:
-        logger.error("Could not parse any expiry dates")
-        return None, None
-
     nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
     nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
     nifty_opts = nifty_opts.dropna(subset=["strike"])
-    logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
 
     today = datetime.now()
     future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
-    logger.info(f"Future expiries: {len(future_expiries)}")
-
     if future_expiries.empty:
         logger.error("No future expiries found")
         return None, None
-
     nearest_expiry = future_expiries["expiry_date"].min()
-    logger.info(f"Nearest expiry: {nearest_expiry}")
-
     nearest_opts = nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]
-    logger.info(f"Options for nearest expiry: {len(nearest_opts)}")
-
     available_strikes = sorted(nearest_opts["strike"].unique())
-    logger.info(f"Available strikes (first 20): {available_strikes[:20]}")
-    logger.info(f"Looking for strike: {atm_strike}")
+    if atm_strike not in available_strikes:
+        atm_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
+        logger.info(f"Using nearest strike: {atm_strike}")
 
     atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
-    logger.info(f"ATM options found: {len(atm_opts)}")
-
     ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
     pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
-
-    logger.info(f"CE matches: {len(ce_row)}, PE matches: {len(pe_row)}")
-
     if ce_row.empty or pe_row.empty:
-        logger.error(f"CE or PE not found for strike {atm_strike}, expiry {nearest_expiry}")
-        if available_strikes:
-            nearest_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
-            logger.info(f"Trying nearest strike: {nearest_strike}")
-            atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
-            ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
-            pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
-            if not ce_row.empty and not pe_row.empty:
-                ce_token = str(ce_row.iloc[0]["token"])
-                pe_token = str(pe_row.iloc[0]["token"])
-                logger.info(f"Fallback CE token = {ce_token}, PE token = {pe_token}")
-                return ce_token, pe_token
+        logger.error(f"CE or PE not found for strike {atm_strike}")
         return None, None
 
     ce_token = str(ce_row.iloc[0]["token"])
@@ -238,10 +237,8 @@ def on_ws_open(wsapp):
     logger.info("Angel One WebSocket opened")
     if sws is not None:
         try:
-            correlation_id = "tradeguru_001"
-            mode = 2
-            tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
-            sws.subscribe(correlation_id, mode, tokens)
+            # Use exchangeType=5 for NFO options (as per your original)
+            sws.subscribe("tradeguru_001", 2, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
@@ -249,19 +246,25 @@ def on_ws_open(wsapp):
 def on_ws_data(wsapp, message, *args):
     global latest_ticks, price_history, tick_counter
     try:
+        # The message is already parsed by the patched library into a dict
+        if isinstance(message, bytes):
+            logger.debug("Raw bytes received, ignoring")
+            return
         data = json.loads(message) if isinstance(message, str) else message
         ticks = data if isinstance(data, list) else [data]
         for tick in ticks:
             token = str(tick.get("tk"))
-            ltp = tick.get("ltp", 0) / 100
+            ltp = tick.get("ltp", 0)
+            if isinstance(ltp, (int, float)) and ltp > 1000:
+                ltp = ltp / 100
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
                 price_history.append(ltp)
                 tick_counter += 1
+                logger.debug(f"CE tick: {ltp}")
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
+                logger.debug(f"PE tick: {ltp}")
 
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
@@ -326,7 +329,7 @@ def start_angel_websocket():
             retry_delay = min(retry_delay * 2, 300)
 
 # --------------------------------------------------
-# Signal Engine — ALL TRADING SIGNAL PARAMETERS WITH CONFIDENCE
+# Signal Engine (keep your existing implementation)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -424,9 +427,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
 
     ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
-    # ============================================================
-    # BULLISH SCORE — Confidence for BUY CE signals
-    # ============================================================
     bullish_score = 0
     if ema_signal == "BULLISH":
         bullish_score += 20
@@ -439,9 +439,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
     if macd > 0:
         bullish_score += 20
 
-    # ============================================================
-    # BEARISH SCORE — Confidence for BUY PE signals
-    # ============================================================
     bearish_score = 0
     if ema_signal == "BEARISH":
         bearish_score += 20
@@ -454,9 +451,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
     if macd < 0:
         bearish_score += 20
 
-    # ============================================================
-    # SIGNAL DECISION WITH FULL CONFIDENCE LEVELS
-    # ============================================================
     if bullish_score >= bearish_score and bullish_score >= CONSIDER_THRESHOLD:
         confidence = bullish_score
         if confidence >= STRONG_BUY_THRESHOLD:
@@ -481,9 +475,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
         confidence = max(bullish_score, bearish_score)
         action = "HOLD"
 
-    # ============================================================
-    # UPDATE market_state — ALL PARAMETERS
-    # ============================================================
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if spread > 0 else "DOWNTREND" if spread < 0 else "NEUTRAL",
@@ -495,9 +486,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "alert": action
     })
 
-    # ============================================================
-    # UPDATE institutional_state — ALL PARAMETERS
-    # ============================================================
     institutional_state.update({
         "vwap": round(vwap, 2),
         "ema_fast": round(ema_fast, 2),
@@ -518,9 +506,6 @@ def run_signal_engine(ce_price, pe_price, price_list):
         "institutional_confidence": confidence
     })
 
-    # ============================================================
-    # UPDATE market_signal — ALL TRADING PARAMETERS
-    # ============================================================
     market_signal.update({
         "signal": "BULLISH" if spread > SPREAD_THRESHOLD else "BEARISH" if spread < -SPREAD_THRESHOLD else "NEUTRAL",
         "ce_price": ce_price,
@@ -549,9 +534,9 @@ def run_signal_engine(ce_price, pe_price, price_list):
 def home():
     return jsonify({
         "status": "online", 
-        "message": "Nifty Signal Engine v4.6 Professional",
-        "worker_type": "PRIMARY (WebSocket)" if _is_primary_worker else "SECONDARY (REST-only)",
-        "market_open": is_market_open()
+        "message": "Nifty Signal Engine v4.7 (Patched)",
+        "worker_type": "PRIMARY (WebSocket)",
+        "market_open": datetime.now().strftime("%H:%M")
     })
 
 @app.route("/api/live-signals")
@@ -570,25 +555,15 @@ def health():
         "ws_running": ws_running,
         "ce_token": CE_TOKEN,
         "pe_token": PE_TOKEN,
-        "timestamp": datetime.now().isoformat()
-    }), 200
-
-@app.route("/debug/ws-status")
-def debug_ws():
-    return jsonify({
-        "ws_running": ws_running,
-        "ce_token": CE_TOKEN,
-        "pe_token": PE_TOKEN,
         "latest_ce": latest_ticks["ce_price"],
         "latest_pe": latest_ticks["pe_price"],
-        "price_history_len": len(price_history)
+        "timestamp": datetime.now().isoformat()
     })
 
 # --------------------------------------------------
 # Start background engine
 # --------------------------------------------------
 engine_started = False
-
 def start_background_engine():
     global engine_started
     if not engine_started:
