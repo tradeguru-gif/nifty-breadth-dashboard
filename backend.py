@@ -238,7 +238,7 @@ def on_ws_open(wsapp):
     if sws is not None:
         try:
             # Use exchangeType=5 for NFO options (as per your original)
-            sws.subscribe("tradeguru_001", 2, [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}])
+            sws.subscribe("tradeguru_001", 2, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
