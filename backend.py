@@ -10,8 +10,8 @@ from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
 import pyotp
-from SmartApi import SmartConnect
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+from libs.SmartApi import SmartConnect
+from libs.SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
