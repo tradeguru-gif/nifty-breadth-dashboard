@@ -2211,31 +2211,69 @@ def patch_smartwebsocket(sws_instance):
     
     sws_instance.connect = fixed_connect
 
-    def fixed_on_close(wsapp, close_status_code=None, close_msg=None):
-        logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")
-        if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
-            try:
-                sws_instance.on_close(wsapp, close_status_code, close_msg)
-            except TypeError:
-                # Fallback for older signature
-                try:
-                    sws_instance.on_close(wsapp)
-                except:
-                    pass
-
-    # Patch _on_close to handle websocket-client's 4-arg callback
+    # FIX: Properly handle the 4-argument on_close signature from websocket-client
     original_on_close = sws_instance._on_close
     def patched_on_close(wsapp, close_status_code=None, close_msg=None):
         try:
+            # Try calling with just wsapp first (old signature)
             original_on_close(wsapp)
         except TypeError:
-            pass
+            # If that fails, try with all 3 args
+            try:
+                original_on_close(wsapp, close_status_code, close_msg)
+            except:
+                pass
     sws_instance._on_close = patched_on_close
+    
+    # Also patch the instance's on_close attribute if it exists
+    if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
+        user_on_close = sws_instance.on_close
+        def patched_user_on_close(wsapp, close_status_code=None, close_msg=None):
+            try:
+                user_on_close(wsapp)
+            except TypeError:
+                try:
+                    user_on_close(wsapp, close_status_code, close_msg)
+                except:
+                    pass
+        sws_instance.on_close = patched_user_on_close
+    
     sws_instance.MAX_RETRY_ATTEMPT = 0
     sws_instance.retry_strategy = 0
-    sws_instance.HEART_BEAT_INTERVAL = 25  # Keep this
+    sws_instance.HEART_BEAT_INTERVAL = 25
     return sws_instance
 
+    # FIX: Properly handle the 4-argument on_close signature
+    original_on_close = sws_instance._on_close
+    def patched_on_close(wsapp, close_status_code=None, close_msg=None):
+        try:
+            # Try calling with just wsapp first (old signature)
+            original_on_close(wsapp)
+        except TypeError:
+            # If that fails, the original might already handle 3 args
+            try:
+                original_on_close(wsapp, close_status_code, close_msg)
+            except:
+                pass
+    sws_instance._on_close = patched_on_close
+    
+    # Also patch the instance's on_close attribute if it exists
+    if hasattr(sws_instance, 'on_close') and sws_instance.on_close:
+        user_on_close = sws_instance.on_close
+        def patched_user_on_close(wsapp, close_status_code=None, close_msg=None):
+            try:
+                user_on_close(wsapp)
+            except TypeError:
+                try:
+                    user_on_close(wsapp, close_status_code, close_msg)
+                except:
+                    pass
+        sws_instance.on_close = patched_user_on_close
+    
+    sws_instance.MAX_RETRY_ATTEMPT = 0
+    sws_instance.retry_strategy = 0
+    sws_instance.HEART_BEAT_INTERVAL = 25
+    return sws_instance
 def on_open(wsapp):
     """WebSocket connection opened."""
     logger.info("WebSocket OPENED")
@@ -2496,9 +2534,6 @@ def start_websocket():
             
             consecutive_failures = 0
 
-            # BEFORE: sws = SmartWebSocketV2(...)
-            # Add this cleanup block:
-
             # Aggressive cleanup of any existing connection
             if sws is not None:
                 try:
@@ -2510,16 +2545,29 @@ def start_websocket():
                 sws = None
 
             # Force garbage collection to release socket
-
+            gc.collect()
             time.sleep(3)  # Critical: wait before new connection
             
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws = patch_smartwebsocket(sws)
             
+            # FIX: Properly hook callbacks for both binary and text messages
             sws.on_open = on_open
-            sws.on_data = on_data
+            sws.on_data = on_data        # For binary ticks
             sws.on_error = on_error
-            sws.on_close = on_close
+            sws.on_close = on_close      # Your custom on_close, not _on_close
+            
+            # ALSO hook into the internal _on_message to catch JSON/text messages
+            original_on_message = sws._on_message
+            def fixed_on_message(wsapp, message):
+                # Call your handler
+                on_data(wsapp, message)
+                # Also call original if needed
+                try:
+                    original_on_message(wsapp, message)
+                except:
+                    pass
+            sws._on_message = fixed_on_message
             
             ws_running = True
             last_tick_time = time.time()
@@ -2601,9 +2649,7 @@ def start_websocket():
                 logger.info(f"Waiting {wait}s before reconnect...")
                 with _reconnect_lock:
                     _reconnecting = False
-                time.sleep(wait)          
-
-
+                time.sleep(wait)
 # ============================================================
 # REST FALLBACK
 # ============================================================
