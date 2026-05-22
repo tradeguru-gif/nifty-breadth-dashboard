@@ -547,7 +547,12 @@ def run_signal_engine(ce_price, pe_price, price_list):
 # --------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "online", "message": "Angel One WebSocket Engine"})
+    return jsonify({
+        "status": "online", 
+        "message": "Nifty Signal Engine v4.6 Professional",
+        "worker_type": "PRIMARY (WebSocket)" if _is_primary_worker else "SECONDARY (REST-only)",
+        "market_open": is_market_open()
+    })
 
 @app.route("/api/live-signals")
 def live_signals():
