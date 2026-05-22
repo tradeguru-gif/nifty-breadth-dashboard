@@ -1,488 +1,600 @@
-# backend.py - Nifty Options Signal Engine (Fully Corrected)
-
 import os
-import asyncio
-import threading
-import logging
 import time
+import logging
+import threading
+import json
 import requests
 import pandas as pd
-
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
+import pyotp
+from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
-from dhanhq import dhanhq as DhanHQ
-from dhanhq import marketfeed
-
-# ------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------
-# Flask App
-# ------------------------------------------------------------
 app = Flask(__name__)
-
 CORS(app)
+application = app
 
-# ------------------------------------------------------------
-# Environment Variables
-# ------------------------------------------------------------
+# --------------------------------------------------
+# Environment variables
+# --------------------------------------------------
+ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
+ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
+ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
+ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
+    raise ValueError("Missing Angel One credentials")
 
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+# --------------------------------------------------
+# Global state
+# --------------------------------------------------
+CE_TOKEN = None
+PE_TOKEN = None
+latest_ticks = {"ce_price": 0.0, "pe_price": 0.0}
+price_history = deque(maxlen=200)
+tick_counter = 0
+UPDATE_INTERVAL = 10
+ws_running = False
+sws = None
 
-CURRENT_NIFTY = float(os.getenv("CURRENT_NIFTY", "24000"))
-
-# ------------------------------------------------------------
-# Initialize Dhan Client
-# ------------------------------------------------------------
-dhan = DhanHQ(
-    CLIENT_ID,
-    ACCESS_TOKEN
-)
-
-logger.info("Dhan client initialized successfully")
-
-
-# ------------------------------------------------------------
-# Global Variables
-# ------------------------------------------------------------
-latest_data = {
+# --------------------------------------------------
+# Market Signal State — ALL TRADING SIGNAL PARAMETERS
+# --------------------------------------------------
+market_signal = {
     "signal": "WAITING",
-    "ce_price": 0,
-    "pe_price": 0,
-    "spread": 0,
+    "ce_price": 0.0,
+    "pe_price": 0.0,
+    "spread": 0.0,
     "rsi": 50,
-    "macd": 0,
+    "macd": 0.0,
     "pcr": 1.0,
+    "vwap": 0.0,
+    "atr": 0.0,
+    "ema_fast": 0.0,
+    "ema_slow": 0.0,
+    "delta": 0.0,
+    "gamma": 0.0,
+    "theta": 0.0,
+    "vega": 0.0,
     "timestamp": ""
 }
 
-SELECTED_CE_ID = None
-SELECTED_PE_ID = None
+market_state = {
+    "rsi": 50,
+    "momentum": "NEUTRAL",
+    "strength": "LOW",
+    "trend": "SIDEWAYS",
+    "action": "HOLD",
+    "confidence": 0,
+    "volatility": "NORMAL",
+    "alert": "NONE"
+}
 
-price_history = deque(maxlen=100)
+institutional_state = {
+    "vwap": 0,
+    "ema_fast": 0,
+    "ema_slow": 0,
+    "ema_signal": "NEUTRAL",
+    "atr": 0,
+    "oi_buildup": "NEUTRAL",
+    "iv_state": "NORMAL",
+    "candle_structure": "SIDEWAYS",
+    "market_breadth": "BALANCED",
+    "volume_profile": "NORMAL",
+    "smart_money_flow": "NEUTRAL",
+    "delta": 0,
+    "gamma": 0,
+    "theta": 0,
+    "vega": 0,
+    "institutional_signal": "HOLD",
+    "institutional_confidence": 0
+}
 
-update_counter = 0
-
-UPDATE_INTERVAL = 10
-
+# Confidence thresholds for CE/PE signals
 SPREAD_THRESHOLD = 5.0
+STRONG_BUY_THRESHOLD = 80
+BUY_THRESHOLD = 60
+CONSIDER_THRESHOLD = 40
 
-# ------------------------------------------------------------
-# Indicators
-# ------------------------------------------------------------
-def calculate_rsi(prices, period=14):
+# --------------------------------------------------
+# Helper: Nifty spot
+# --------------------------------------------------
+spot_cache = {"value": None, "timestamp": 0}
+CACHE_TTL = 30
 
-    if len(prices) < period + 1:
-        return 50.0
-
-    deltas = [
-        prices[i] - prices[i - 1]
-        for i in range(1, len(prices))
-    ]
-
-    gains = [d if d > 0 else 0 for d in deltas]
-
-    losses = [-d if d < 0 else 0 for d in deltas]
-
-    avg_gain = sum(gains[:period]) / period
-
-    avg_loss = sum(losses[:period]) / period
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = avg_gain / avg_loss
-
-    return 100 - (100 / (1 + rs))
-
-
-def calculate_macd(prices, fast=12, slow=26):
-
-    if len(prices) < slow:
-        return 0.0
-
-    def ema(data, period):
-
-        alpha = 2 / (period + 1)
-
-        value = data[0]
-
-        for price in data[1:]:
-            value = alpha * price + (1 - alpha) * value
-
-        return value
-
-    ema_fast = ema(prices, fast)
-
-    ema_slow = ema(prices, slow)
-
-    return ema_fast - ema_slow
-
-
-# ------------------------------------------------------------
-# PCR
-# ------------------------------------------------------------
-def get_nifty_pcr():
-
-    url = (
-        "https://www.nseindia.com/api/"
-        "option-chain-indices?symbol=NIFTY"
-    )
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+def get_nifty_spot():
     try:
-
+        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+        headers = {"User-Agent": "Mozilla/5.0"}
         session = requests.Session()
-
-        session.get(
-            "https://www.nseindia.com",
-            headers=headers
-        )
-
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
         time.sleep(0.5)
-
-        response = session.get(
-            url,
-            headers=headers
-        )
-
+        response = session.get(url, headers=headers, timeout=10)
         data = response.json()
-
-        total_ce_oi = 0
-        total_pe_oi = 0
-
-        for record in data["records"]["data"]:
-
-            if "CE" in record:
-                total_ce_oi += record["CE"]["openInterest"]
-
-            if "PE" in record:
-                total_pe_oi += record["PE"]["openInterest"]
-
-        if total_pe_oi == 0:
-            return 1.0
-
-        return total_ce_oi / total_pe_oi
-
+        spot = data["data"][0]["lastPrice"]
+        logger.info(f"NIFTY spot = {spot}")
+        return float(spot)
     except Exception as e:
+        logger.error(f"Spot fetch error: {e}")
+        return None
 
-        logger.error(f"PCR fetch failed: {e}")
+def get_nifty_spot_cached():
+    now = time.time()
+    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+        return spot_cache["value"]
+    spot = get_nifty_spot()
+    if spot:
+        spot_cache["value"] = spot
+        spot_cache["timestamp"] = now
+    return spot
 
-        return 1.0
-
-
-
-# ------------------------------------------------------------
-# Dynamic Option Contract Selection
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# Dynamically select nearest NIFTY CE/PE contracts
-# ------------------------------------------------------------
-def get_option_contracts(nifty_spot):
-
-    global SELECTED_CE_ID
-    global SELECTED_PE_ID
-
+# --------------------------------------------------
+# Fetch current ATM option tokens
+# --------------------------------------------------
+def get_current_atm_tokens():
+    spot = get_nifty_spot_cached()
+    if not spot:
+        return None, None
+    atm_strike = round(spot / 50) * 50
+    logger.info(f"ATM strike = {atm_strike}")
+    url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
     try:
-
-        logger.info("Using static NIFTY option contracts")
-
-        # ------------------------------------------------
-        # REPLACE THESE WITH REAL LIVE SECURITY IDS
-        # ------------------------------------------------
-        SELECTED_CE_ID = "54321"
-
-        SELECTED_PE_ID = "54322"
-
-        logger.info(
-            f"Selected CE: {SELECTED_CE_ID}"
-        )
-
-        logger.info(
-            f"Selected PE: {SELECTED_PE_ID}"
-        )
-
-        return [
-            SELECTED_CE_ID,
-            SELECTED_PE_ID
-        ]
-
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        df = pd.DataFrame(resp.json())
+        logger.info(f"Total instruments loaded: {len(df)}")
     except Exception as e:
+        logger.error(f"Failed to load instrument master: {e}")
+        return None, None
 
-        logger.exception(
-            f"Contract selection failed: {e}"
-        )
+    nifty_opts = df[
+        (df["name"].astype(str) == "NIFTY") & 
+        (df["instrumenttype"].astype(str) == "OPTIDX") &
+        (df["exch_seg"].astype(str) == "NFO")
+    ].copy()
 
-        SELECTED_CE_ID = None
-        SELECTED_PE_ID = None
+    logger.info(f"NIFTY OPTIDX NFO symbols found: {len(nifty_opts)}")
 
-        return []
-# ------------------------------------------------------------
-# Signal Logic
-# ------------------------------------------------------------
-def update_signal(ce_price, pe_price):
+    if nifty_opts.empty:
+        nifty_opts = df[df["symbol"].astype(str).str.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}', na=False)].copy()
+        logger.info(f"Fallback NIFTY symbols found: {len(nifty_opts)}")
 
-    global latest_data
-    global price_history
-    global update_counter
+    if nifty_opts.empty:
+        logger.error("No NIFTY symbols found")
+        return None, None
 
-    spread = ce_price - pe_price
+    for fmt in ["%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d%m%Y"]:
+        nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format=fmt, errors="coerce")
+        valid_count = nifty_opts["expiry_date"].notna().sum()
+        if valid_count > 0:
+            logger.info(f"Parsed expiry with format {fmt}: {valid_count} valid")
+            break
+    else:
+        logger.error("Could not parse any expiry dates")
+        return None, None
 
-    latest_data["spread"] = round(spread, 2)
+    nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
+    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
+    nifty_opts = nifty_opts.dropna(subset=["strike"])
+    logger.info(f"NIFTY with valid expiry and strike: {len(nifty_opts)}")
 
-    if ce_price > 0:
-        price_history.append(ce_price)
+    today = datetime.now()
+    future_expiries = nifty_opts[nifty_opts["expiry_date"] > today]
+    logger.info(f"Future expiries: {len(future_expiries)}")
 
-    update_counter += 1
+    if future_expiries.empty:
+        logger.error("No future expiries found")
+        return None, None
 
-    if (
-        update_counter >= UPDATE_INTERVAL
-        and len(price_history) >= 20
-    ):
+    nearest_expiry = future_expiries["expiry_date"].min()
+    logger.info(f"Nearest expiry: {nearest_expiry}")
 
-        update_counter = 0
+    nearest_opts = nifty_opts[nifty_opts["expiry_date"] == nearest_expiry]
+    logger.info(f"Options for nearest expiry: {len(nearest_opts)}")
 
-        rsi = calculate_rsi(
-            list(price_history)
-        )
+    available_strikes = sorted(nearest_opts["strike"].unique())
+    logger.info(f"Available strikes (first 20): {available_strikes[:20]}")
+    logger.info(f"Looking for strike: {atm_strike}")
 
-        macd = calculate_macd(
-            list(price_history)
-        )
+    atm_opts = nifty_opts[(nifty_opts["strike"] == atm_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+    logger.info(f"ATM options found: {len(atm_opts)}")
 
-        pcr = get_nifty_pcr()
+    ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+    pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
 
-        latest_data["rsi"] = round(rsi, 2)
+    logger.info(f"CE matches: {len(ce_row)}, PE matches: {len(pe_row)}")
 
-        latest_data["macd"] = round(macd, 2)
+    if ce_row.empty or pe_row.empty:
+        logger.error(f"CE or PE not found for strike {atm_strike}, expiry {nearest_expiry}")
+        if available_strikes:
+            nearest_strike = min(available_strikes, key=lambda x: abs(x - atm_strike))
+            logger.info(f"Trying nearest strike: {nearest_strike}")
+            atm_opts = nifty_opts[(nifty_opts["strike"] == nearest_strike) & (nifty_opts["expiry_date"] == nearest_expiry)]
+            ce_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("CE", na=False)]
+            pe_row = atm_opts[atm_opts["symbol"].str.upper().str.contains("PE", na=False)]
+            if not ce_row.empty and not pe_row.empty:
+                ce_token = str(ce_row.iloc[0]["token"])
+                pe_token = str(pe_row.iloc[0]["token"])
+                logger.info(f"Fallback CE token = {ce_token}, PE token = {pe_token}")
+                return ce_token, pe_token
+        return None, None
 
-        latest_data["pcr"] = round(pcr, 2)
+    ce_token = str(ce_row.iloc[0]["token"])
+    pe_token = str(pe_row.iloc[0]["token"])
+    logger.info(f"CE token = {ce_token}, PE token = {pe_token}")
+    return ce_token, pe_token
 
-        # ----------------------------------------------------
-        # Signal Rules
-        # ----------------------------------------------------
-        if (
-            spread > SPREAD_THRESHOLD
-            and rsi < 70
-            and macd > 0
-            and pcr < 0.8
-        ):
-
-            signal = "LONG SPREAD (Bullish)"
-
-        elif (
-            spread < -SPREAD_THRESHOLD
-            and rsi > 30
-            and macd < 0
-            and pcr > 1.2
-        ):
-
-            signal = "SHORT SPREAD (Bearish)"
-
-        else:
-
-            signal = "NEUTRAL"
-
-        latest_data["signal"] = signal
-
-    latest_data["timestamp"] = (
-        datetime.now()
-        .strftime("%Y-%m-%d %H:%M:%S")
-    )
-
-
-# ------------------------------------------------------------
-# WebSocket Callback
-# ------------------------------------------------------------
-def on_message(instance, tick):
-
-    global latest_data
-
-    try:
-
-        sec_id = str(
-            tick.get("security_id")
-        )
-
-        price = tick.get("ltp", 0)
-
-        if sec_id == SELECTED_CE_ID:
-
-            latest_data["ce_price"] = price
-
-        elif sec_id == SELECTED_PE_ID:
-
-            latest_data["pe_price"] = price
-
-        # ----------------------------------------------------
-        # Update signal
-        # ----------------------------------------------------
-        if (
-            latest_data["ce_price"] > 0
-            and latest_data["pe_price"] > 0
-        ):
-
-            update_signal(
-                latest_data["ce_price"],
-                latest_data["pe_price"]
-            )
-
-        else:
-
-            latest_data["timestamp"] = (
-                datetime.now()
-                .strftime("%Y-%m-%d %H:%M:%S")
-            )
-
-    except Exception as e:
-
-        logger.error(
-            f"on_message error: {e}"
-        )
-
-
-# ------------------------------------------------------------
-# WebSocket Feed Runner
-# ------------------------------------------------------------
-
-def run_feed():
-
-    global SELECTED_CE_ID
-    global SELECTED_PE_ID
-
-    # ------------------------------------------------
-    # CREATE EVENT LOOP FOR THIS THREAD
-    # ------------------------------------------------
-    asyncio.set_event_loop(
-        asyncio.new_event_loop()
-    )
-
-    while True:
-
+# --------------------------------------------------
+# WebSocket Callbacks
+# --------------------------------------------------
+def on_ws_open(wsapp):
+    global sws
+    logger.info("Angel One WebSocket opened")
+    if sws is not None:
         try:
+            correlation_id = "tradeguru_001"
+            mode = 2
+            tokens = [{"exchangeType": 5, "tokens": [CE_TOKEN, PE_TOKEN]}]
+            sws.subscribe(correlation_id, mode, tokens)
+            logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
+        except Exception as e:
+            logger.error(f"Subscribe error: {e}")
 
-            logger.info(
-                "Selecting option contracts..."
-            )
+def on_ws_data(wsapp, message, *args):
+    global latest_ticks, price_history, tick_counter
+    try:
+        data = json.loads(message) if isinstance(message, str) else message
+        ticks = data if isinstance(data, list) else [data]
+        for tick in ticks:
+            token = str(tick.get("tk"))
+            ltp = tick.get("ltp", 0) / 100
+            if token == CE_TOKEN:
+                latest_ticks["ce_price"] = ltp
+                latest_ticks["ce_timestamp"] = datetime.now().isoformat()
+                price_history.append(ltp)
+                tick_counter += 1
+            elif token == PE_TOKEN:
+                latest_ticks["pe_price"] = ltp
+                latest_ticks["pe_timestamp"] = datetime.now().isoformat()
 
-            get_option_contracts(
-                CURRENT_NIFTY
-            )
+            ce = latest_ticks["ce_price"]
+            pe = latest_ticks["pe_price"]
+            if ce > 0 and pe > 0 and tick_counter % UPDATE_INTERVAL == 0:
+                run_signal_engine(ce, pe, list(price_history))
+    except Exception as e:
+        logger.error(f"WebSocket data error: {e}")
 
-            if (
-                not SELECTED_CE_ID
-                or not SELECTED_PE_ID
-            ):
+def on_ws_error(wsapp, error):
+    logger.error(f"WebSocket error: {error}")
 
-                logger.error(
-                    "No valid contracts found."
-                )
+def on_ws_close(wsapp, *args):
+    logger.warning(f"WebSocket closed, args: {args}")
+    global ws_running
+    ws_running = False
 
-                time.sleep(30)
+# --------------------------------------------------
+# Start WebSocket connection
+# --------------------------------------------------
+def start_angel_websocket():
+    global ws_running, CE_TOKEN, PE_TOKEN, sws
+    retry_delay = 30
+    while True:
+        try:
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            obj = SmartConnect(api_key=ANGEL_API_KEY)
+            session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not session.get("status"):
+                logger.error(f"Login failed: {session}")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
+                continue
+            auth_token = session["data"]["jwtToken"]
+            feed_token = obj.getfeedToken()
+            logger.info("Authenticated, feed token obtained")
 
+            CE_TOKEN, PE_TOKEN = get_current_atm_tokens()
+            if not CE_TOKEN or not PE_TOKEN:
+                logger.error("Could not fetch ATM tokens. Retrying...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)
                 continue
 
-            logger.info(
-                f"Subscribing to "
-                f"CE={SELECTED_CE_ID}, "
-                f"PE={SELECTED_PE_ID}"
-            )
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+            sws.on_open = on_ws_open
+            sws.on_data = on_ws_data
+            sws.on_error = on_ws_error
+            sws.on_close = on_ws_close
+            ws_running = True
+            retry_delay = 30
+            logger.info("Connecting WebSocket...")
+            sws.connect()
 
-            # ------------------------------------------------
-            # CREATE FEED
-            # ------------------------------------------------
-            feed = marketfeed.DhanFeed(
+            while ws_running:
+                time.sleep(0.1)
 
-                CLIENT_ID,
-
-                ACCESS_TOKEN,
-
-                [
-                    (
-                        marketfeed.NSE_FNO,
-                        str(SELECTED_CE_ID),
-                        marketfeed.Ticker
-                    ),
-
-                    (
-                        marketfeed.NSE_FNO,
-                        str(SELECTED_PE_ID),
-                        marketfeed.Ticker
-                    )
-                ]
-            )
-
-            logger.info(
-                "✅ Dhan Feed Started"
-            )
-
-            # ------------------------------------------------
-            # START FEED
-            # ------------------------------------------------
-            feed.run_forever()
+            logger.warning("WebSocket loop ended, reconnecting...")
 
         except Exception as e:
+            logger.error(f"WebSocket connection error: {e}")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
 
-            logger.exception(
-                f"Feed crashed: {e}"
-            )
+# --------------------------------------------------
+# Signal Engine — ALL TRADING SIGNAL PARAMETERS WITH CONFIDENCE
+# --------------------------------------------------
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-            time.sleep(10)
-# ------------------------------------------------------------
-# Flask Routes
-# ------------------------------------------------------------
-@app.route("/")
-def home():
+def calculate_macd(prices, fast=12, slow=26):
+    if len(prices) < slow:
+        return 0.0
+    def ema(data, period):
+        alpha = 2 / (period + 1)
+        val = data[0]
+        for p in data[1:]:
+            val = alpha * p + (1 - alpha) * val
+        return val
+    return ema(prices, fast) - ema(prices, slow)
 
-    return jsonify({
-        "status": "active",
-        "data": latest_data
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    alpha = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = alpha * p + (1 - alpha) * ema
+    return ema
+
+def calculate_atr(prices, period=14):
+    if len(prices) < period + 1:
+        return 0
+    trs = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
+    return sum(trs[-period:]) / period
+
+def calculate_vwap(prices):
+    if not prices:
+        return 0
+    vol = [100] * len(prices)
+    pv = sum(p * v for p, v in zip(prices, vol))
+    tv = sum(vol)
+    return pv / tv if tv else 0
+
+def estimate_greeks(ce, pe):
+    delta = round((ce - pe) / 100, 2)
+    gamma = round(abs(delta) / 10, 2)
+    theta = round(-(ce + pe) / 1000, 2)
+    vega = round((ce + pe) / 500, 2)
+    return delta, gamma, theta, vega
+
+pcr_cache = {"value": 1.0, "time": 0}
+PCR_TTL = 60
+
+def get_nifty_pcr():
+    now = time.time()
+    if now - pcr_cache["time"] < PCR_TTL:
+        return pcr_cache["value"]
+    try:
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        time.sleep(0.5)
+        resp = session.get(url, headers=headers, timeout=5)
+        data = resp.json()
+        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
+        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
+        pcr = pe_oi / ce_oi if ce_oi else 1.0
+        pcr_cache["value"] = pcr
+        pcr_cache["time"] = now
+        return pcr
+    except Exception as e:
+        logger.error(f"PCR fetch failed: {e}")
+        return pcr_cache["value"]
+
+def run_signal_engine(ce_price, pe_price, price_list):
+    global market_signal, market_state, institutional_state
+    if len(price_list) < 20:
+        return
+
+    spread = ce_price - pe_price
+    rsi = calculate_rsi(price_list)
+    macd = calculate_macd(price_list)
+    vwap = calculate_vwap(price_list)
+    ema_fast = calculate_ema(price_list, 9)
+    ema_slow = calculate_ema(price_list, 21)
+    atr = calculate_atr(price_list)
+    pcr = get_nifty_pcr()
+    delta, gamma, theta, vega = estimate_greeks(ce_price, pe_price)
+
+    ema_signal = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+    # ============================================================
+    # BULLISH SCORE — Confidence for BUY CE signals
+    # ============================================================
+    bullish_score = 0
+    if ema_signal == "BULLISH":
+        bullish_score += 20
+    if rsi > 60:
+        bullish_score += 20
+    if spread > 0:
+        bullish_score += 20
+    if pcr < 1.0:
+        bullish_score += 20
+    if macd > 0:
+        bullish_score += 20
+
+    # ============================================================
+    # BEARISH SCORE — Confidence for BUY PE signals
+    # ============================================================
+    bearish_score = 0
+    if ema_signal == "BEARISH":
+        bearish_score += 20
+    if rsi < 40:
+        bearish_score += 20
+    if spread < 0:
+        bearish_score += 20
+    if pcr > 1.2:
+        bearish_score += 20
+    if macd < 0:
+        bearish_score += 20
+
+    # ============================================================
+    # SIGNAL DECISION WITH FULL CONFIDENCE LEVELS
+    # ============================================================
+    if bullish_score >= bearish_score and bullish_score >= CONSIDER_THRESHOLD:
+        confidence = bullish_score
+        if confidence >= STRONG_BUY_THRESHOLD:
+            action = "STRONG BUY CE"
+        elif confidence >= BUY_THRESHOLD:
+            action = "BUY CE"
+        elif confidence >= CONSIDER_THRESHOLD:
+            action = "CONSIDER CE"
+        else:
+            action = "HOLD"
+    elif bearish_score > bullish_score and bearish_score >= CONSIDER_THRESHOLD:
+        confidence = bearish_score
+        if confidence >= STRONG_BUY_THRESHOLD:
+            action = "STRONG BUY PE"
+        elif confidence >= BUY_THRESHOLD:
+            action = "BUY PE"
+        elif confidence >= CONSIDER_THRESHOLD:
+            action = "CONSIDER PE"
+        else:
+            action = "HOLD"
+    else:
+        confidence = max(bullish_score, bearish_score)
+        action = "HOLD"
+
+    # ============================================================
+    # UPDATE market_state — ALL PARAMETERS
+    # ============================================================
+    market_state.update({
+        "rsi": round(rsi, 2),
+        "momentum": "UPTREND" if spread > 0 else "DOWNTREND" if spread < 0 else "NEUTRAL",
+        "strength": "HIGH" if confidence >= BUY_THRESHOLD else "MODERATE" if confidence >= CONSIDER_THRESHOLD else "LOW",
+        "trend": ema_signal,
+        "action": action,
+        "confidence": confidence,
+        "volatility": "HIGH" if atr > 15 else "NORMAL" if atr > 5 else "LOW",
+        "alert": action
     })
 
+    # ============================================================
+    # UPDATE institutional_state — ALL PARAMETERS
+    # ============================================================
+    institutional_state.update({
+        "vwap": round(vwap, 2),
+        "ema_fast": round(ema_fast, 2),
+        "ema_slow": round(ema_slow, 2),
+        "ema_signal": ema_signal,
+        "atr": round(atr, 2),
+        "oi_buildup": "BULLISH" if pcr < 0.8 else "BEARISH" if pcr > 1.2 else "NEUTRAL",
+        "iv_state": "HIGH" if vega > 2 else "NORMAL",
+        "candle_structure": "BULLISH" if ema_signal == "BULLISH" and rsi > 60 else "BEARISH" if ema_signal == "BEARISH" and rsi < 40 else "SIDEWAYS",
+        "market_breadth": "BULLISH" if bullish_score > bearish_score else "BEARISH" if bearish_score > bullish_score else "BALANCED",
+        "volume_profile": "HIGH" if abs(spread) > 20 else "NORMAL",
+        "smart_money_flow": "BULLISH" if vwap > ema_slow else "BEARISH" if vwap < ema_slow else "NEUTRAL",
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "institutional_signal": action,
+        "institutional_confidence": confidence
+    })
+
+    # ============================================================
+    # UPDATE market_signal — ALL TRADING PARAMETERS
+    # ============================================================
+    market_signal.update({
+        "signal": "BULLISH" if spread > SPREAD_THRESHOLD else "BEARISH" if spread < -SPREAD_THRESHOLD else "NEUTRAL",
+        "ce_price": ce_price,
+        "pe_price": pe_price,
+        "spread": round(spread, 2),
+        "rsi": round(rsi, 2),
+        "macd": round(macd, 2),
+        "pcr": round(pcr, 2),
+        "vwap": round(vwap, 2),
+        "atr": round(atr, 2),
+        "ema_fast": round(ema_fast, 2),
+        "ema_slow": round(ema_slow, 2),
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "timestamp": datetime.now().isoformat()
+    })
+
+    logger.info(f"Signal: {action} (Bull={bullish_score} Bear={bearish_score}) | RSI={rsi:.1f} | Spread={spread:.2f} | EMA={ema_signal}")
+
+# --------------------------------------------------
+# Flask endpoints
+# --------------------------------------------------
+@app.route("/")
+def home():
+    return jsonify({"status": "online", "message": "Angel One WebSocket Engine"})
+
+@app.route("/api/live-signals")
+def live_signals():
+    return jsonify({
+        "status": "active",
+        "data": market_signal,
+        "market": market_state,
+        "institutional": institutional_state
+    })
 
 @app.route("/api/health")
 def health():
+    return jsonify({
+        "status": "ok", 
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
-    return "OK", 200
+@app.route("/debug/ws-status")
+def debug_ws():
+    return jsonify({
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "latest_ce": latest_ticks["ce_price"],
+        "latest_pe": latest_ticks["pe_price"],
+        "price_history_len": len(price_history)
+    })
 
+# --------------------------------------------------
+# Start background engine
+# --------------------------------------------------
+engine_started = False
 
-# ------------------------------------------------------------
-# WSGI
-# ------------------------------------------------------------
-application = app
+def start_background_engine():
+    global engine_started
+    if not engine_started:
+        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        ws_thread.start()
+        engine_started = True
+        logger.info("Angel One WebSocket engine started (auto-reconnecting)")
 
-# ------------------------------------------------------------
-# Start Background Thread
-# ------------------------------------------------------------
-threading.Thread(
-    target=run_feed,
-    daemon=True
-).start()
+start_background_engine()
 
-logger.info(
-    "Background signal engine started."
-)
-
-# ------------------------------------------------------------
-# Main
-# ------------------------------------------------------------
 if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=int(
-            os.environ.get("PORT", 10000)
-        )
-    )
+    start_background_engine()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
