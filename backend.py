@@ -244,7 +244,11 @@ def on_ws_open(wsapp):
             logger.error(f"Subscribe error: {e}")
 
 def on_ws_data(wsapp, message, *args):
-    global latest_ticks, price_history, tick_counter
+    logger.info(f"RAW message type: {type(message)} length: {len(message) if hasattr(message, '__len__') else 'unknown'}")
+    if isinstance(message, bytes):
+        logger.info(f"First 50 bytes: {message[:50].hex()}")
+    ...
+
     try:
         # The message is already parsed by the patched library into a dict
         if isinstance(message, bytes):
