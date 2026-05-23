@@ -1513,7 +1513,6 @@ if __name__ == "__main__":
 # ============================================================
 # BACKGROUND ENGINE START
 # ============================================================
-
 engine_started = False
 
 def initialize_engine():
@@ -1534,6 +1533,8 @@ def initialize_engine():
 
 
 # START ENGINE IMMEDIATELY
+initialize_engine()
+
 
 if __name__ == "__main__":
 
