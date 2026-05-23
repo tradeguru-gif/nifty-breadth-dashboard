@@ -1156,99 +1156,119 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
 
 # ============================================================
 # WEBSOCKET CALLBACKS (with bid, ask, oi)
+# ============================================================# ============================================================
+# WEBSOCKET CALLBACKS (with bid, ask, oi)
 # ============================================================
+
 def on_ws_open(wsapp):
     global sws
+
+    logger.info("Angel WebSocket Connected Successfully")
     logger.info("Angel One WebSocket opened")
+
     if sws is not None:
         try:
-            sws.subscribe("tradeguru_001", 1, [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}])
+            logger.info("Attempting token subscription...")
+
+            sws.subscribe(
+                "tradeguru_001",
+                1,
+                [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}]
+            )
+
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
+
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
+
 def on_ws_data(wsapp, message, *args):
-    global tick_counter, last_tick_time, latest_ticks, ce_price_history, pe_price_history
-    global ce_volume_history, pe_volume_history, ce_oi_history, pe_oi_history
-    
+
+    global tick_counter, last_tick_time, latest_ticks
+    global ce_price_history, pe_price_history
+    global ce_volume_history, pe_volume_history
+    global ce_oi_history, pe_oi_history
+
     last_tick_time = time.time()
-    
+
     try:
+
+        logger.info("Tick data received")
+
         if isinstance(message, bytes):
             return
+
         data = json.loads(message) if isinstance(message, str) else message
+
         ticks = data if isinstance(data, list) else [data]
+
         for tick in ticks:
+
+            logger.info(f"Raw Tick: {tick}")
+
             token = str(tick.get("tk"))
+
             ltp = tick.get("ltp", 0)
+
             if isinstance(ltp, (int, float)) and ltp > 1000:
                 ltp = ltp / 100
+
             vol = tick.get("v", 0) or tick.get("volume", 0)
+
             bid = tick.get("bp1") or tick.get("bid") or 0
+
             ask = tick.get("sp1") or tick.get("ask") or 0
+
             oi = tick.get("oi") or tick.get("openInterest") or 0
-            
+
             if token == CE_TOKEN:
+
+                logger.info(f"CE Tick -> Price: {ltp}")
+
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_volume"] = vol
                 latest_ticks["ce_bid"] = bid
                 latest_ticks["ce_ask"] = ask
                 latest_ticks["ce_oi"] = oi
+
                 ce_price_history.append(ltp)
                 ce_volume_history.append(vol)
                 ce_oi_history.append(oi)
+
                 tick_counter += 1
+
             elif token == PE_TOKEN:
+
+                logger.info(f"PE Tick -> Price: {ltp}")
+
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_volume"] = vol
                 latest_ticks["pe_bid"] = bid
                 latest_ticks["pe_ask"] = ask
                 latest_ticks["pe_oi"] = oi
+
                 pe_price_history.append(ltp)
                 pe_volume_history.append(vol)
                 pe_oi_history.append(oi)
+
                 tick_counter += 1
-            else:
-                continue
-            
-            # Minute snapshot
-            now = time.time()
-            if now - last_minute_snapshot["time"] >= 60:
-                avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
-                avg_vol = (latest_ticks["ce_volume"] + latest_ticks["pe_volume"]) / 2
-                snap = {
-                    "time": now,
-                    "price": avg_price,
-                    "volume": avg_vol,
-                    "ce": latest_ticks["ce_price"],
-                    "pe": latest_ticks["pe_price"]
-                }
-                for tf in timeframe_history:
-                    timeframe_history[tf].append(snap)
-                last_minute_snapshot["time"] = now
-                last_minute_snapshot["price"] = avg_price
-            
-            # Run signal engine every 5 ticks
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and tick_counter % 5 == 0 and len(ce_price_history) >= 30 and len(pe_price_history) >= 30:
-                run_signal_engine(
-                    ce, pe,
-                    list(ce_price_history), list(pe_price_history),
-                    list(ce_volume_history), list(pe_volume_history)
-                )
-    
+
     except Exception as e:
         logger.error(f"WebSocket data error: {e}", exc_info=True)
 
+
 def on_ws_error(wsapp, error):
-    logger.error(f"WebSocket error: {error}")
+
+    logger.error(f"Angel WebSocket Error: {error}")
+
 
 def on_ws_close(wsapp, *args):
-    logger.warning(f"WebSocket closed, args: {args}")
-    global ws_running
-    ws_running = False
 
+    logger.warning(f"Angel WebSocket Closed: {args}")
+
+    global ws_running
+
+    ws_running = False
 # ============================================================
 # WEBSOCKET CONNECTION MANAGER
 # ============================================================
@@ -1488,7 +1508,9 @@ def initialize_engine():
 
 
 # START ENGINE IMMEDIATELY
-initialize_engine()
+@app.before_first_request
+def start_background_engine():
+    initialize_engine()
 
 
 if __name__ == "__main__":
