@@ -13,7 +13,6 @@ from flask_cors import CORS
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import pyotp
-from fake_useragent import UserAgent   # <-- add to requirements.txt
 
 # ------------------------------------------------------------
 # MONKEY PATCH for SmartWebSocketV2 (fixes binary token parsing)
@@ -196,6 +195,18 @@ CONFIG = {
     "DAYS_TO_EXPIRY": 7,
 }
 
+# List of real browser user-agents (rotated)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+]
+
+def get_random_user_agent():
+    return USER_AGENTS[int(time.time()) % len(USER_AGENTS)]
+
 # ------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------
@@ -232,10 +243,9 @@ def get_nifty_spot():
     except Exception as e:
         logger.warning(f"Angel LTP fallback failed: {e}")
 
-    # NSE API with rotated headers
+    # NSE API with rotating user-agent
     try:
-        ua = UserAgent()
-        headers = {"User-Agent": ua.random, "Accept": "application/json"}
+        headers = {"User-Agent": get_random_user_agent(), "Accept": "application/json"}
         resp = requests.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
                             headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -396,8 +406,7 @@ def get_nifty_pcr():
     if now - pcr_cache["time"] < 120:
         return pcr_cache["value"]
     try:
-        ua = UserAgent()
-        headers = {"User-Agent": ua.random}
+        headers = {"User-Agent": get_random_user_agent()}
         resp = requests.get("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",
                             headers=headers, timeout=8)
         if resp.status_code == 200:
@@ -456,7 +465,7 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # ------------------------------------------------------------
-# Professional signal engine
+# Professional signal engine (full version)
 # ------------------------------------------------------------
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     global market_signal, market_state, institutional_state, signal_state, portfolio_state
