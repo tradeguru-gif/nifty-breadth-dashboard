@@ -11,7 +11,6 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import pyotp
 import math
-from fake_useragent import UserAgent
 
 # ============================================================
 # MONKEY‑PATCH FOR SmartWebSocketV2 (fixes token parsing)
@@ -64,7 +63,7 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
     raise ValueError("Missing Angel One credentials")
 
 # --------------------------------------------------
-# Global state
+# Global state (professional)
 # --------------------------------------------------
 CE_TOKEN = None
 PE_TOKEN = None
@@ -95,7 +94,7 @@ sws = None
 last_tick_time = time.time()
 engine_active = True
 
-# Timeframe snapshots
+# Timeframe snapshots (1min, 5min, 10min, 15min, 20min)
 timeframe_history = {
     "1min": deque(maxlen=60),
     "5min": deque(maxlen=20),
@@ -105,7 +104,7 @@ timeframe_history = {
 }
 last_minute_snapshot = {"time": 0, "price": 0, "volume": 0}
 
-# Signal state
+# Signal state – persistent across ticks
 signal_state = {
     "current_action": "HOLD",
     "current_signal_type": "NONE",
@@ -129,7 +128,7 @@ signal_state = {
     "lowest_price_since_entry": float("inf")
 }
 
-# Portfolio state
+# Portfolio state (simple in‑memory)
 portfolio_state = {
     "equity": 100000.0,
     "total_exposure_pct": 0.0,
@@ -175,7 +174,7 @@ pcr_cache = {"value": 1.0, "time": 0, "source": "default"}
 pcr_history = deque(maxlen=20)
 
 # Spot cache
-spot_cache = {"value": None, "timestamp": 0, "source": "initial"}
+spot_cache = {"value": None, "timestamp": 0}
 CACHE_TTL = 30
 
 # Configuration constants
@@ -213,40 +212,35 @@ CONFIG = {
 }
 
 # ============================================================
-# NSE SESSION MANAGER (Persistent session with rotating headers)
+# NSE SESSION MANAGER (Persistent session with retries)
 # ============================================================
 class NSESessionManager:
     def __init__(self):
         self.session = None
         self.last_init = 0
-        self.init_cooldown = 300
-        self.ua = UserAgent()
+        self.init_cooldown = 300  # 5 minutes
     
     def get_session(self):
         now = time.time()
         if self.session is None or (now - self.last_init) > self.init_cooldown:
             self.session = requests.Session()
-            # Use a randomly generated real browser User-Agent
-            headers = {
-                "User-Agent": self.ua.random,
+            self.session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-            }
-            self.session.headers.update(headers)
+            })
             try:
                 # Warm up session with NSE homepage
                 resp = self.session.get("https://www.nseindia.com", timeout=10)
                 resp.raise_for_status()
-                time.sleep(1)
+                time.sleep(1)  # Let cookies settle
                 self.last_init = now
                 logger.info("NSE session initialized successfully")
             except Exception as e:
                 logger.warning(f"NSE session init warning: {e}")
+                # Return session anyway, might still work
         return self.session
 
 nse_manager = NSESessionManager()
@@ -257,14 +251,17 @@ def safe_json_request(url, max_retries=3, backoff=2, timeout=10):
     for attempt in range(max_retries):
         try:
             resp = session.get(url, timeout=timeout)
+            # Check if response is valid JSON
             content_type = resp.headers.get('Content-Type', '')
             if 'json' not in content_type and 'text/plain' not in content_type:
                 logger.warning(f"Unexpected content type: {content_type}")
             
+            # Try to parse JSON
             try:
                 data = resp.json()
                 return data
             except json.JSONDecodeError as je:
+                # Log snippet of response for debugging
                 snippet = resp.text[:200] if resp.text else "[EMPTY]"
                 logger.warning(f"JSON decode failed (attempt {attempt+1}/{max_retries}): {je} | Response: {snippet}")
                 if attempt < max_retries - 1:
@@ -312,35 +309,21 @@ def get_market_phase():
         return "POST_MARKET"
 
 def get_nifty_spot():
-    """Fetch NIFTY spot price using multiple reliable methods."""
-    # Method 1: Angel One API (Most Reliable)
-    try:
-        auth_token, feed_token, obj = get_auth_token()
-        if auth_token:
-            # Token for NIFTY 50 index
-            ltp_data = obj.getLTPData("NIFTY", "99926005") # Using a common NIFTY 50 ETF token
-            if ltp_data and ltp_data.get("data"):
-                spot = float(ltp_data["data"]["ltp"])
-                logger.info(f"NIFTY spot via Angel One LTP = {spot}")
-                return spot
-    except Exception as e:
-        logger.warning(f"Angel One spot fetch failed: {e}")
-
-    # Method 2: NSE API with Enhanced Headers (Fallback)
+    """Fetch NIFTY spot with robust error handling."""
     try:
         url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
         data = safe_json_request(url, max_retries=3, timeout=10)
         
         if data is None:
-            logger.warning("Spot fetch from NSE failed: All retries exhausted")
+            logger.error("Spot fetch failed: All retries exhausted")
             return None
             
         if not isinstance(data, dict) or "data" not in data:
-            logger.warning(f"Spot fetch failed: Invalid data structure: {type(data)}")
+            logger.error(f"Spot fetch failed: Invalid data structure: {type(data)}")
             return None
             
         spot = float(data["data"][0]["lastPrice"])
-        logger.info(f"NIFTY spot via NSE API = {spot}")
+        logger.info(f"NIFTY spot = {spot}")
         return spot
         
     except (KeyError, IndexError, TypeError, ValueError) as e:
@@ -358,10 +341,7 @@ def get_nifty_spot_cached():
     if spot:
         spot_cache["value"] = spot
         spot_cache["timestamp"] = now
-        spot_cache["source"] = "live"
-    elif spot_cache["value"] is not None:
-        logger.warning(f"Using cached spot value from {spot_cache['timestamp']}")
-    return spot_cache["value"]
+    return spot
 
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, CE_SYMBOL, PE_SYMBOL, ATM_STRIKE, EXPIRY_DATE
