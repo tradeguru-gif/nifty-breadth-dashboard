@@ -212,6 +212,74 @@ CONFIG = {
 }
 
 # ============================================================
+# NSE SESSION MANAGER (Persistent session with retries)
+# ============================================================
+class NSESessionManager:
+    def __init__(self):
+        self.session = None
+        self.last_init = 0
+        self.init_cooldown = 300  # 5 minutes
+    
+    def get_session(self):
+        now = time.time()
+        if self.session is None or (now - self.last_init) > self.init_cooldown:
+            self.session = requests.Session()
+            self.session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+            })
+            try:
+                # Warm up session with NSE homepage
+                resp = self.session.get("https://www.nseindia.com", timeout=10)
+                resp.raise_for_status()
+                time.sleep(1)  # Let cookies settle
+                self.last_init = now
+                logger.info("NSE session initialized successfully")
+            except Exception as e:
+                logger.warning(f"NSE session init warning: {e}")
+                # Return session anyway, might still work
+        return self.session
+
+nse_manager = NSESessionManager()
+
+def safe_json_request(url, max_retries=3, backoff=2, timeout=10):
+    """Make JSON request with retries and proper error handling."""
+    session = nse_manager.get_session()
+    for attempt in range(max_retries):
+        try:
+            resp = session.get(url, timeout=timeout)
+            # Check if response is valid JSON
+            content_type = resp.headers.get('Content-Type', '')
+            if 'json' not in content_type and 'text/plain' not in content_type:
+                logger.warning(f"Unexpected content type: {content_type}")
+            
+            # Try to parse JSON
+            try:
+                data = resp.json()
+                return data
+            except json.JSONDecodeError as je:
+                # Log snippet of response for debugging
+                snippet = resp.text[:200] if resp.text else "[EMPTY]"
+                logger.warning(f"JSON decode failed (attempt {attempt+1}/{max_retries}): {je} | Response: {snippet}")
+                if attempt < max_retries - 1:
+                    time.sleep(backoff * (attempt + 1))
+                continue
+                
+        except requests.exceptions.RequestException as re:
+            logger.warning(f"Request failed (attempt {attempt+1}/{max_retries}): {re}")
+            if attempt < max_retries - 1:
+                time.sleep(backoff * (attempt + 1))
+            continue
+        except Exception as e:
+            logger.error(f"Unexpected error in safe_json_request: {e}")
+            break
+    
+    return None
+
+# ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 def is_market_open():
@@ -241,19 +309,28 @@ def get_market_phase():
         return "POST_MARKET"
 
 def get_nifty_spot():
+    """Fetch NIFTY spot with robust error handling."""
     try:
         url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        time.sleep(0.5)
-        response = session.get(url, headers=headers, timeout=10)
-        data = response.json()
+        data = safe_json_request(url, max_retries=3, timeout=10)
+        
+        if data is None:
+            logger.error("Spot fetch failed: All retries exhausted")
+            return None
+            
+        if not isinstance(data, dict) or "data" not in data:
+            logger.error(f"Spot fetch failed: Invalid data structure: {type(data)}")
+            return None
+            
         spot = float(data["data"][0]["lastPrice"])
         logger.info(f"NIFTY spot = {spot}")
         return spot
+        
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        logger.error(f"Spot parse error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Spot fetch error: {e}")
+        logger.error(f"Spot fetch unexpected error: {e}")
         return None
 
 def get_nifty_spot_cached():
@@ -475,26 +552,40 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 def get_nifty_pcr():
+    """Fetch PCR with robust error handling and fallback."""
     now = time.time()
     if now - pcr_cache["time"] < 120:
         return pcr_cache["value"]
+    
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        time.sleep(0.5)
-        resp = session.get(url, headers=headers, timeout=5)
-        data = resp.json()
-        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in data["records"]["data"] if "CE" in x)
-        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in data["records"]["data"] if "PE" in x)
+        data = safe_json_request(url, max_retries=2, timeout=8)
+        
+        if data is None:
+            logger.warning("PCR fetch failed: All retries exhausted, using cache")
+            return pcr_cache["value"]
+            
+        if not isinstance(data, dict) or "records" not in data:
+            logger.warning(f"PCR fetch failed: Invalid data structure: {type(data)}")
+            return pcr_cache["value"]
+            
+        records = data.get("records", {}).get("data", [])
+        if not records:
+            logger.warning("PCR fetch failed: No records found")
+            return pcr_cache["value"]
+            
+        ce_oi = sum(x.get("CE", {}).get("openInterest", 0) for x in records if "CE" in x)
+        pe_oi = sum(x.get("PE", {}).get("openInterest", 0) for x in records if "PE" in x)
         pcr = pe_oi / ce_oi if ce_oi else 1.0
+        
         pcr_cache["value"] = pcr
         pcr_cache["time"] = now
         pcr_history.append(pcr)
+        logger.info(f"PCR updated: {pcr:.3f}")
         return pcr
+        
     except Exception as e:
-        logger.warning(f"PCR fetch failed: {e}")
+        logger.warning(f"PCR fetch unexpected error: {e}")
         return pcr_cache["value"]
 
 def estimate_greeks(ce_price, pe_price):
