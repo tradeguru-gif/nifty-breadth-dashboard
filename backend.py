@@ -1277,56 +1277,130 @@ def get_auth_token():
 
 def start_angel_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
+
     retry_delay = 30
+
     while engine_active:
+
         try:
+
+            # --------------------------------------------------
+            # MARKET CLOSED
+            # --------------------------------------------------
             if not is_market_open():
+
                 logger.info("Market closed. Sleeping 5 minutes...")
+
                 CE_TOKEN = None
                 PE_TOKEN = None
-                time.sleep(300)
+
+                stop_event = threading.Event()
+
+                # Sleep 5 minutes but interruptible
+                stop_event.wait(timeout=300)
+
                 continue
-            
+
+            # --------------------------------------------------
+            # AUTH
+            # --------------------------------------------------
             auth_token, feed_token, obj = get_auth_token()
+
             if not auth_token:
-                logger.error("Auth failed, retrying in 30s...")
-                time.sleep(30)
+
+                logger.error("Auth failed, retrying in 60s...")
+
+                shutdown_event = threading.Event()
+
+                shutdown_event.wait(timeout=60)
+
                 continue
-            
+
+            # --------------------------------------------------
+            # TOKENS
+            # --------------------------------------------------
             if not CE_TOKEN or not PE_TOKEN:
+
                 ce_tok, pe_tok = get_current_atm_tokens()
+
                 if not ce_tok or not pe_tok:
-                    logger.error("Could not fetch ATM tokens. Retrying...")
-                    time.sleep(60)
+
+                    logger.error("Failed to fetch ATM tokens")
+
+                    shutdown_event = threading.Event()
+
+                    shutdown_event.wait(timeout=60)
+
                     continue
-            
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+
+            # --------------------------------------------------
+            # WEBSOCKET
+            # --------------------------------------------------
+            sws = SmartWebSocketV2(
+                auth_token,
+                ANGEL_API_KEY,
+                ANGEL_CLIENT_ID,
+                feed_token
+            )
+
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
+
             ws_running = True
+
             retry_delay = 30
+
             logger.info("Connecting WebSocket...")
+
             sws.connect()
-            
+
+            # --------------------------------------------------
+            # HEARTBEAT LOOP
+            # --------------------------------------------------
             while ws_running and engine_active:
+
                 time.sleep(1)
+
                 if time.time() - last_tick_time > 90:
+
                     logger.warning("No ticks for 90s, forcing reconnect")
+
                     break
-            
+
             logger.warning("WebSocket loop ended, reconnecting...")
+
             if sws:
+
                 try:
                     sws.close()
+
                 except:
                     pass
+
                 sws = None
+
             ws_running = False
-            time.sleep(retry_delay)
+
+            # --------------------------------------------------
+            # RETRY WAIT
+            # --------------------------------------------------
+            shutdown_event = threading.Event()
+
+            shutdown_event.wait(timeout=retry_delay)
+
             retry_delay = min(retry_delay * 2, 300)
-        
+
+        except Exception as e:
+
+            logger.error(f"WebSocket connection error: {e}")
+
+            shutdown_event = threading.Event()
+
+            shutdown_event.wait(timeout=retry_delay)
+
+            retry_delay = min(retry_delay * 2, 300)        
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
             time.sleep(retry_delay)
@@ -1393,18 +1467,36 @@ def health():
 # ============================================================
 # BACKGROUND ENGINE START
 # ============================================================
+# ============================================================
+# BACKGROUND ENGINE START
+# ============================================================
+
 engine_started = False
-def start_background_engine():
+
+def initialize_engine():
     global engine_started
+
     if not engine_started:
-        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+        ws_thread = threading.Thread(
+            target=start_angel_websocket,
+            daemon=True
+        )
         ws_thread.start()
+
         engine_started = True
         logger.info("Ultimate Signal Engine v5.1 started (auto-reconnecting)")
 
-start_background_engine()
+
+# START ENGINE IMMEDIATELY
+initialize_engine()
+
 
 if __name__ == "__main__":
-    start_background_engine()
+
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        threaded=True
+    )
