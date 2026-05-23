@@ -23,25 +23,21 @@ _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
     try:
         result = _original_parse(self, binary_data)
-    except:
-        result = {}
-    try:
-        token_bytes = binary_data[2:26]
-        token_int = int.from_bytes(token_bytes, byteorder='little')
-        result['token'] = str(token_int)
+
     except Exception as e:
-        logging.getLogger(__name__).error(f"Token extraction failed: {e}")
+        logging.getLogger(__name__).error(f"Binary parse failed: {e}")
+
+        result = {}
+
+        try:
+            token_bytes = binary_data[2:26]
+            token_int = int.from_bytes(token_bytes, byteorder='little')
+            result['token'] = str(token_int)
+
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Token extraction failed: {e}")
+
     return result
-
-SmartWebSocketV2._parse_binary_data = _patched_parse
-
-_original_on_close = SmartWebSocketV2._on_close
-def _patched_on_close(self, wsapp, *args):
-    try:
-        _original_on_close(self, wsapp)
-    except:
-        pass
-SmartWebSocketV2._on_close = _patched_on_close
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -92,6 +88,14 @@ tick_counter = 0
 ws_running = False
 sws = None
 last_tick_time = time.time()
+    try:
+        last_tick_time = time.time()
+
+        if isinstance(message, bytes):
+            logger.warning("Received raw bytes tick, skipping")
+            return
+
+        tick = message
 engine_active = True
 
 # Timeframe snapshots (1min, 5min, 10min, 15min, 20min)
@@ -939,8 +943,9 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     if final_action in ["STRONG BUY CE", "BUY CE", "CONSIDER CE BUY"]:
         entry = ce_price
         init_stop = entry - atr * CONFIG["STOP_LOSS_ATR_MULT"]
-        target = entry + atr * CONFIG["TARGET_ATR_MULT"]
-        if grade == "A":
+stop = init_stop
+
+if grade == "A":
             base = CONFIG["POSITION_SIZE_MAX_PCT"]
         elif grade == "B":
             base = CONFIG["POSITION_SIZE_BASE_PCT"] * 1.5
@@ -1104,8 +1109,8 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "position_size_pct": position_pct,
         "risk_reward": round(rr, 2),
         "entry_price": round(entry, 2) if entry else 0,
-        "stop_loss": round(stop, 2) if stop else 0,
-        "target": round(target, 2) if target else 0,
+        "stop_loss": round(signal_state["stop_loss"], 2),
+        "target": round(signal_state["target"], 2),
         "max_drawdown_pct": 0,
         "ce_delta": ce_delta,
         "pe_delta": pe_delta,
@@ -1156,119 +1161,174 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
 
 # ============================================================
 # WEBSOCKET CALLBACKS (with bid, ask, oi)
-# ============================================================# ============================================================
+# ============================================================
+# ============================================================
 # WEBSOCKET CALLBACKS (with bid, ask, oi)
 # ============================================================
 
 def on_ws_open(wsapp):
+
     global sws
 
-    logger.info("Angel WebSocket Connected Successfully")
     logger.info("Angel One WebSocket opened")
 
     if sws is not None:
-        try:
-            logger.info("Attempting token subscription...")
 
-            sws.subscribe(
-                "tradeguru_001",
-                1,
-                [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}]
-            )
+        try:
+
+            correlation_id = "tradeguru_001"
+
+            mode = 3
+
+            token_list = [
+                {
+                    "exchangeType": 2,
+                    "tokens": [str(CE_TOKEN), str(PE_TOKEN)]
+                }
+            ]
+
+            sws.subscribe(correlation_id, mode, token_list)
 
             logger.info(f"Subscribed to tokens: {CE_TOKEN}, {PE_TOKEN}")
 
         except Exception as e:
+
             logger.error(f"Subscribe error: {e}")
-
-
-def on_ws_data(wsapp, message, *args):
-
-    global tick_counter, last_tick_time, latest_ticks
-    global ce_price_history, pe_price_history
-    global ce_volume_history, pe_volume_history
-    global ce_oi_history, pe_oi_history
-
-    last_tick_time = time.time()
-
-    try:
-
-        logger.info("Tick data received")
-
-        if isinstance(message, bytes):
-            return
-
-        data = json.loads(message) if isinstance(message, str) else message
-
-        ticks = data if isinstance(data, list) else [data]
-
-        for tick in ticks:
-
-            logger.info(f"Raw Tick: {tick}")
-
-            token = str(tick.get("tk"))
-
-            ltp = tick.get("ltp", 0)
-
-            if isinstance(ltp, (int, float)) and ltp > 1000:
-                ltp = ltp / 100
-
-            vol = tick.get("v", 0) or tick.get("volume", 0)
-
-            bid = tick.get("bp1") or tick.get("bid") or 0
-
-            ask = tick.get("sp1") or tick.get("ask") or 0
-
-            oi = tick.get("oi") or tick.get("openInterest") or 0
-
-            if token == CE_TOKEN:
-
-                logger.info(f"CE Tick -> Price: {ltp}")
-
-                latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_volume"] = vol
-                latest_ticks["ce_bid"] = bid
-                latest_ticks["ce_ask"] = ask
-                latest_ticks["ce_oi"] = oi
-
-                ce_price_history.append(ltp)
-                ce_volume_history.append(vol)
-                ce_oi_history.append(oi)
-
-                tick_counter += 1
-
-            elif token == PE_TOKEN:
-
-                logger.info(f"PE Tick -> Price: {ltp}")
-
-                latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_volume"] = vol
-                latest_ticks["pe_bid"] = bid
-                latest_ticks["pe_ask"] = ask
-                latest_ticks["pe_oi"] = oi
-
-                pe_price_history.append(ltp)
-                pe_volume_history.append(vol)
-                pe_oi_history.append(oi)
-
-                tick_counter += 1
-
-    except Exception as e:
-        logger.error(f"WebSocket data error: {e}", exc_info=True)
 
 
 def on_ws_error(wsapp, error):
 
-    logger.error(f"Angel WebSocket Error: {error}")
+    global ws_running
+
+    logger.error(f"WebSocket Error: {error}")
+
+    ws_running = False
 
 
-def on_ws_close(wsapp, *args):
-
-    logger.warning(f"Angel WebSocket Closed: {args}")
+def on_ws_close(wsapp):
 
     global ws_running
 
+    logger.warning("WebSocket Closed")
+
     ws_running = False
+
+
+def on_ws_data(wsapp, message):
+
+    global tick_counter
+    global last_tick_time
+
+    try:
+
+        last_tick_time = time.time()
+
+        if isinstance(message, bytes):
+
+            logger.warning("Received raw bytes tick, skipping")
+
+            return
+
+        tick = message
+
+        token = str(tick.get("token", ""))
+
+        ltp = float(tick.get("last_traded_price", 0)) / 100
+
+        volume = int(tick.get("volume_trade_for_the_day", 0))
+
+        bid = (
+            float(
+                tick.get("best_5_buy_data", [{}])[0].get("price", 0)
+            ) / 100
+            if tick.get("best_5_buy_data")
+            else 0
+        )
+
+        ask = (
+            float(
+                tick.get("best_5_sell_data", [{}])[0].get("price", 0)
+            ) / 100
+            if tick.get("best_5_sell_data")
+            else 0
+        )
+
+        oi = int(tick.get("open_interest", 0))
+
+        # ====================================================
+        # CE
+        # ====================================================
+
+        if token == str(CE_TOKEN):
+
+            latest_ticks["ce_price"] = ltp
+            latest_ticks["ce_volume"] = volume
+            latest_ticks["ce_bid"] = bid
+            latest_ticks["ce_ask"] = ask
+            latest_ticks["ce_oi"] = oi
+
+            ce_price_history.append(ltp)
+            ce_volume_history.append(volume)
+            ce_oi_history.append(oi)
+
+            tick_counter += 1
+
+            logger.info(f"CE UPDATE => {ltp}")
+
+        # ====================================================
+        # PE
+        # ====================================================
+
+        elif token == str(PE_TOKEN):
+
+            latest_ticks["pe_price"] = ltp
+            latest_ticks["pe_volume"] = volume
+            latest_ticks["pe_bid"] = bid
+            latest_ticks["pe_ask"] = ask
+            latest_ticks["pe_oi"] = oi
+
+            pe_price_history.append(ltp)
+            pe_volume_history.append(volume)
+            pe_oi_history.append(oi)
+
+            tick_counter += 1
+
+            logger.info(f"PE UPDATE => {ltp}")
+
+        else:
+
+            logger.warning(f"Unknown token received: {token}")
+
+        # ====================================================
+        # RUN ENGINE
+        # ====================================================
+
+        ce = latest_ticks["ce_price"]
+        pe = latest_ticks["pe_price"]
+
+        if (
+            ce is not None
+            and pe is not None
+            and ce > 0
+            and pe > 0
+            and len(ce_price_history) >= 30
+            and len(pe_price_history) >= 30
+            and tick_counter % 5 == 0
+        ):
+
+            run_signal_engine(
+                ce,
+                pe,
+                list(ce_price_history),
+                list(pe_price_history),
+                list(ce_volume_history),
+                list(pe_volume_history),
+            )
+
+    except Exception as e:
+
+        logger.error(f"WebSocket data error: {e}", exc_info=True)
+
 # ============================================================
 # WEBSOCKET CONNECTION MANAGER
 # ============================================================
@@ -1297,130 +1357,56 @@ def get_auth_token():
 
 def start_angel_websocket():
     global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time, tick_counter
-
     retry_delay = 30
-
     while engine_active:
-
         try:
-
-            # --------------------------------------------------
-            # MARKET CLOSED
-            # --------------------------------------------------
             if not is_market_open():
-
                 logger.info("Market closed. Sleeping 5 minutes...")
-
                 CE_TOKEN = None
                 PE_TOKEN = None
-
-                stop_event = threading.Event()
-
-                # Sleep 5 minutes but interruptible
-                stop_event.wait(timeout=300)
-
+                time.sleep(300)
                 continue
-
-            # --------------------------------------------------
-            # AUTH
-            # --------------------------------------------------
+            
             auth_token, feed_token, obj = get_auth_token()
-
             if not auth_token:
-
-                logger.error("Auth failed, retrying in 60s...")
-
-                shutdown_event = threading.Event()
-
-                shutdown_event.wait(timeout=60)
-
+                logger.error("Auth failed, retrying in 30s...")
+                time.sleep(30)
                 continue
-
-            # --------------------------------------------------
-            # TOKENS
-            # --------------------------------------------------
+            
             if not CE_TOKEN or not PE_TOKEN:
-
                 ce_tok, pe_tok = get_current_atm_tokens()
-
                 if not ce_tok or not pe_tok:
-
-                    logger.error("Failed to fetch ATM tokens")
-
-                    shutdown_event = threading.Event()
-
-                    shutdown_event.wait(timeout=60)
-
+                    logger.error("Could not fetch ATM tokens. Retrying...")
+                    time.sleep(60)
                     continue
-
-            # --------------------------------------------------
-            # WEBSOCKET
-            # --------------------------------------------------
-            sws = SmartWebSocketV2(
-                auth_token,
-                ANGEL_API_KEY,
-                ANGEL_CLIENT_ID,
-                feed_token
-            )
-
+            
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
-
             ws_running = True
-
             retry_delay = 30
-
             logger.info("Connecting WebSocket...")
-
             sws.connect()
-
-            # --------------------------------------------------
-            # HEARTBEAT LOOP
-            # --------------------------------------------------
+            last_tick_time = time.time()
             while ws_running and engine_active:
-
                 time.sleep(1)
-
                 if time.time() - last_tick_time > 90:
-
                     logger.warning("No ticks for 90s, forcing reconnect")
-
                     break
-
+            
             logger.warning("WebSocket loop ended, reconnecting...")
-
             if sws:
-
                 try:
                     sws.close()
-
                 except:
                     pass
-
                 sws = None
-
             ws_running = False
-
-            # --------------------------------------------------
-            # RETRY WAIT
-            # --------------------------------------------------
-            shutdown_event = threading.Event()
-
-            shutdown_event.wait(timeout=retry_delay)
-
+            time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 300)
-
-        except Exception as e:
-
-            logger.error(f"WebSocket connection error: {e}")
-
-            shutdown_event = threading.Event()
-
-            shutdown_event.wait(timeout=retry_delay)
-
-            retry_delay = min(retry_delay * 2, 300)        
+        
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
             time.sleep(retry_delay)
@@ -1487,57 +1473,18 @@ def health():
 # ============================================================
 # BACKGROUND ENGINE START
 # ============================================================
-# ============================================================
-# BACKGROUND ENGINE START
-# ============================================================
-
 engine_started = False
-
-def initialize_engine():
+def start_background_engine():
     global engine_started
-
     if not engine_started:
-        ws_thread = threading.Thread(
-            target=start_angel_websocket,
-            daemon=True
-        )
+        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
         ws_thread.start()
-
         engine_started = True
         logger.info("Ultimate Signal Engine v5.1 started (auto-reconnecting)")
 
-
-# START ENGINE IMMEDIATELY
-
-if __name__ == "__main__":
-# ============================================================
-# BACKGROUND ENGINE START
-# ============================================================
-engine_started = False
-
-def initialize_engine():
-    global engine_started
-
-    if not engine_started:
-
-        ws_thread = threading.Thread(
-            target=start_angel_websocket,
-            daemon=True
-        )
-
-        ws_thread.start()
-
-        engine_started = True
-
-        logger.info("Ultimate Signal Engine v5.1 started (auto-reconnecting)")
-
-
-# START ENGINE IMMEDIATELY
-initialize_engine()
-
+start_background_engine()
 
 if __name__ == "__main__":
-
+    start_background_engine()
     port = int(os.environ.get("PORT", 10000))
-
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
