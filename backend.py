@@ -1508,17 +1508,35 @@ def initialize_engine():
 
 
 # START ENGINE IMMEDIATELY
-@app.before_first_request
-def start_background_engine():
-    initialize_engine()
 
+if __name__ == "__main__":
+# ============================================================
+# BACKGROUND ENGINE START
+# ============================================================
+
+engine_started = False
+
+def initialize_engine():
+    global engine_started
+
+    if not engine_started:
+
+        ws_thread = threading.Thread(
+            target=start_angel_websocket,
+            daemon=True
+        )
+
+        ws_thread.start()
+
+        engine_started = True
+
+        logger.info("Ultimate Signal Engine v5.1 started (auto-reconnecting)")
+
+
+# START ENGINE IMMEDIATELY
 
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 10000))
 
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        threaded=True
-    )
+    app.run(host="0.0.0.0", port=port)
