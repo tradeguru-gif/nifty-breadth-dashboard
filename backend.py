@@ -1,3 +1,15 @@
+import sys
+import traceback
+
+try:
+    # Your existing code starts here
+    from SmartApi import SmartConnect
+    # ... (rest of your code) ...
+except Exception as e:
+    with open("error.log", "w") as f:
+        f.write(traceback.format_exc())
+    print(traceback.format_exc())
+    sys.exit(1)
 import os
 import time
 import logging
