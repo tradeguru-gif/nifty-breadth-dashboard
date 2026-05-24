@@ -3,6 +3,29 @@ import traceback
 
 try:
     # Your existing code starts here
+
+
+
+
+
+import sys
+import traceback
+try:
+    # Your current Angel One SmartConnect login code block goes here
+    # e.g., obj = SmartConnect(api_key=...)
+    # data = obj.generateSession(...)
+    pass
+except Exception as e:
+    print("--- FATAL STARTUP TRACEBACK ---", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    print("--------------------------------", file=sys.stderr)
+    sys.exit(1) # Keeps the clean exit status behavior but surfaces the logs
+
+
+
+
+
+
     from SmartApi import SmartConnect
     # ... (rest of your code) ...
 except Exception as e:
