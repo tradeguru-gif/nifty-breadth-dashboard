@@ -223,15 +223,13 @@ def get_spot_from_angel_ltp():
         auth_token, feed_token, obj = get_auth_token()
         if auth_token:
             # Correct usage: getLTP(exchange, token)
-            ltp_data = obj.getLTP("NSE", "99926005")
-            if ltp_data and 'ltp' in ltp_data:
-                spot = float(ltp_data['ltp'])
-                logger.info(f"Spot from Angel LTP: {spot}")
-                return spot
-            elif ltp_data and 'data' in ltp_data and 'ltp' in ltp_data['data']:
-                spot = float(ltp_data['data']['ltp'])
-                logger.info(f"Spot from Angel LTP: {spot}")
-                return spot
+           # ✅ New, correct block
+ltp_data = obj.ltpData("NSE", "NIFTY", "99926005")
+if ltp_data and ltp_data.get('data') and ltp_data['data'].get('ltp'):
+    spot = float(ltp_data['data']['ltp'])
+    logger.info(f"Spot from Angel LTP: {spot}")
+    return spot
+               
     except AttributeError:
         logger.warning("getLTP not available in this SmartAPI version")
     except Exception as e:
