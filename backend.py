@@ -200,56 +200,243 @@ def get_market_phase():
     else: return "POST_MARKET"
 
 def get_nifty_index_token():
-    """Find NIFTY 50 index token from instrument master (fallback 99926005)."""
-    global NIFTY_TOKEN
-    try:
-        resp = requests.get("https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json", timeout=30)
-        df = pd.DataFrame(resp.json())
-        # Search by name 'NIFTY' and exchange 'NSE'
-        nifty_idx = df[(df['name'] == 'NIFTY') & (df['exch_seg'] == 'NSE')]
-        if not nifty_idx.empty:
-            token = str(nifty_idx.iloc[0]['token'])
-            logger.info(f"NIFTY index token found: {token}")
-            return token
-    except Exception as e:
-        logger.warning(f"Error finding NIFTY token: {e}")
-    # Most reliable known token
-    logger.info("Using fallback NIFTY index token: 99926005")
-    return "99926005"
+    """
+    Dynamically find valid NIFTY index token from Angel scrip master.
+    """
 
-def get_spot_from_angel_ltp():
+    global NIFTY_TOKEN
+
     try:
-        auth_token, feed_token, obj = get_auth_token()
-        if auth_token:
-            # Correct method: ltpData
-            ltp_data = obj.ltpData("NSE", "NIFTY", "99926005")
-            if ltp_data and ltp_data.get('data') and ltp_data['data'].get('ltp'):
-                spot = float(ltp_data['data']['ltp'])
-                logger.info(f"Spot from Angel LTP: {spot}")
-                return spot
-    except AttributeError:
-        logger.warning("ltpData not available in this SmartAPI version")
+
+        resp = requests.get(
+            "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json",
+            timeout=30
+        )
+
+        resp.raise_for_status()
+
+        data = resp.json()
+
+        for item in data:
+
+            symbol = str(item.get("symbol", "")).upper()
+            exch_seg = str(item.get("exch_seg", "")).upper()
+
+            # Valid NSE NIFTY index
+            if (
+                exch_seg == "NSE"
+                and symbol in ["NIFTY", "NIFTY 50", "NIFTY50"]
+            ):
+
+                token = str(item.get("token"))
+
+                logger.info(
+                    f"NIFTY token found dynamically: {symbol} -> {token}"
+                )
+
+                NIFTY_TOKEN = token
+
+                return token
+
+        logger.error("NIFTY token not found in scrip master")
+
     except Exception as e:
-        logger.warning(f"Angel LTP error: {e}")
+        logger.exception(f"Error finding NIFTY token: {e}")
+
     return None
 
+# ============================================================
+# NIFTY SPOT FETCHER (FIXED VERSION)
+# ============================================================
+
+import requests
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------
+# CACHE
+# ------------------------------------------------------------
+
+CACHE_TTL = 3  # seconds
+
+spot_cache = {
+    "value": None,
+    "timestamp": 0
+}
+
+token_cache = {
+    "token": None,
+    "symbol": None,
+    "timestamp": 0
+}
+
+# ------------------------------------------------------------
+# FETCH NIFTY TOKEN FROM ANGEL SCRIP MASTER
+# ------------------------------------------------------------
+
+def get_nifty_token():
+    """
+    Dynamically fetch correct NIFTY token from Angel master.
+    """
+
+    # Use cached token for 1 hour
+    if (
+        token_cache["token"] is not None
+        and (time.time() - token_cache["timestamp"]) < 3600
+    ):
+        return token_cache["symbol"], token_cache["token"]
+
+    try:
+        url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+
+        for item in data:
+
+            symbol = str(item.get("symbol", "")).upper()
+            exch_seg = str(item.get("exch_seg", "")).upper()
+            token = str(item.get("token", ""))
+
+            # Find NIFTY index
+            if (
+                exch_seg == "NSE"
+                and symbol in ["NIFTY", "NIFTY 50", "NIFTY50"]
+            ):
+
+                token_cache["token"] = token
+                token_cache["symbol"] = symbol
+                token_cache["timestamp"] = time.time()
+
+                logger.info(f"Loaded NIFTY token: {symbol} -> {token}")
+
+                return symbol, token
+
+        logger.error("NIFTY token not found in scrip master")
+
+    except Exception as e:
+        logger.exception(f"Error loading NIFTY token: {e}")
+
+    return None, None
+
+
+# ------------------------------------------------------------
+# FETCH SPOT FROM ANGEL LTP API
+# ------------------------------------------------------------
+
+def get_spot_from_angel_ltp():
+
+    try:
+
+        auth_token, feed_token, obj = get_auth_token()
+
+        if not auth_token or obj is None:
+            logger.warning("Angel auth failed")
+            return None
+
+        trading_symbol, symbol_token = get_nifty_token()
+
+        if not trading_symbol or not symbol_token:
+            logger.warning("Could not get valid NIFTY token")
+            return None
+
+        logger.info(
+            f"Fetching LTP for {trading_symbol} ({symbol_token})"
+        )
+
+        ltp_data = obj.ltpData(
+            "NSE",
+            trading_symbol,
+            symbol_token
+        )
+
+        if (
+            ltp_data
+            and ltp_data.get("status")
+            and ltp_data.get("data")
+            and ltp_data["data"].get("ltp")
+        ):
+
+            spot = float(ltp_data["data"]["ltp"])
+
+            logger.info(f"NIFTY Spot from Angel LTP: {spot}")
+
+            return spot
+
+        logger.warning(f"Invalid LTP response: {ltp_data}")
+
+    except AttributeError:
+        logger.warning("ltpData not available in this SmartAPI version")
+
+    except Exception as e:
+        logger.exception(f"Angel LTP fetch error: {e}")
+
+    return None
+
+
+# ------------------------------------------------------------
+# MAIN SPOT FETCHER
+# ------------------------------------------------------------
+
 def get_nifty_spot():
-    """Primary: use cached WebSocket spot; fallback: Angel LTP."""
-    # If WebSocket already gave us a fresh spot (within 5 sec), use it
-    if latest_ticks["nifty_spot"] > 0 and (time.time() - last_tick_time) < 5:
-        return latest_ticks["nifty_spot"]
-    # Otherwise try Angel LTP
-    return get_spot_from_angel_ltp()
+    """
+    Priority:
+    1. WebSocket live tick
+    2. Angel REST LTP fallback
+    """
+
+    try:
+
+        # Use fresh websocket tick first
+        if (
+            latest_ticks.get("nifty_spot", 0) > 0
+            and (time.time() - last_tick_time) < 5
+        ):
+
+            return latest_ticks["nifty_spot"]
+
+        logger.warning("WebSocket spot stale -> using REST fallback")
+
+        # Fallback to REST
+        return get_spot_from_angel_ltp()
+
+    except Exception as e:
+        logger.exception(f"get_nifty_spot error: {e}")
+
+    return None
+
+
+# ------------------------------------------------------------
+# CACHED SPOT FETCHER
+# ------------------------------------------------------------
 
 def get_nifty_spot_cached():
+
     now = time.time()
-    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+
+    # Return cached value if fresh
+    if (
+        now - spot_cache["timestamp"] < CACHE_TTL
+        and spot_cache["value"] is not None
+    ):
         return spot_cache["value"]
+
+    # Fetch fresh spot
     spot = get_nifty_spot()
-    if spot:
+
+    if spot is not None:
+
         spot_cache["value"] = spot
         spot_cache["timestamp"] = now
+
     return spot_cache["value"]
+
+
+
 
 def get_current_atm_tokens():
     """Auto-fetch CE/PE tokens using live spot and scrip master."""
