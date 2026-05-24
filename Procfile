@@ -1,1 +1,1 @@
-web: gunicorn --bind=0.0.0.0:$PORT --workers=2 backend:app 
+web: gunicorn --bind=0.0.0.0:$PORT --workers=2 backend:app#--------------------------------#USE IN ENVIRONMENT--START COMMEND: python -m gunicorn --bind=0.0.0.0:$PORT --workers=2 backend:app#------------------------------------------------- 
