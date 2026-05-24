@@ -1,5 +1,11 @@
 flask==2.3.3
 flask-cors==4.0.1
-dhanhq>=2.1.0
 gunicorn==21.2.0
 requests==2.31.0
+numpy==1.24.3
+pandas==2.0.3
+smartapi-python==1.5.5
+pyotp==2.9.0
+pycryptodome==3.20.0
+logzero==1.7.0
+websocket-client==1.8.0
