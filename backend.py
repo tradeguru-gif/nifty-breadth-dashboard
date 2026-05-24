@@ -1029,81 +1029,116 @@ def on_open(wsapp):
             {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]},   # NFO options
             {"exchangeType": 1, "tokens": [NIFTY_TOKEN]}            # NSE index
         ]
-        sws.subscribe("tradeguru", 1, tokens)
+        sws.subscribe(
+    correlation_id="tradeguru",
+    mode=1,
+    token_list=tokens
+)
         logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}, NIFTY={NIFTY_TOKEN}")
 
 def on_data(wsapp, message):
-    global tick_counter, last_tick_time, latest_ticks, ce_price_history, pe_price_history
-    global ce_volume_history, pe_volume_history, ce_oi_history, pe_oi_history
 
-    last_tick_time = time.time()
+    global tick_counter
+    global last_tick_time
+
     try:
-        if isinstance(message, bytes):
+
+        logger.info(f"TICK RECEIVED: {message}")
+
+        if not message:
             return
-        data = json.loads(message) if isinstance(message, str) else message
-        ticks = data if isinstance(data, list) else [data]
-        for tick in ticks:
-            token = str(tick.get("tk"))
-            ltp = tick.get("ltp", 0)
-            if isinstance(ltp, (int, float)) and ltp > 1000:
-                ltp = ltp / 100
-            vol = tick.get("v", 0) or tick.get("volume", 0)
-            bid = tick.get("bp1") or tick.get("bid", 0)
-            ask = tick.get("sp1") or tick.get("ask", 0)
-            oi = tick.get("oi") or tick.get("openInterest", 0)
 
-            if token == CE_TOKEN:
-                latest_ticks["ce_price"] = ltp
-                latest_ticks["ce_volume"] = vol
-                latest_ticks["ce_bid"] = bid
-                latest_ticks["ce_ask"] = ask
-                latest_ticks["ce_oi"] = oi
-                ce_price_history.append(ltp)
-                ce_volume_history.append(vol)
-                ce_oi_history.append(oi)
-                tick_counter += 1
-                logger.info(f"CE => {ltp}")
-            elif token == PE_TOKEN:
-                latest_ticks["pe_price"] = ltp
-                latest_ticks["pe_volume"] = vol
-                latest_ticks["pe_bid"] = bid
-                latest_ticks["pe_ask"] = ask
-                latest_ticks["pe_oi"] = oi
-                pe_price_history.append(ltp)
-                pe_volume_history.append(vol)
-                pe_oi_history.append(oi)
-                tick_counter += 1
-                logger.info(f"PE => {ltp}")
-            elif token == NIFTY_TOKEN:
-                latest_ticks["nifty_spot"] = ltp
-                spot_cache["value"] = ltp
-                spot_cache["timestamp"] = time.time()
-                # Log every 30 seconds to avoid spam
-                if int(time.time()) % 30 == 0:
-                    logger.info(f"NIFTY Spot => {ltp}")
-            else:
-                continue
+        # SmartAPI sometimes gives dict directly
+        tick = message if isinstance(message, dict) else json.loads(message)
 
-            # Minute snapshot
-            now = time.time()
-            if now - last_minute_snapshot["time"] >= 60:
-                avg_price = (latest_ticks["ce_price"] + latest_ticks["pe_price"]) / 2
-                avg_vol = (latest_ticks["ce_volume"] + latest_ticks["pe_volume"]) / 2
-                snap = {"time": now, "price": avg_price, "volume": avg_vol,
-                        "ce": latest_ticks["ce_price"], "pe": latest_ticks["pe_price"]}
-                for tf in timeframe_history:
-                    timeframe_history[tf].append(snap)
-                last_minute_snapshot["time"] = now
+        token = str(
+            tick.get("token")
+            or tick.get("tk")
+            or ""
+        )
 
-            # Run signal engine every 5 ticks
-            ce = latest_ticks["ce_price"]
-            pe = latest_ticks["pe_price"]
-            if ce > 0 and pe > 0 and tick_counter % 5 == 0 and len(ce_price_history) >= 30 and len(pe_price_history) >= 30:
-                run_signal_engine(ce, pe,
-                                  list(ce_price_history), list(pe_price_history),
-                                  list(ce_volume_history), list(pe_volume_history))
+        ltp = (
+            tick.get("last_traded_price")
+            or tick.get("ltp")
+            or 0
+        )
+
+        # Angel sends paise
+        if ltp and ltp > 1000:
+            ltp = float(ltp) / 100
+
+        last_tick_time = time.time()
+
+        # -------------------------------------------------
+        # NIFTY SPOT
+        # -------------------------------------------------
+
+        if token == str(NIFTY_TOKEN):
+
+            latest_ticks["nifty_spot"] = ltp
+
+            spot_cache["value"] = ltp
+            spot_cache["timestamp"] = time.time()
+
+            logger.info(f"WS Spot Updated: {ltp}")
+
+            return
+
+        # -------------------------------------------------
+        # CE OPTION
+        # -------------------------------------------------
+
+        if token == str(CE_TOKEN):
+
+            latest_ticks["ce_price"] = ltp
+
+            ce_price_history.append(ltp)
+
+            tick_counter += 1
+
+            logger.info(f"CE => {ltp}")
+
+        # -------------------------------------------------
+        # PE OPTION
+        # -------------------------------------------------
+
+        elif token == str(PE_TOKEN):
+
+            latest_ticks["pe_price"] = ltp
+
+            pe_price_history.append(ltp)
+
+            tick_counter += 1
+
+            logger.info(f"PE => {ltp}")
+
+        # -------------------------------------------------
+        # RUN ENGINE
+        # -------------------------------------------------
+
+        ce = latest_ticks["ce_price"]
+        pe = latest_ticks["pe_price"]
+
+        if (
+            ce > 0
+            and pe > 0
+            and tick_counter % 5 == 0
+            and len(ce_price_history) >= 30
+            and len(pe_price_history) >= 30
+        ):
+
+            run_signal_engine(
+                ce,
+                pe,
+                list(ce_price_history),
+                list(pe_price_history),
+                list(ce_volume_history),
+                list(pe_volume_history)
+            )
+
     except Exception as e:
-        logger.error(f"Data error: {e}", exc_info=True)
+
+        logger.exception(f"Tick parse error: {e}")
 
 def on_error(wsapp, error):
     global ws_running
