@@ -218,20 +218,17 @@ def get_nifty_index_token():
     return "99926005"
 
 def get_spot_from_angel_ltp():
-    """Get NIFTY spot via Angel One getLTP (correct method name)."""
     try:
         auth_token, feed_token, obj = get_auth_token()
         if auth_token:
-            # Correct usage: getLTP(exchange, token)
-           # ✅ New, correct block
-ltp_data = obj.ltpData("NSE", "NIFTY", "99926005")
-if ltp_data and ltp_data.get('data') and ltp_data['data'].get('ltp'):
-    spot = float(ltp_data['data']['ltp'])
-    logger.info(f"Spot from Angel LTP: {spot}")
-    return spot
-               
+            # Correct method: ltpData
+            ltp_data = obj.ltpData("NSE", "NIFTY", "99926005")
+            if ltp_data and ltp_data.get('data') and ltp_data['data'].get('ltp'):
+                spot = float(ltp_data['data']['ltp'])
+                logger.info(f"Spot from Angel LTP: {spot}")
+                return spot
     except AttributeError:
-        logger.warning("getLTP not available in this SmartAPI version")
+        logger.warning("ltpData not available in this SmartAPI version")
     except Exception as e:
         logger.warning(f"Angel LTP error: {e}")
     return None
