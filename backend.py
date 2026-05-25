@@ -855,6 +855,8 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     if final_action in ["STRONG BUY CE", "BUY CE", "CONSIDER CE BUY"]:
         entry = ce_price
         init_stop = entry - atr * CONFIG["STOP_LOSS_ATR_MULT"]
+        init_stop = entry + atr * CONFIG["STOP_LOSS_ATR_MULT"]
+stop = init_stop
         target = entry + atr * CONFIG["TARGET_ATR_MULT"]
         if grade == "A": base = CONFIG["POSITION_SIZE_MAX_PCT"]
         elif grade == "B": base = CONFIG["POSITION_SIZE_BASE_PCT"] * 1.5
@@ -898,6 +900,8 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     elif final_action in ["STRONG BUY PE", "BUY PE", "CONSIDER PE BUY"]:
         entry = pe_price
         init_stop = entry + atr * CONFIG["STOP_LOSS_ATR_MULT"]
+       
+stop = init_stop
         target = entry - atr * CONFIG["TARGET_ATR_MULT"]
         if grade == "A": base = CONFIG["POSITION_SIZE_MAX_PCT"]
         elif grade == "B": base = CONFIG["POSITION_SIZE_BASE_PCT"] * 1.5
@@ -1220,7 +1224,9 @@ def start_websocket():
             ws_running = True
             logger.info("Connecting WebSocket")
             sws.connect()
-            while ws_running and engine_active:
+
+            sws.connect()
+           while ws_running and engine_active:
                 time.sleep(1)
                 if time.time() - last_tick_time > 90:
                     logger.warning("No ticks for 90s, forcing reconnect")
