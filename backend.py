@@ -342,6 +342,7 @@ def angel_login():
 
     return obj
 
+
 def get_spot_from_angel_ltp():
 
     global last_rest_fetch
@@ -392,12 +393,20 @@ def get_spot_from_angel_ltp():
 
     return None
 
-TL and spot_cache["value"] is not None:
+
+def get_nifty_spot_cached():
+
+    now = time.time()
+
+    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
         return spot_cache["value"]
+
     spot = get_nifty_spot()
+
     if spot is not None:
         spot_cache["value"] = spot
         spot_cache["timestamp"] = now
+
     return spot_cache["value"]
 
 def get_current_atm_tokens():
