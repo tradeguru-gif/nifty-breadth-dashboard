@@ -6,7 +6,7 @@ import json
 import requests
 import math
 from collections import deque
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from flask import Flask, jsonify
 from flask_cors import CORS
 from SmartApi import SmartConnect
@@ -227,11 +227,15 @@ CONFIG = {
 # ---------- Helper Functions ----------
 def is_market_open():
     now = datetime.now()
+
+    # Saturday=5, Sunday=6
     if now.weekday() >= 5:
         return False
-    start = datetime.strptime("09:15", "%H:%M").time()
-    end = datetime.strptime("15:30", "%H:%M").time()
-    return start <= now.time() <= end
+
+    market_start = dt_time(9, 15)
+    market_end = dt_time(15, 30)
+
+    return market_start <= now.time() <= market_end
 
 def get_market_phase():
     mins = datetime.now().hour * 60 + datetime.now().minute
@@ -328,13 +332,18 @@ def get_nifty_spot_cached():
 
     return spot_cache["value"]
 
-
-def angel_login():
+   def angel_login():
     global auth_cache
 
     obj = SmartConnect(api_key=API_KEY)
 
-    data = obj.generateSession(CLIENT_CODE, PASSWORD, TOTP)
+    totp = pyotp.TOTP(TOTP_SECRET).now()
+
+    data = obj.generateSession(
+        CLIENT_CODE,
+        PASSWORD,
+        totp
+    )
 
     auth_cache["obj"] = obj
 
