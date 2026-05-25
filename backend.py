@@ -316,7 +316,20 @@ def get_nifty_spot():
 
 def get_nifty_spot_cached():
     now = time.time()
-    if now - spot_cache["timestamp"] < CACHE_Tdef angel_login():
+
+    if now - spot_cache["timestamp"] < CACHE_TTL:
+        return spot_cache["value"]
+
+    spot = get_nifty_spot()
+
+    if spot is not None:
+        spot_cache["value"] = spot
+        spot_cache["timestamp"] = now
+
+    return spot_cache["value"]
+
+
+def angel_login():
     global auth_cache
 
     obj = SmartConnect(api_key=API_KEY)
@@ -328,7 +341,6 @@ def get_nifty_spot_cached():
     logger.info("Angel Login Success")
 
     return obj
-
 
 def get_spot_from_angel_ltp():
 
