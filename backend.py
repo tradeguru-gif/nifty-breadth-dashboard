@@ -1021,20 +1021,32 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         signal_state["last_logged_action"] = final_action
 
 # ---------- WebSocket Callbacks ----------
+# ---------- WebSocket Callbacks ----------
 def on_open(wsapp):
     global sws
+
     logger.info("WebSocket Opened")
+
     if sws and CE_TOKEN and PE_TOKEN and NIFTY_TOKEN:
+
         tokens = [
-            {"exchangeType": 2, "tokens": [str(CE_TOKEN), str(PE_TOKEN)],   # NFO options
-            {"exchangeType": 1, "tokens": [str(NIFTY_TOKEN)]            # NSE index
+            {
+                "exchangeType": 2,
+                "tokens": [CE_TOKEN, PE_TOKEN]
+            },
+            {
+                "exchangeType": 1,
+                "tokens": [NIFTY_TOKEN]
+            }
         ]
+
         sws.subscribe(
-    correlation_id="tradeguru",
-    mode=1,
-    token_list=tokens
-)
-        logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}, NIFTY={NIFTY_TOKEN}")
+            correlation_id="tradeguru",
+            mode=1,
+            token_list=tokens
+        )
+
+        logger.info(f"Subscribed CE={CE_TOKEN} PE={PE_TOKEN} NIFTY={NIFTY_TOKEN}")
 
 def on_data(wsapp, message):
 
