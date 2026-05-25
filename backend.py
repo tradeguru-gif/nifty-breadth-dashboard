@@ -304,19 +304,29 @@ def get_nifty_token():
     return None, None
 
 def get_spot_from_angel_ltp():
+
     global last_rest_fetch
+
     now = time.time()
+
     if now - last_rest_fetch < CONFIG["REST_COOLDOWN_SEC"]:
         return None
+
     last_rest_fetch = now
+
     try:
         obj = auth_cache.get("obj")
-        if obj is None:
-            logger.warning("No authenticated SmartAPI object")
+
+        # ADD THIS BLOCK
+        if not obj:
+            logger.warning("SmartAPI unavailable")
             return None
+
         trading_symbol, symbol_token = get_nifty_token()
+
         if not trading_symbol or not symbol_token:
             return None
+      
         ltp_data = obj.ltpData("NSE", trading_symbol, symbol_token)
         if ltp_data and ltp_data.get("status") and ltp_data.get("data") and ltp_data["data"].get("ltp"):
             spot = float(ltp_data["data"]["ltp"])
