@@ -34,7 +34,26 @@ def _patched_parse(self, binary_data):
         pass
     return result
 
+_original_parse = getattr(SmartWebSocketV2, "_parse_binary_data", None)
+
+def _patched_parse(self, binary_data):
+    try:
+        result = _original_parse(self, binary_data) if _original_parse else {}
+    except:
+        result = {}
+
+    try:
+        if not result.get("token"):
+            token_bytes = binary_data[2:26]
+            token_int = int.from_bytes(token_bytes, byteorder='little')
+            result["token"] = str(token_int)
+    except:
+        pass
+
+    return result
+
 SmartWebSocketV2._parse_binary_data = _patched_parse
+
 
 _original_on_close = SmartWebSocketV2._on_close
 
@@ -44,7 +63,17 @@ def _patched_on_close(self, wsapp, *args):
     except:
         pass
 
+_original_on_close = getattr(SmartWebSocketV2, "_on_close", None)
+
+def _patched_on_close(self, wsapp, *args):
+    try:
+        if _original_on_close:
+            _original_on_close(self, wsapp)
+    except:
+        pass
+
 SmartWebSocketV2._on_close = _patched_on_close
+
 # ------------------------------------------------------------
 
 app = Flask(__name__)
@@ -318,38 +347,6 @@ def get_nifty_spot():
     logger.debug("WebSocket spot stale, using REST fallback")
     return get_spot_from_angel_ltp()
 
-def get_nifty_spot_cached():
-    now = time.time()
-
-    if now - spot_cache["timestamp"] < CACHE_TTL:
-        return spot_cache["value"]
-
-    spot = get_nifty_spot()
-
-    if spot is not None:
-        spot_cache["value"] = spot
-        spot_cache["timestamp"] = now
-
-    return spot_cache["value"]
-
-   def angel_login():
-    global auth_cache
-
-    obj = SmartConnect(api_key=API_KEY)
-
-    totp = pyotp.TOTP(TOTP_SECRET).now()
-
-    data = obj.generateSession(
-        CLIENT_CODE,
-        PASSWORD,
-        totp
-    )
-
-    auth_cache["obj"] = obj
-
-    logger.info("Angel Login Success")
-
-    return obj
 
 
 def get_spot_from_angel_ltp():
@@ -1284,8 +1281,7 @@ def watchdog():
             restart_websocket()
 
 def start_websocket():
-    global ws_running, sws, CE_TOKEN, PE_TOKEN, NIFTY_TOKEN
-
+    global ws_running, sws, CE_TOKEN, PE_TOKEN, NIFTY_TOKEN, last_tick_time
     retry_delay = 30
 
     while engine_active:
