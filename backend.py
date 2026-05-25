@@ -303,6 +303,33 @@ def get_nifty_token():
             return symbol, token
     return None, None
 
+
+
+def get_nifty_spot():
+    with tick_lock:
+        spot_ws = latest_ticks.get("nifty_spot", 0)
+        last_ws_time = last_tick_time
+    if spot_ws > 0 and (time.time() - last_ws_time) < CONFIG["STALE_TICK_SEC"]:
+        return spot_ws
+    logger.debug("WebSocket spot stale, using REST fallback")
+    return get_spot_from_angel_ltp()
+
+def get_nifty_spot_cached():
+    now = time.time()
+    if now - spot_cache["timestamp"] < CACHE_Tdef angel_login():
+    global auth_cache
+
+    obj = SmartConnect(api_key=API_KEY)
+
+    data = obj.generateSession(CLIENT_CODE, PASSWORD, TOTP)
+
+    auth_cache["obj"] = obj
+
+    logger.info("Angel Login Success")
+
+    return obj
+
+
 def get_spot_from_angel_ltp():
 
     global last_rest_fetch
@@ -317,37 +344,43 @@ def get_spot_from_angel_ltp():
     try:
         obj = auth_cache.get("obj")
 
-        # ADD THIS BLOCK
+        # AUTO RE-LOGIN
         if not obj:
-            logger.warning("SmartAPI unavailable")
-            return None
+            logger.warning("SmartAPI unavailable, re-authenticating...")
+
+            try:
+                angel_login()
+
+                obj = auth_cache.get("obj")
+
+                if not obj:
+                    logger.error("Re-login failed")
+                    return None
+
+            except Exception as e:
+                logger.error(f"Angel re-login failed: {e}")
+                return None
 
         trading_symbol, symbol_token = get_nifty_token()
 
         if not trading_symbol or not symbol_token:
             return None
-      
-        ltp_data = obj.ltpData("NSE", trading_symbol, symbol_token)
-        if ltp_data and ltp_data.get("status") and ltp_data.get("data") and ltp_data["data"].get("ltp"):
-            spot = float(ltp_data["data"]["ltp"])
+
+        ltp = obj.ltpData("NSE", trading_symbol, symbol_token)
+
+        if "data" in ltp and "ltp" in ltp["data"]:
+            spot = float(ltp["data"]["ltp"])
+
             logger.info(f"NIFTY Spot from REST: {spot}")
+
             return spot
+
     except Exception as e:
-        logger.exception(f"REST LTP error: {e}")
+        logger.error(f"REST LTP fetch failed: {e}")
+
     return None
 
-def get_nifty_spot():
-    with tick_lock:
-        spot_ws = latest_ticks.get("nifty_spot", 0)
-        last_ws_time = last_tick_time
-    if spot_ws > 0 and (time.time() - last_ws_time) < CONFIG["STALE_TICK_SEC"]:
-        return spot_ws
-    logger.debug("WebSocket spot stale, using REST fallback")
-    return get_spot_from_angel_ltp()
-
-def get_nifty_spot_cached():
-    now = time.time()
-    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+TL and spot_cache["value"] is not None:
         return spot_cache["value"]
     spot = get_nifty_spot()
     if spot is not None:
