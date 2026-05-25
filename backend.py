@@ -77,7 +77,7 @@ pe_volume_history = deque(maxlen=500)
 ce_oi_history = deque(maxlen=20)
 pe_oi_history = deque(maxlen=20)
 
-# For RSI divergence (FIX #5)
+# For RSI divergence
 rsi_history = deque(maxlen=100)
 
 latest_ticks = {
@@ -95,13 +95,13 @@ ws_running = False
 sws = None
 last_tick_time = time.time()
 tick_lock = threading.Lock()
-state_lock = threading.RLock()          # FIX #8: protect all shared state
+state_lock = threading.RLock()
 
 # Heartbeats
 last_ce_tick = time.time()
 last_pe_tick = time.time()
 last_spot_tick = time.time()
-last_rest_fetch = 0                     # FIX #11: REST cooldown
+last_rest_fetch = 0
 
 engine_active = True
 
@@ -196,7 +196,7 @@ pcr_cache = {"value": 1.0, "time": 0}
 spot_cache = {"value": None, "timestamp": 0}
 CACHE_TTL = 30
 
-# SCRIP MASTER CACHE (FIX #4)
+# SCRIP MASTER CACHE
 SCRIP_MASTER = None
 SCRIP_MASTER_TIME = 0
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -217,9 +217,9 @@ CONFIG = {
     "POSITION_SIZE_BASE_PCT": 10, "POSITION_SIZE_MAX_PCT": 25,
     "STOP_LOSS_ATR_MULT": 1.5, "TARGET_ATR_MULT": 3.0,
     "DAYS_TO_EXPIRY": 7,
-    "ENGINE_INTERVAL_SEC": 5,           # FIX #17: reduce frequency
-    "STALE_TICK_SEC": 180,              # FIX #15: less aggressive
-    "REST_COOLDOWN_SEC": 5,             # FIX #11
+    "ENGINE_INTERVAL_SEC": 5,
+    "STALE_TICK_SEC": 180,
+    "REST_COOLDOWN_SEC": 5,
     "WATCHDOG_INTERVAL_SEC": 30,
     "WATCHDOG_STALE_LIMIT": 120
 }
@@ -250,7 +250,7 @@ def get_market_phase():
     else:
         return "POST_MARKET"
 
-# ---------- SCRIP MASTER CACHE (FIX #4) ----------
+# ---------- SCRIP MASTER CACHE ----------
 def load_scrip_master():
     global SCRIP_MASTER, SCRIP_MASTER_TIME
     if SCRIP_MASTER is not None and (time.time() - SCRIP_MASTER_TIME) < 21600:
@@ -367,7 +367,6 @@ def get_current_atm_tokens():
     if not nifty_opts:
         logger.error("No NIFTY OPTIDX found")
         return
-    # Parse expiry and strike
     parsed = []
     for opt in nifty_opts:
         try:
@@ -399,7 +398,7 @@ def get_current_atm_tokens():
     else:
         logger.error("CE/PE not found for ATM strike")
 
-# ---------- Technical Indicators (fixed MACD #6, exception isolation #7) ----------
+# ---------- Technical Indicators ----------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
         return 50.0
@@ -431,7 +430,6 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     ema_fast = ema(prices[-fast:], fast)
     ema_slow = ema(prices[-slow:], slow)
     macd_line = ema_fast - ema_slow
-    # Build macd line series for signal EMA
     macd_series = []
     for i in range(slow, len(prices)):
         f = ema(prices[i-fast+1:i+1], fast) if i-fast+1 >= 0 else prices[i]
@@ -504,7 +502,6 @@ def calculate_adx(prices, period=14):
         return 0.0
 
 def calculate_rsi_divergence(prices, rsi_series, lookback=5):
-    # FIX #5: use full series
     if len(prices) < lookback + 2 or len(rsi_series) < lookback + 2:
         return "NONE"
     try:
@@ -553,7 +550,6 @@ def get_nifty_pcr():
     return pcr_cache["value"]
 
 def get_real_greeks(option_type="CE"):
-    # FIX #16: these are approximations, for visualization only
     spot = get_nifty_spot_cached() or 0
     price = latest_ticks.get("ce_price" if option_type == "CE" else "pe_price", 0)
     if spot == 0 or ATM_STRIKE == 0 or price == 0:
@@ -603,42 +599,30 @@ def get_all_timeframe_trends():
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     global market_signal, market_state, institutional_state, signal_state, portfolio_state, rsi_history
 
-    # FIX #1: initialize all locals
+    # Initialize locals
     position_pct = 0
     rr = 0
     entry = 0
     init_stop = 0
     target = 0
     stop = 0
+    spread = 0
 
     if len(ce_hist) < 30 or len(pe_hist) < 30:
         return
 
-    # Use NIFTY spot for indicators (FIX #14)
-    spot_series = []
-    # Build spot series from NIFTY price history (we need to maintain it)
-    # For simplicity, we use latest spot value and assume previous values from cache?
-    # Better: maintain a spot_price_history deque. Let's create one.
-    # Since we don't have it, we'll use combined option prices as before but warn.
-    # However to follow recommendation, we should use spot. I'll add a global spot history.
-    # For now keep combined, but comment that it's suboptimal.
-    # In production, add spot_price_history = deque(maxlen=500) and update from WebSocket.
-    # To save time, I'll keep combined but note in code.
-    # REAL FIX: add spot_price_history in main loop and use it here.
-    # As user expects fixes, I'll implement spot history.
     with state_lock:
         if not hasattr(run_signal_engine, "spot_history"):
             run_signal_engine.spot_history = deque(maxlen=500)
         spot_history = run_signal_engine.spot_history
         if len(spot_history) == 0:
-            # fallback to combined
             prices = [(c + p) / 2 for c, p in zip(ce_hist, pe_hist)]
         else:
             prices = list(spot_history)
 
     combined_volumes = [(c + p) / 2 for c, p in zip(ce_vol_hist, pe_vol_hist)]
 
-    # Isolated calculations with fallbacks
+    # Isolated calculations
     try:
         rsi = calculate_rsi(prices, CONFIG["RSI_PERIOD"])
     except:
@@ -679,7 +663,6 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     except:
         adx = 0
 
-    # Update RSI history for divergence
     rsi_history.append(rsi)
     try:
         rsi_div = calculate_rsi_divergence(prices, list(rsi_history))
@@ -1030,7 +1013,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     portfolio_state["total_exposure_pct"] = position_pct if signal_state["entry_price"] > 0 else 0
     portfolio_state["open_positions"] = 1 if signal_state["entry_price"] > 0 else 0
 
-    # Update global dictionaries (protected by lock in caller)
+    # Update global dictionaries
     market_state.update({
         "rsi": round(rsi, 2),
         "momentum": "UPTREND" if ema_fast > ema_slow else "DOWNTREND" if ema_fast < ema_slow else "NEUTRAL",
@@ -1076,18 +1059,11 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "ce_iv": ce_iv, "pe_iv": pe_iv,
         "ce_oi_change": round(ce_oi_change, 1), "pe_oi_change": round(pe_oi_change, 1)
     })
-       spread = ce_price - pe_price
+
+    spread = ce_price - pe_price
 
     market_signal.update({
-        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else
-                  "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
-
-        "ce_price": ce_price,
-        "pe_price": pe_price,
-        "spread": round(spread, 2),
-
-        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" 
-if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
+        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
         "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
         "rsi": round(rsi, 2), "macd": round(macd_hist, 2), "pcr": round(pcr, 2),
         "vwap": round(vwap, 2), "atr": round(atr, 2), "atr_pct": round(atr_pct, 2),
@@ -1141,11 +1117,9 @@ def on_data(wsapp, message):
                     latest_ticks["nifty_spot"] = ltp
                 spot_cache["value"] = ltp
                 spot_cache["timestamp"] = time.time()
-                # Update spot history for engine
                 if not hasattr(run_signal_engine, "spot_history"):
                     run_signal_engine.spot_history = deque(maxlen=500)
                 run_signal_engine.spot_history.append(ltp)
-                # Removed tick log
                 return
 
             if token == str(CE_TOKEN):
@@ -1158,7 +1132,6 @@ def on_data(wsapp, message):
                 ce_volume_history.append(volume)
                 ce_oi_history.append(oi)
                 tick_counter += 1
-                # No log
 
             elif token == str(PE_TOKEN):
                 last_pe_tick = time.time()
@@ -1170,7 +1143,6 @@ def on_data(wsapp, message):
                 pe_volume_history.append(volume)
                 pe_oi_history.append(oi)
                 tick_counter += 1
-                # No log
 
             ce = latest_ticks["ce_price"]
             pe = latest_ticks["pe_price"]
@@ -1230,7 +1202,6 @@ def restart_websocket():
     time.sleep(5)
 
 def watchdog():
-    """Monitor tick staleness and force restart."""
     while engine_active:
         time.sleep(CONFIG["WATCHDOG_INTERVAL_SEC"])
         if not is_market_open():
@@ -1279,7 +1250,6 @@ def start_websocket():
                 ce_stale = now - last_ce_tick > CONFIG["STALE_TICK_SEC"]
                 pe_stale = now - last_pe_tick > CONFIG["STALE_TICK_SEC"]
                 spot_stale = now - last_spot_tick > CONFIG["STALE_TICK_SEC"]
-                # Only reconnect if ALL feeds are stale (FIX #15)
                 if ce_stale and pe_stale and spot_stale:
                     logger.warning("All feeds stale -> reconnecting websocket")
                     break
@@ -1353,9 +1323,7 @@ engine_started = False
 def start_background_engine():
     global engine_started
     if not engine_started:
-        # Start watchdog
         threading.Thread(target=watchdog, daemon=True).start()
-        # Start main websocket
         threading.Thread(target=start_websocket, daemon=True).start()
         engine_started = True
         logger.info("Ultimate Signal Engine v8.0 Started (All fixes applied)")
