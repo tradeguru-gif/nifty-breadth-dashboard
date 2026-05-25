@@ -5,15 +5,41 @@ import threading
 import json
 import requests
 import math
+import signal
 from collections import deque
-from datetime import datetime, time as dt_time
-from flask import Flask, jsonify
+from datetime import datetime, time as dt_time, timedelta
+from flask import Flask, jsonify, g
 from flask_cors import CORS
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import pyotp
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# ============================================================
+# GRACEFUL SHUTDOWN HANDLER (Severity 7 Fix)
+# ============================================================
+shutdown_requested = False
+shutdown_event = threading.Event()
+
+def handle_shutdown(signum, frame):
+    global shutdown_requested, engine_active, ws_running
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+    shutdown_requested = True
+    engine_active = False
+    ws_running = False
+    shutdown_event.set()
+    global sws
+    if sws:
+        try:
+            sws.close_connection()
+            logger.info("WebSocket connection closed gracefully")
+        except Exception as e:
+            logger.warning(f"WebSocket close error during shutdown: {e}")
+
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
 
 # ------------------------------------------------------------
 # MONKEY PATCH for SmartWebSocketV2 (binary token parsing)
@@ -34,36 +60,9 @@ def _patched_parse(self, binary_data):
         pass
     return result
 
-_original_parse = getattr(SmartWebSocketV2, "_parse_binary_data", None)
-
-def _patched_parse(self, binary_data):
-    try:
-        result = _original_parse(self, binary_data) if _original_parse else {}
-    except:
-        result = {}
-
-    try:
-        if not result.get("token"):
-            token_bytes = binary_data[2:26]
-            token_int = int.from_bytes(token_bytes, byteorder='little')
-            result["token"] = str(token_int)
-    except:
-        pass
-
-    return result
-
 SmartWebSocketV2._parse_binary_data = _patched_parse
 
-
 _original_on_close = SmartWebSocketV2._on_close
-
-def _patched_on_close(self, wsapp, *args):
-    try:
-        _original_on_close(self, wsapp)
-    except:
-        pass
-
-_original_on_close = getattr(SmartWebSocketV2, "_on_close", None)
 
 def _patched_on_close(self, wsapp, *args):
     try:
@@ -91,6 +90,9 @@ ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
     raise ValueError("Missing Angel One credentials")
+
+# ---------- TEST MODE OVERRIDE ----------
+FORCE_MARKET_OPEN = os.getenv("FORCE_MARKET_OPEN", "false").lower() == "true"
 
 # ---------- Global State ----------
 CE_TOKEN = None
@@ -134,7 +136,7 @@ last_rest_fetch = 0
 
 engine_active = True
 
-# Multi‑timeframe snapshots
+# Multi-timeframe snapshots
 timeframe_history = {
     "1min": deque(maxlen=60),
     "5min": deque(maxlen=20),
@@ -144,21 +146,79 @@ timeframe_history = {
 }
 last_minute_snapshot = {"time": 0, "price": 0, "volume": 0}
 
-def update_timeframes(price, volume):
-    global last_minute_snapshot
-    now = time.time()
-    if now - last_minute_snapshot["time"] >= 60:
-        snapshot = {"time": now, "price": price, "volume": volume}
-        timeframe_history["1min"].append(snapshot)
-        if len(timeframe_history["1min"]) % 5 == 0:
-            timeframe_history["5min"].append(snapshot)
-        if len(timeframe_history["1min"]) % 10 == 0:
-            timeframe_history["10min"].append(snapshot)
-        if len(timeframe_history["1min"]) % 15 == 0:
-            timeframe_history["15min"].append(snapshot)
-        if len(timeframe_history["1min"]) % 20 == 0:
-            timeframe_history["20min"].append(snapshot)
-        last_minute_snapshot = snapshot
+# Paper trade P&L tracking (Severity 10 Fix)
+paper_trade_log = deque(maxlen=1000)
+paper_pnl = 0.0
+
+# ============================================================
+# TIMEZONE FIXES (Severity 1 & 2)
+# ============================================================
+
+def is_market_open():
+    """Convert UTC to IST (UTC+5:30) for market hours check"""
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+    # Saturday=5, Sunday=6
+    if now_ist.weekday() >= 5:
+        return False
+
+    market_start = dt_time(9, 15)
+    market_end = dt_time(15, 30)
+
+    logger.debug(f"[TZ-CHECK] UTC: {datetime.utcnow()} | IST: {now_ist} | Weekday: {now_ist.weekday()} | Time: {now_ist.time()} | Open: {market_start <= now_ist.time() <= market_end}")
+
+    if FORCE_MARKET_OPEN:
+        logger.info("[TZ-CHECK] FORCE_MARKET_OPEN enabled - bypassing market hours check")
+        return True
+
+    return market_start <= now_ist.time() <= market_end
+
+def get_market_phase():
+    """Convert UTC to IST for market phase detection"""
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    mins = now_ist.hour * 60 + now_ist.minute
+
+    if mins < 9*60+15:
+        return "PRE_MARKET"
+    elif mins < 9*60+45:
+        return "OPENING"
+    elif mins < 12*60:
+        return "MORNING"
+    elif mins < 13*60+30:
+        return "MIDDAY"
+    elif mins < 15*60:
+        return "AFTERNOON"
+    elif mins < 15*60+30:
+        return "CLOSING"
+    else:
+        return "POST_MARKET"
+
+# ============================================================
+# ANGEL LOGIN FIX (Severity 3)
+# ============================================================
+
+def angel_login():
+    """Authenticate with Angel One and cache credentials"""
+    try:
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        obj = SmartConnect(api_key=ANGEL_API_KEY)
+        session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+        if not session.get("status"):
+            logger.error("Angel Login: Auth failed")
+            return None
+        auth_token = session["data"]["jwtToken"]
+        feed_token = obj.getfeedToken()
+        auth_cache.update({
+            "token": auth_token,
+            "feed_token": feed_token,
+            "timestamp": time.time(),
+            "obj": obj
+        })
+        logger.info("Angel Login: Success")
+        return obj
+    except Exception as e:
+        logger.error(f"Angel Login error: {e}")
+        return None
 
 # Signal persistent state
 signal_state = {
@@ -186,7 +246,8 @@ signal_state = {
 portfolio_state = {
     "equity": 100000.0,
     "total_exposure_pct": 0.0,
-    "open_positions": 0
+    "open_positions": 0,
+    "total_pnl": 0.0  # Paper trade P&L tracking (Severity 10 Fix)
 }
 
 market_signal = {
@@ -196,7 +257,10 @@ market_signal = {
     "theta": 0.0, "vega": 0.0, "volume": 0, "timestamp": "",
     "atr_pct": 0.0, "adx": 0.0, "bb_position": 50.0, "rsi_divergence": "NONE",
     "iv_rank": 50, "signal_grade": "D", "regime": "RANGING", "session_phase": "UNKNOWN",
-    "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0
+    "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0,
+    "reason": "",  # Severity 4 Fix: Added reason field
+    "market_open": False,
+    "paper_pnl": 0.0
 }
 
 market_state = {
@@ -250,61 +314,30 @@ CONFIG = {
     "STALE_TICK_SEC": 180,
     "REST_COOLDOWN_SEC": 5,
     "WATCHDOG_INTERVAL_SEC": 30,
-    "WATCHDOG_STALE_LIMIT": 120
+    "WATCHDOG_STALE_LIMIT": 120,
+    "WS_BASE_RETRY_SEC": 5,       # Severity 9 Fix: Exponential backoff base
+    "WS_MAX_RETRY_SEC": 300,      # Severity 9 Fix: Max 5 minutes
+    "WS_MAX_RETRIES": 20          # Severity 9 Fix: Max retry attempts
 }
 
 # ---------- Helper Functions ----------
-from datetime import datetime, time as dt_time, timedelta
 
-def is_market_open():
-    # Convert UTC to IST (UTC+5:30)
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    
-    # Saturday=5, Sunday=6
-    if now_ist.weekday() >= 5:
-        return False
+def update_timeframes(price, volume):
+    global last_minute_snapshot
+    now = time.time()
+    if now - last_minute_snapshot["time"] >= 60:
+        snapshot = {"time": now, "price": price, "volume": volume}
+        timeframe_history["1min"].append(snapshot)
+        if len(timeframe_history["1min"]) % 5 == 0:
+            timeframe_history["5min"].append(snapshot)
+        if len(timeframe_history["1min"]) % 10 == 0:
+            timeframe_history["10min"].append(snapshot)
+        if len(timeframe_history["1min"]) % 15 == 0:
+            timeframe_history["15min"].append(snapshot)
+        if len(timeframe_history["1min"]) % 20 == 0:
+            timeframe_history["20min"].append(snapshot)
+        last_minute_snapshot = snapshot
 
-    market_start = dt_time(9, 15)
-    market_end = dt_time(15, 30)
-
-    return market_start <= now_ist.time() <= market_end
-
-def get_market_phase():
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    mins = now_ist.hour * 60 + now_ist.minute
-    # ... rest same
-    mins = datetime.now().hour * 60 + datetime.now().minute
-    if mins < 9*60+15:
-        return "PRE_MARKET"
-    elif mins < 9*60+45:
-        return "OPENING"
-    elif mins < 12*60:
-        return "MORNING"
-    elif mins < 13*60+30:
-        return "MIDDAY"
-    elif mins < 15*60:
-        return "AFTERNOON"
-    elif mins < 15*60+30:
-        return "CLOSING"
-    else:
-        return "POST_MARKET"
-#------------------------------------------------
-#--------------------------------------------------
-#TEST MARKET DATA ON CLOSE MARKET
-#------------------------------------------------
-FORCE_MARKET_OPEN = os.getenv("FORCE_MARKET_OPEN", "false").lower() == "true"
-
-def is_market_open():
-    if FORCE_MARKET_OPEN:
-        return True
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    # ... rest
-
-#---------------------------------------------
-#SIGNAL TEST
-#--------------------------------------------
-#-------------------------------------------
-#----------------------------------------------
 # ---------- SCRIP MASTER CACHE ----------
 def load_scrip_master():
     global SCRIP_MASTER, SCRIP_MASTER_TIME
@@ -358,8 +391,6 @@ def get_nifty_token():
             return symbol, token
     return None, None
 
-
-
 def get_nifty_spot():
     with tick_lock:
         spot_ws = latest_ticks.get("nifty_spot", 0)
@@ -369,79 +400,56 @@ def get_nifty_spot():
     logger.debug("WebSocket spot stale, using REST fallback")
     return get_spot_from_angel_ltp()
 
-
-
 def get_spot_from_angel_ltp():
-
     global last_rest_fetch
-
     now = time.time()
-
     if now - last_rest_fetch < CONFIG["REST_COOLDOWN_SEC"]:
         return None
-
     last_rest_fetch = now
-
     try:
         obj = auth_cache.get("obj")
-
-        # AUTO RE-LOGIN
+        # AUTO RE-LOGIN (Severity 3 Fix: angel_login() now exists)
         if not obj:
             logger.warning("SmartAPI unavailable, re-authenticating...")
-
-            try:
-                angel_login()
-
-                obj = auth_cache.get("obj")
-
-                if not obj:
-                    logger.error("Re-login failed")
-                    return None
-
-            except Exception as e:
-                logger.error(f"Angel re-login failed: {e}")
+            obj = angel_login()
+            if not obj:
+                logger.error("Re-login failed")
                 return None
-
         trading_symbol, symbol_token = get_nifty_token()
-
         if not trading_symbol or not symbol_token:
             return None
-
         ltp = obj.ltpData("NSE", trading_symbol, symbol_token)
-
         if "data" in ltp and "ltp" in ltp["data"]:
             spot = float(ltp["data"]["ltp"])
-
             logger.info(f"NIFTY Spot from REST: {spot}")
-
             return spot
-
     except Exception as e:
         logger.error(f"REST LTP fetch failed: {e}")
-
     return None
 
-
+# Severity 8 Fix: Thread-safe spot cache access
 def get_nifty_spot_cached():
-
-    now = time.time()
-
-    if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+    with tick_lock:
+        now = time.time()
+        if now - spot_cache["timestamp"] < CACHE_TTL and spot_cache["value"] is not None:
+            return spot_cache["value"]
+    spot = get_nifty_spot()
+    if spot is not None:
+        with tick_lock:
+            spot_cache["value"] = spot
+            spot_cache["timestamp"] = now
+    with tick_lock:
         return spot_cache["value"]
 
-    spot = get_nifty_spot()
-
-    if spot is not None:
-        spot_cache["value"] = spot
-        spot_cache["timestamp"] = now
-
-    return spot_cache["value"]
+# ============================================================
+# ATM TOKENS FIX (Severity 6: Use IST for expiry comparison)
+# ============================================================
 
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
-        logger.error("No spot – cannot auto-fetch tokens")
+        logger.error("No spot - cannot auto-fetch tokens")
         return
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike}")
@@ -467,8 +475,9 @@ def get_current_atm_tokens():
             parsed.append({"expiry": expiry, "strike": strike, "token": str(opt["token"]), "symbol": opt["symbol"]})
         except:
             continue
-    today = datetime.now()
-    future = [p for p in parsed if p["expiry"] >= today]
+    # Severity 6 Fix: Use IST for expiry comparison
+    today_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    future = [p for p in parsed if p["expiry"] >= today_ist]
     if not future:
         logger.error("No future expiry found")
         return
@@ -687,9 +696,12 @@ def get_all_timeframe_trends():
                  "strength": round(analyze_timeframe_trend(list(hist))[1], 2)}
             for tf, hist in timeframe_history.items()}
 
-# ---------- Signal Engine (Full) ----------
+# ============================================================
+# SIGNAL ENGINE (Full - with all fixes)
+# ============================================================
+
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
-    global market_signal, market_state, institutional_state, signal_state, portfolio_state, rsi_history
+    global market_signal, market_state, institutional_state, signal_state, portfolio_state, rsi_history, paper_pnl
 
     # Initialize locals
     position_pct = 0
@@ -699,6 +711,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     target = 0
     stop = 0
     spread = 0
+    reason = ""  # Severity 4 Fix: Build reason string
 
     if len(ce_hist) < 30 or len(pe_hist) < 30:
         return
@@ -927,6 +940,30 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
             signal_type = "NONE"
             raw_confidence = max(total_bull, total_bear)
 
+    # Build reason string (Severity 4 Fix)
+    reasons = []
+    if bullish_tf >= 4:
+        reasons.append(f"{bullish_tf}/5 timeframes BULLISH")
+    elif bearish_tf >= 4:
+        reasons.append(f"{bearish_tf}/5 timeframes BEARISH")
+    if 55 < rsi < 75:
+        reasons.append(f"RSI {rsi:.1f} bullish zone")
+    elif 25 < rsi < 45:
+        reasons.append(f"RSI {rsi:.1f} bearish zone")
+    if macd_hist > 0:
+        reasons.append("MACD positive")
+    elif macd_hist < 0:
+        reasons.append("MACD negative")
+    if pcr < 0.9:
+        reasons.append(f"PCR {pcr:.2f} bullish")
+    elif pcr > 1.2:
+        reasons.append(f"PCR {pcr:.2f} bearish")
+    if adx > 30:
+        reasons.append(f"ADX {adx:.1f} strong trend")
+    if rsi_div != "NONE":
+        reasons.append(f"RSI divergence: {rsi_div}")
+    reason = " | ".join(reasons) if reasons else "No clear signal"
+
     # Confirmation logic
     now_ts = time.time()
     final_action = signal_state["current_action"]
@@ -991,7 +1028,8 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
             grade = "C"
     signal_state["signal_grade"] = grade
 
-    # Position sizing & paper trading
+    # Position sizing & paper trading with P&L tracking (Severity 10 Fix)
+    trade_pnl = 0.0
     if final_action in ["STRONG BUY CE", "BUY CE", "CONSIDER CE BUY"]:
         entry = ce_price
         init_stop = entry - atr * CONFIG["STOP_LOSS_ATR_MULT"]
@@ -1020,6 +1058,16 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
             signal_state["stop_loss"] = init_stop
             signal_state["target"] = target
             signal_state["highest_price_since_entry"] = entry
+            # Log trade start
+            paper_trade_log.append({
+                "time": datetime.now().isoformat(),
+                "action": final_action,
+                "entry": entry,
+                "stop": init_stop,
+                "target": target,
+                "size_pct": position_pct,
+                "status": "OPEN"
+            })
         elif signal_state["entry_price"] > 0:
             if ce_price > signal_state["highest_price_since_entry"]:
                 signal_state["highest_price_since_entry"] = ce_price
@@ -1030,17 +1078,32 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
                         signal_state["stop_loss"] = new_stop
                         logger.info(f"Trailing stop raised to {signal_state['stop_loss']:.2f}")
             if ce_price <= signal_state["stop_loss"]:
-                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {ce_price:.2f} ***")
+                trade_pnl = (signal_state["stop_loss"] - signal_state["entry_price"]) * (position_pct / 100) * portfolio_state["equity"] / signal_state["entry_price"]
+                paper_pnl += trade_pnl
+                portfolio_state["total_pnl"] = paper_pnl
+                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {ce_price:.2f} | P&L: {trade_pnl:.2f} ***")
                 signal_state["entry_price"] = 0
                 signal_state["stop_loss"] = 0
                 signal_state["target"] = 0
                 signal_state["highest_price_since_entry"] = 0
+                # Update trade log
+                if paper_trade_log:
+                    paper_trade_log[-1]["status"] = "STOP_LOSS"
+                    paper_trade_log[-1]["exit_price"] = ce_price
+                    paper_trade_log[-1]["pnl"] = trade_pnl
             elif ce_price >= signal_state["target"]:
-                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {ce_price:.2f} ***")
+                trade_pnl = (signal_state["target"] - signal_state["entry_price"]) * (position_pct / 100) * portfolio_state["equity"] / signal_state["entry_price"]
+                paper_pnl += trade_pnl
+                portfolio_state["total_pnl"] = paper_pnl
+                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {ce_price:.2f} | P&L: {trade_pnl:.2f} ***")
                 signal_state["entry_price"] = 0
                 signal_state["stop_loss"] = 0
                 signal_state["target"] = 0
                 signal_state["highest_price_since_entry"] = 0
+                if paper_trade_log:
+                    paper_trade_log[-1]["status"] = "TARGET"
+                    paper_trade_log[-1]["exit_price"] = ce_price
+                    paper_trade_log[-1]["pnl"] = trade_pnl
 
     elif final_action in ["STRONG BUY PE", "BUY PE", "CONSIDER PE BUY"]:
         entry = pe_price
@@ -1070,6 +1133,15 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
             signal_state["stop_loss"] = init_stop
             signal_state["target"] = target
             signal_state["lowest_price_since_entry"] = entry
+            paper_trade_log.append({
+                "time": datetime.now().isoformat(),
+                "action": final_action,
+                "entry": entry,
+                "stop": init_stop,
+                "target": target,
+                "size_pct": position_pct,
+                "status": "OPEN"
+            })
         elif signal_state["entry_price"] > 0:
             if pe_price < signal_state["lowest_price_since_entry"]:
                 signal_state["lowest_price_since_entry"] = pe_price
@@ -1080,17 +1152,31 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
                         signal_state["stop_loss"] = new_stop
                         logger.info(f"Trailing stop lowered to {signal_state['stop_loss']:.2f}")
             if pe_price >= signal_state["stop_loss"]:
-                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {pe_price:.2f} ***")
+                trade_pnl = (signal_state["entry_price"] - signal_state["stop_loss"]) * (position_pct / 100) * portfolio_state["equity"] / signal_state["entry_price"]
+                paper_pnl += trade_pnl
+                portfolio_state["total_pnl"] = paper_pnl
+                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {pe_price:.2f} | P&L: {trade_pnl:.2f} ***")
                 signal_state["entry_price"] = 0
                 signal_state["stop_loss"] = 0
                 signal_state["target"] = 0
                 signal_state["lowest_price_since_entry"] = float("inf")
+                if paper_trade_log:
+                    paper_trade_log[-1]["status"] = "STOP_LOSS"
+                    paper_trade_log[-1]["exit_price"] = pe_price
+                    paper_trade_log[-1]["pnl"] = trade_pnl
             elif pe_price <= signal_state["target"]:
-                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {pe_price:.2f} ***")
+                trade_pnl = (signal_state["entry_price"] - signal_state["target"]) * (position_pct / 100) * portfolio_state["equity"] / signal_state["entry_price"]
+                paper_pnl += trade_pnl
+                portfolio_state["total_pnl"] = paper_pnl
+                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {pe_price:.2f} | P&L: {trade_pnl:.2f} ***")
                 signal_state["entry_price"] = 0
                 signal_state["stop_loss"] = 0
                 signal_state["target"] = 0
                 signal_state["lowest_price_since_entry"] = float("inf")
+                if paper_trade_log:
+                    paper_trade_log[-1]["status"] = "TARGET"
+                    paper_trade_log[-1]["exit_price"] = pe_price
+                    paper_trade_log[-1]["pnl"] = trade_pnl
     else:
         signal_state["entry_price"] = 0
         signal_state["stop_loss"] = 0
@@ -1154,6 +1240,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
 
     spread = ce_price - pe_price
 
+    # Severity 4 Fix: Include reason, market_open, paper_pnl
     market_signal.update({
         "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
         "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
@@ -1167,16 +1254,22 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "rsi_divergence": rsi_div, "iv_rank": 50,
         "signal_grade": grade, "regime": regime, "session_phase": session_phase,
         "ce_spread_pct": round(ce_spread_pct, 1), "pe_spread_pct": round(pe_spread_pct, 1),
-        "ce_oi_change": round(ce_oi_change, 1), "pe_oi_change": round(pe_oi_change, 1)
+        "ce_oi_change": round(ce_oi_change, 1), "pe_oi_change": round(pe_oi_change, 1),
+        "reason": reason,  # Severity 4 Fix
+        "market_open": is_market_open(),  # Severity 4 Fix
+        "paper_pnl": round(paper_pnl, 2)  # Severity 10 Fix
     })
 
     if final_action != signal_state["last_logged_action"]:
         logger.info(f"PRO SIGNAL: {final_action} [{final_signal_type}] Grade:{grade} Conf:{raw_confidence} "
                     f"BullTF:{bullish_tf} BearTF:{bearish_tf} RSI:{rsi:.1f} ADX:{adx:.1f} PCR:{pcr:.2f} "
-                    f"PosSize:{position_pct}% RR:{rr:.1f}")
+                    f"PosSize:{position_pct}% RR:{rr:.1f} P&L:{paper_pnl:.2f}")
         signal_state["last_logged_action"] = final_action
 
-# ---------- WebSocket Callbacks ----------
+# ============================================================
+# WEBSOCKET CALLBACKS (with bid/ask parsing - Severity 5 Fix)
+# ============================================================
+
 def on_open(wsapp):
     logger.info("WebSocket Opened")
     if sws and CE_TOKEN and PE_TOKEN and NIFTY_TOKEN:
@@ -1198,8 +1291,18 @@ def on_data(wsapp, message):
         ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
         volume = tick.get("volume_trade_for_the_day") or tick.get("v") or 0
         oi = tick.get("open_interest") or tick.get("oi") or 0
+
+        # Severity 5 Fix: Parse bid/ask from tick data
+        bid = tick.get("best_bid_price") or tick.get("bp") or tick.get("bid") or 0
+        ask = tick.get("best_ask_price") or tick.get("ap") or tick.get("ask") or 0
+
         if ltp and ltp > 1000:
             ltp = float(ltp) / 100
+        if bid and bid > 1000:
+            bid = float(bid) / 100
+        if ask and ask > 1000:
+            ask = float(ask) / 100
+
         last_tick_time = time.time()
 
         with state_lock:
@@ -1220,6 +1323,11 @@ def on_data(wsapp, message):
                     latest_ticks["ce_price"] = ltp
                     latest_ticks["ce_volume"] = volume
                     latest_ticks["ce_oi"] = oi
+                    # Severity 5 Fix: Update bid/ask
+                    if bid > 0:
+                        latest_ticks["ce_bid"] = bid
+                    if ask > 0:
+                        latest_ticks["ce_ask"] = ask
                 ce_price_history.append(ltp)
                 ce_volume_history.append(volume)
                 ce_oi_history.append(oi)
@@ -1231,6 +1339,11 @@ def on_data(wsapp, message):
                     latest_ticks["pe_price"] = ltp
                     latest_ticks["pe_volume"] = volume
                     latest_ticks["pe_oi"] = oi
+                    # Severity 5 Fix: Update bid/ask
+                    if bid > 0:
+                        latest_ticks["pe_bid"] = bid
+                    if ask > 0:
+                        latest_ticks["pe_ask"] = ask
                 pe_price_history.append(ltp)
                 pe_volume_history.append(volume)
                 pe_oi_history.append(oi)
@@ -1293,21 +1406,36 @@ def restart_websocket():
     ws_running = False
     time.sleep(5)
 
+# ============================================================
+# WATCHDOG WITH SHUTDOWN CHECK (Severity 7 Fix)
+# ============================================================
+
 def watchdog():
-    while engine_active:
+    while engine_active and not shutdown_requested:
         time.sleep(CONFIG["WATCHDOG_INTERVAL_SEC"])
+        if shutdown_requested:
+            logger.info("Watchdog: shutdown requested, exiting")
+            break
         if not is_market_open():
             continue
         if ws_running and (time.time() - last_tick_time > CONFIG["WATCHDOG_STALE_LIMIT"]):
             logger.warning("Watchdog: no ticks for long time, restarting websocket")
             restart_websocket()
 
+# ============================================================
+# WEBSOCKET WITH EXPONENTIAL BACKOFF (Severity 9 Fix)
+# ============================================================
+
 def start_websocket():
     global ws_running, sws, CE_TOKEN, PE_TOKEN, NIFTY_TOKEN, last_tick_time
-    retry_delay = 30
+    retry_count = 0
+    retry_delay = CONFIG["WS_BASE_RETRY_SEC"]
 
-    while engine_active:
+    while engine_active and not shutdown_requested:
         try:
+            if shutdown_requested:
+                logger.info("WebSocket thread: shutdown requested, exiting")
+                break
 
             if not is_market_open():
                 logger.info("Market closed. Sleeping 5 minutes...")
@@ -1318,7 +1446,10 @@ def start_websocket():
 
             if not auth_token:
                 logger.error("Authentication failed. Retrying...")
-                time.sleep(30)
+                retry_count += 1
+                retry_delay = min(CONFIG["WS_MAX_RETRY_SEC"], CONFIG["WS_BASE_RETRY_SEC"] * (2 ** retry_count))
+                logger.info(f"Retry {retry_count}/{CONFIG['WS_MAX_RETRIES']} in {retry_delay}s")
+                time.sleep(retry_delay)
                 continue
 
             if NIFTY_TOKEN is None:
@@ -1328,8 +1459,14 @@ def start_websocket():
 
             if not CE_TOKEN or not PE_TOKEN:
                 logger.error("No tokens available. Retrying...")
-                time.sleep(60)
+                retry_count += 1
+                retry_delay = min(CONFIG["WS_MAX_RETRY_SEC"], CONFIG["WS_BASE_RETRY_SEC"] * (2 ** retry_count))
+                time.sleep(retry_delay)
                 continue
+
+            # Reset retry counter on successful connection setup
+            retry_count = 0
+            retry_delay = CONFIG["WS_BASE_RETRY_SEC"]
 
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_open
@@ -1342,8 +1479,10 @@ def start_websocket():
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
 
-            while ws_running and engine_active:
+            while ws_running and engine_active and not shutdown_requested:
                 time.sleep(1)
+                if shutdown_requested:
+                    break
                 now = time.time()
                 ce_stale = now - last_ce_tick > CONFIG["STALE_TICK_SEC"]
                 pe_stale = now - last_pe_tick > CONFIG["STALE_TICK_SEC"]
@@ -1351,24 +1490,51 @@ def start_websocket():
                 if ce_stale and pe_stale and spot_stale:
                     logger.warning("All feeds stale -> reconnecting websocket")
                     break
+
         except Exception as e:
             logger.exception(f"WebSocket connection error: {e}")
-            time.sleep(retry_delay)
+            retry_count += 1
+            retry_delay = min(CONFIG["WS_MAX_RETRY_SEC"], CONFIG["WS_BASE_RETRY_SEC"] * (2 ** retry_count))
+            if retry_count >= CONFIG["WS_MAX_RETRIES"]:
+                logger.error(f"Max retries ({CONFIG['WS_MAX_RETRIES']}) reached. Waiting 5 min before reset.")
+                retry_count = 0
+                time.sleep(300)
+            else:
+                logger.info(f"Retry {retry_count}/{CONFIG['WS_MAX_RETRIES']} in {retry_delay}s")
+                time.sleep(retry_delay)
 
-# ---------- Flask Routes ----------
+# ============================================================
+# FLASK ROUTES (with graceful shutdown awareness)
+# ============================================================
+
 @app.route("/")
 def home():
+    if shutdown_requested:
+        return jsonify({"status": "shutting_down", "message": "Service is shutting down"}), 503
     return jsonify({
         "status": "online",
         "message": "TradeGuru Ultimate Signal Engine (Fixed Production Version)",
         "worker_type": "WebSocket",
         "market_open": is_market_open(),
         "trading_mode": "PAPER",
-        "version": "8.0"
+        "version": "9.0",
+        "fixes_applied": [
+            "IST_timezone_conversion",
+            "angel_login_defined",
+            "market_reason_field",
+            "bid_ask_parsing",
+            "ist_expiry_comparison",
+            "graceful_shutdown",
+            "spot_cache_threadsafe",
+            "exponential_backoff",
+            "paper_pnl_tracking"
+        ]
     })
 
 @app.route("/api/live-signals")
 def live_signals():
+    if shutdown_requested:
+        return jsonify({"status": "shutting_down"}), 503
     with state_lock:
         spot = get_nifty_spot_cached()
         return jsonify({
@@ -1393,12 +1559,16 @@ def live_signals():
             "portfolio": {
                 "equity": portfolio_state["equity"],
                 "total_exposure_pct": round(portfolio_state["total_exposure_pct"], 2),
-                "open_positions": portfolio_state["open_positions"]
-            }
+                "open_positions": portfolio_state["open_positions"],
+                "total_pnl": round(portfolio_state["total_pnl"], 2)  # Severity 10 Fix
+            },
+            "paper_trades": list(paper_trade_log)[-10:]  # Severity 10 Fix: Last 10 trades
         })
 
 @app.route("/api/health")
 def health():
+    if shutdown_requested:
+        return jsonify({"status": "shutting_down"}), 503
     with state_lock:
         return jsonify({
             "status": "ok",
@@ -1412,10 +1582,26 @@ def health():
             "ce_history_len": len(ce_price_history),
             "pe_history_len": len(pe_price_history),
             "last_tick_age": round(time.time() - last_tick_time, 1),
+            "market_open": is_market_open(),
+            "force_market_open": FORCE_MARKET_OPEN,
             "timestamp": datetime.now().isoformat()
         })
 
-# ---------- Start Engine ----------
+# Test endpoint for debugging
+@app.route("/api/test-signal")
+def test_signal():
+    return jsonify({
+        "signal": "TEST_BULLISH",
+        "ce_price": 150.5,
+        "pe_price": 120.3,
+        "rsi": 65,
+        "timestamp": datetime.now().isoformat(),
+        "market_open": is_market_open()
+    })
+
+# ============================================================
+# START ENGINE (with graceful shutdown)
+# ============================================================
 engine_started = False
 
 def start_background_engine():
@@ -1424,7 +1610,7 @@ def start_background_engine():
         threading.Thread(target=watchdog, daemon=True).start()
         threading.Thread(target=start_websocket, daemon=True).start()
         engine_started = True
-        logger.info("Ultimate Signal Engine v8.0 Started (All fixes applied)")
+        logger.info("Ultimate Signal Engine v9.0 Started (All 10 severity fixes applied)")
 
 start_background_engine()
 
