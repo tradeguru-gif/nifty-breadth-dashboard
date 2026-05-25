@@ -1026,8 +1026,8 @@ def on_open(wsapp):
     logger.info("WebSocket Opened")
     if sws and CE_TOKEN and PE_TOKEN and NIFTY_TOKEN:
         tokens = [
-            {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]},   # NFO options
-            {"exchangeType": 1, "tokens": [NIFTY_TOKEN]}            # NSE index
+            {"exchangeType": 2, "tokens": [str(CE_TOKEN), str(PE_TOKEN)],   # NFO options
+            {"exchangeType": 1, "tokens": [str(NIFTY_TOKEN)]            # NSE index
         ]
         sws.subscribe(
     correlation_id="tradeguru",
