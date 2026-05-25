@@ -254,19 +254,25 @@ CONFIG = {
 }
 
 # ---------- Helper Functions ----------
-def is_market_open():
-    now = datetime.now()
+from datetime import datetime, time as dt_time, timedelta
 
+def is_market_open():
+    # Convert UTC to IST (UTC+5:30)
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    
     # Saturday=5, Sunday=6
-    if now.weekday() >= 5:
+    if now_ist.weekday() >= 5:
         return False
 
     market_start = dt_time(9, 15)
     market_end = dt_time(15, 30)
 
-    return market_start <= now.time() <= market_end
+    return market_start <= now_ist.time() <= market_end
 
 def get_market_phase():
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    mins = now_ist.hour * 60 + now_ist.minute
+    # ... rest same
     mins = datetime.now().hour * 60 + datetime.now().minute
     if mins < 9*60+15:
         return "PRE_MARKET"
@@ -282,7 +288,23 @@ def get_market_phase():
         return "CLOSING"
     else:
         return "POST_MARKET"
+#------------------------------------------------
+#--------------------------------------------------
+#TEST MARKET DATA ON CLOSE MARKET
+#------------------------------------------------
+FORCE_MARKET_OPEN = os.getenv("FORCE_MARKET_OPEN", "false").lower() == "true"
 
+def is_market_open():
+    if FORCE_MARKET_OPEN:
+        return True
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    # ... rest
+
+#---------------------------------------------
+#SIGNAL TEST
+#--------------------------------------------
+#-------------------------------------------
+#----------------------------------------------
 # ---------- SCRIP MASTER CACHE ----------
 def load_scrip_master():
     global SCRIP_MASTER, SCRIP_MASTER_TIME
