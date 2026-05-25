@@ -1206,7 +1206,7 @@ def watchdog():
         time.sleep(CONFIG["WATCHDOG_INTERVAL_SEC"])
         if not is_market_open():
             continue
-        if time.time() - last_tick_time > CONFIG["WATCHDOG_STALE_LIMIT"]:
+        if ws_running and (time.time() - last_tick_time > CONFIG["WATCHDOG_STALE_LIMIT"]):
             logger.warning("Watchdog: no ticks for long time, restarting websocket")
             restart_websocket()
 
@@ -1242,11 +1242,12 @@ def start_websocket():
 
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_open
-            sws.on_data = on_data
+            sws.on_message = on_data
             sws.on_error = on_error
             sws.on_close = on_close
             ws_running = True
             logger.info("Connecting WebSocket")
+            last_tick_time = time.time()
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
 
