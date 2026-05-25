@@ -1220,19 +1220,23 @@ def start_websocket():
                 time.sleep(300)
                 continue
 
-            if NIFTY_TOKEN is None:
-                NIFTY_TOKEN = get_nifty_index_token()
+            # FIRST LOGIN
+auth_token, feed_token, obj = get_auth_token()
+if not auth_token:
+    logger.error("Authentication failed. Retrying...")
+    time.sleep(30)
+    continue
 
-            get_current_atm_tokens()
-            if not CE_TOKEN or not PE_TOKEN:
-                logger.error("No tokens available. Retrying...")
-                time.sleep(60)
-                continue
+# THEN FETCH TOKENS
+if NIFTY_TOKEN is None:
+    NIFTY_TOKEN = get_nifty_index_token()
 
-            auth_token, feed_token, obj = get_auth_token()
-            if not auth_token:
-                time.sleep(30)
-                continue
+get_current_atm_tokens()
+
+if not CE_TOKEN or not PE_TOKEN:
+    logger.error("No tokens available. Retrying...")
+    time.sleep(60)
+    continue
 
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_open
