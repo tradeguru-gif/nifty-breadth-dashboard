@@ -1076,17 +1076,18 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "ce_iv": ce_iv, "pe_iv": pe_iv,
         "ce_oi_change": round(ce_oi_change, 1), "pe_oi_change": round(pe_oi_change, 1)
     })
-    spread = ce_price - pe_price
+       spread = ce_price - pe_price
 
-market_signal.update({
-    "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else
-              "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
+    market_signal.update({
+        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else
+                  "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
 
-    "ce_price": ce_price,
-    "pe_price": pe_price,
-    "spread": round(spread, 2),
+        "ce_price": ce_price,
+        "pe_price": pe_price,
+        "spread": round(spread, 2),
 
-        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
+        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" 
+if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
         "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
         "rsi": round(rsi, 2), "macd": round(macd_hist, 2), "pcr": round(pcr, 2),
         "vwap": round(vwap, 2), "atr": round(atr, 2), "atr_pct": round(atr_pct, 2),
