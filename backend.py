@@ -537,7 +537,7 @@ def get_current_atm_tokens():
     today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
     
     # Filter out past contracts
-    future = [p for p in parsed if p["expiry"] >= today_date_only]
+    future = [p for p in parsed if p["expiry"] > today_date_only]
     if not future:
         logger.error("No future expiry found")
         return
