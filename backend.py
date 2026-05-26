@@ -537,10 +537,12 @@ def get_current_atm_tokens():
     today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
     
     # Filter out past contracts
-    future = [p for p in parsed if p["expiry"] > today_date_only]
-    if not future:
-        logger.error("No future expiry found")
-        return
+    # Option 1: strictly future expiry (any day after today)
+future = [p for p in parsed if p["expiry"] > today_date_only]
+
+# Option 2 (recommended): only future Thursdays (weekly expiry)
+future = [p for p in parsed if p["expiry"] > today_date_only and p["expiry"].weekday() == 3]
+
         
     # 2. Lock onto the NEAREST expiry first, and isolate only those contracts
     nearest_expiry = min(p["expiry"] for p in future)
@@ -1352,6 +1354,9 @@ def on_open(wsapp):
         logger.info(f"Subscribed CE={CE_TOKEN} PE={PE_TOKEN} NIFTY={NIFTY_TOKEN}")
 
 def on_data(wsapp, message):
+    print(f"📊 TICK RECEIVED: {message[:200]}")  # first 200 chars
+    ... # rest of your code
+
     global tick_counter, last_tick_time, last_ce_tick, last_pe_tick, last_spot_tick, last_engine_run
     global spot_cache
     try:
