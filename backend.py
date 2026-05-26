@@ -30,7 +30,7 @@ def run_signal_engine():
         time.sleep(300)
 
 # 3. Fire up Background Thread immediately (Non-blocking)
-threading.Thread(target=run_signal_engine, daemon=True).start()
+#threading.Thread(target=run_signal_engine, daemon=True).start()
 
 # 4. Define HTTP Server Endpoints
 @app.route('/')
@@ -1712,12 +1712,12 @@ import time
 ws_lock = threading.Lock()
 is_connecting = False
 
-def safe_websocket_supervisor():
-    """ Runs completely isolated from the Gunicorn HTTP request paths """
-    global is_connecting
+#def safe_websocket_supervisor():
+    #""" Runs completely isolated from the Gunicorn HTTP request paths """
+    #global is_connecting
     
     # Give Render 5 seconds to finish assigning network routes cleanly
-    time.sleep(5)
+   # time.sleep(5)
     
     while True:
         try:
@@ -1757,7 +1757,7 @@ def safe_websocket_supervisor():
 # SAFE ENTRYPOINT EXECUTION
 # ============================================================
 if __name__ == "__main__":
-    # Local development
+    # Local development (manual run)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 else:
@@ -1766,6 +1766,6 @@ else:
     # Start the WebSocket connection once – it contains its own reconnection logic
     ws_thread = threading.Thread(target=start_websocket, daemon=True)
     ws_thread.start()
-    # (Optional) Start watchdog if needed
+    # (Optional) Start watchdog if you want extra monitoring
     # watchdog_thread = threading.Thread(target=watchdog, daemon=True)
     # watchdog_thread.start()
