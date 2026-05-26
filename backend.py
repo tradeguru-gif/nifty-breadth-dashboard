@@ -496,32 +496,33 @@ def get_nifty_spot_cached():
     with tick_lock:
         return spot_cache["value"]
 
-# ============================================================
-# ATM TOKENS FIX (Severity 6: Use IST for expiry comparison)
-# ============================================================
-
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
         logger.error("No spot - cannot auto-fetch tokens")
         return
+    
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike}")
+    
     try:
         data = load_scrip_master()
     except Exception as e:
         logger.error(f"Failed to load scrip master: {e}")
         return
+        
     nifty_opts = []
     for item in data:
         if (item.get("name") == "NIFTY" and
             item.get("instrumenttype") == "OPTIDX" and
             item.get("exch_seg") == "NFO"):
             nifty_opts.append(item)
+            
     if not nifty_opts:
         logger.error("No NIFTY OPTIDX found")
         return
+        
     parsed = []
     for opt in nifty_opts:
         try:
@@ -530,34 +531,42 @@ def get_current_atm_tokens():
             parsed.append({"expiry": expiry, "strike": strike, "token": str(opt["token"]), "symbol": opt["symbol"]})
         except:
             continue
-    # Severity 6 Fix: Use IST for expiry comparison
-    # Severity 6 Fix: Strip out hours/minutes to keep today's expiry valid all day long
+
+    # 1. Strip time to keep today's expiry completely valid all day long
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
     
-    # This keeps today's contract active until the trading session finishes
+    # Filter out past contracts
     future = [p for p in parsed if p["expiry"] >= today_date_only]
     if not future:
         logger.error("No future expiry found")
         return
+        
+    # 2. Lock onto the NEAREST expiry first, and isolate only those contracts
     nearest_expiry = min(p["expiry"] for p in future)
-    atm_opts = [p for p in future if p["expiry"] == nearest_expiry and p["strike"] == atm_strike]
+    current_expiry_contracts = [p for p in future if p["expiry"] == nearest_expiry]
+    
+    # 3. Match strike purely within today's isolated active expiry pool
+    atm_opts = [p for p in current_expiry_contracts if p["strike"] == atm_strike]
+    
     if not atm_opts:
-        strikes = sorted(set(p["strike"] for p in future if p["expiry"] == nearest_expiry))
+        # Fallback to closest available strike ONLY within the current expiry pool
+        strikes = sorted(set(p["strike"] for p in current_expiry_contracts))
         nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
-        atm_opts = [p for p in future if p["expiry"] == nearest_expiry and p["strike"] == nearest_strike]
+        atm_opts = [p for p in current_expiry_contracts if p["strike"] == nearest_strike]
         atm_strike = nearest_strike
+        
     ce = [p for p in atm_opts if "CE" in p["symbol"]]
     pe = [p for p in atm_opts if "PE" in p["symbol"]]
+    
     if ce and pe:
         CE_TOKEN = ce[0]["token"]
         PE_TOKEN = pe[0]["token"]
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-        logger.info(f"Auto tokens: CE={CE_TOKEN} ({ce[0]['symbol']}), PE={PE_TOKEN}")
+        logger.info(f"Auto tokens locked successfully: CE={CE_TOKEN} ({ce[0]['symbol']}), PE={PE_TOKEN}")
     else:
-        logger.error("CE/PE not found for ATM strike")
-
+        logger.error(f"CE/PE not found for ATM strike {atm_strike} on expiry {nearest_expiry.strftime('%d%b%Y')}")
 # ---------- Technical Indicators ----------
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
