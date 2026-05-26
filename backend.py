@@ -1702,6 +1702,9 @@ def test_signal():
 # ============================================================
 # START ENGINE (with graceful shutdown)
 # ============================================================
+# ============================================================
+# WEBSOCKET ISOLATED SUPERVISOR
+# ============================================================
 import threading
 import time
 
@@ -1713,18 +1716,23 @@ def safe_websocket_supervisor():
     """ Runs completely isolated from the Gunicorn HTTP request paths """
     global is_connecting
     
-    # Give the web application 5 seconds to finish spinning up cleanly first
+    # Give Render 5 seconds to finish assigning network routes cleanly
     time.sleep(5)
     
     while True:
         try:
+            # CHECK: If the socket is already up and running, do not call restart!
+            if 'ws_running' in globals() and ws_running:
+                time.sleep(5)
+                continue
+
             with ws_lock:
                 if is_connecting:
                     time.sleep(2)
                     continue
                 is_connecting = True
             
-            # Explicitly clear out old timestamps before initiating a new socket bridge
+            # Reset stale indicators right before launching the interface bridge
             global last_ce_tick, last_pe_tick, last_spot_tick
             now = time.time()
             last_ce_tick = now
@@ -1732,8 +1740,6 @@ def safe_websocket_supervisor():
             last_spot_tick = now
             
             logger.info("Supervisor: Launching isolated WebSocket channel...")
-            
-            # FIX: Swapped placeholder for your script's native execution function
             restart_websocket() 
             
         except Exception as supervisor_err:
@@ -1741,11 +1747,9 @@ def safe_websocket_supervisor():
         finally:
             with ws_lock:
                 is_connecting = False
-            # Sleep 15 seconds to let the socket session settle fully
+            # Wait 15 seconds to give the auth handshake plenty of room to clear
             time.sleep(15)
-# ============================================================
-# SAFE ENTRYPOINT EXECUTION
-# ============================================================
+
 # ============================================================
 # SAFE ENTRYPOINT EXECUTION
 # ============================================================
@@ -1759,5 +1763,3 @@ else:
     logger.info("Gunicorn environment detected. Launching non-blocking background supervisor...")
     supervisor_worker = threading.Thread(target=safe_websocket_supervisor, daemon=True)
     supervisor_worker.start()
-    
-    # DO NOT call app.run() here. Gunicorn handles the web process initialization automatically.
