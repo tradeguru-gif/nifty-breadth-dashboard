@@ -704,6 +704,16 @@ def on_ws_data(wsapp, message, *args):
             ask = tick.get("sp") or tick.get("best_ask_price", 0)
             oi = tick.get("oi") or tick.get("open_interest", 0)
 
+            # ---- SSE: Prepare tick data (will be sent if push callback exists) ----
+            tick_data = {
+                "token": token,
+                "ltp": ltp,
+                "volume": vol,
+                "bid": bid,
+                "ask": ask,
+                "oi": oi
+            }
+
             if token == CE_TOKEN:
                 latest_ticks["ce_price"] = ltp
                 latest_ticks["ce_volume"] = vol
@@ -715,6 +725,9 @@ def on_ws_data(wsapp, message, *args):
                 ce_oi_history.append(oi)
                 tick_counter += 1
                 save_tick(CE_TOKEN, ltp, vol, bid, ask, oi)
+                # --- SSE push for CE token ---
+                if 'push_tick_callback' in globals() and push_tick_callback:
+                    push_tick_callback(tick_data)
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
                 latest_ticks["pe_volume"] = vol
@@ -726,7 +739,12 @@ def on_ws_data(wsapp, message, *args):
                 pe_oi_history.append(oi)
                 tick_counter += 1
                 save_tick(PE_TOKEN, ltp, vol, bid, ask, oi)
+                # --- SSE push for PE token ---
+                if 'push_tick_callback' in globals() and push_tick_callback:
+                    push_tick_callback(tick_data)
             else:
+                # For other tokens (like NIFTY spot) you can also push if you want
+                # but your front‑end currently uses REST for spot; you can add push similarly.
                 continue
 
             now = time.time()
@@ -747,15 +765,6 @@ def on_ws_data(wsapp, message, *args):
                 )
     except Exception as e:
         logger.error(f"WebSocket data error: {e}", exc_info=True)
-
-def on_ws_error(wsapp, error):
-    logger.error(f"WebSocket error: {error}")
-
-def on_ws_close(wsapp, *args):
-    global ws_running
-    logger.warning("WebSocket closed")
-    ws_running = False
-
 # ============================================================
 # WEBSOCKET CONNECTION MANAGER
 # ============================================================
@@ -884,6 +893,37 @@ def db_stats():
     conn.close()
     return jsonify({"ticks": ticks, "signals": signals, "trades": trades})
 
+#---------------------------------------
+#--------------------------------------
+#ADDED FOR SIGNAL CHART FOR SIGNAL PAGE
+#------------------------------------
+#-----------------------------------
+from flask import Response
+
+@app.route('/api/stream')
+def stream():
+    def event_stream():
+        # Use a queue to pass ticks from your WebSocket callback to the SSE stream
+        from collections import deque
+        stream_queue = deque(maxlen=1000)
+
+        # Define a function that your `on_ws_data` will call for every new tick
+        def push_tick(tick_data):
+            stream_queue.append(tick_data)
+
+        # Store this function globally so `on_ws_data` can use it (e.g., `global push_tick_callback`)
+        global push_tick_callback
+        push_tick_callback = push_tick
+
+        while True:
+            if stream_queue:
+                tick = stream_queue.popleft()
+                yield f"data: {json.dumps(tick)}\n\n"
+            time.sleep(0.05)   # small delay to avoid CPU spinning
+
+    return Response(event_stream(), mimetype="text/event-stream")
+#-----------------------------------------------------------
+#----------------------------------------------------------
 # ============================================================
 # START ENGINE
 # ============================================================
