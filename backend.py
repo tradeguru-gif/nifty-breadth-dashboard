@@ -529,19 +529,26 @@ def get_current_atm_tokens():
             expiry = datetime.strptime(opt["expiry"], "%d%b%Y")
             strike = float(opt["strike"]) / 100
             parsed.append({"expiry": expiry, "strike": strike, "token": str(opt["token"]), "symbol": opt["symbol"]})
-        except:
+        except Exception as e:
+            logger.debug(f"Parse error for {opt.get('symbol')}: {e}")
             continue
 
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
 
-    # FIX: strictly future expiry AND only Thursdays (weekly expiry)
-    future = [p for p in parsed if p["expiry"] > today_date_only and p["expiry"].weekday() == 3]
+    # Select any future expiry (strictly > today)
+    future = [p for p in parsed if p["expiry"] > today_date_only]
     if not future:
-        logger.error("No future Thursday expiry found")
+        logger.error("No future expiry found")
         return
 
+    # Log available expiry dates for debugging
+    expiries = sorted(set(p["expiry"] for p in future))
+    logger.info(f"Available future expiries: {[e.strftime('%d%b%Y') for e in expiries]}")
+
     nearest_expiry = min(p["expiry"] for p in future)
+    logger.info(f"Nearest expiry selected: {nearest_expiry.strftime('%d%b%Y')} (weekday: {nearest_expiry.weekday()})")
+
     current_expiry_contracts = [p for p in future if p["expiry"] == nearest_expiry]
 
     atm_opts = [p for p in current_expiry_contracts if p["strike"] == atm_strike]
@@ -551,6 +558,7 @@ def get_current_atm_tokens():
         nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
         atm_opts = [p for p in current_expiry_contracts if p["strike"] == nearest_strike]
         atm_strike = nearest_strike
+        logger.info(f"Adjusted strike to nearest: {atm_strike}")
 
     ce = [p for p in atm_opts if "CE" in p["symbol"]]
     pe = [p for p in atm_opts if "PE" in p["symbol"]]
