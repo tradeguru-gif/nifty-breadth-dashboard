@@ -770,6 +770,9 @@ def get_all_timeframe_trends():
 
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     global market_signal, market_state, institutional_state, signal_state, portfolio_state, rsi_history, paper_pnl
+    global last_tick_time  # <--- ADD THIS GLOBAL DECLARATION
+    
+    last_tick_time = time.time() # <--- ADD THIS LINE TO FORCE REFRESH THE CLOCK!
 
     # Initialize locals
     position_pct = 0
@@ -1582,7 +1585,7 @@ def start_websocket():
 
                 if ce_stale and pe_stale and spot_stale:
                     stale_check_count += 1
-                    if stale_check_count >= 3:  # Confirm stale for 3 seconds before reconnect
+                    if stale_check_count >= 600:  # Confirm stale for 3 seconds before reconnect
                         logger.warning("All feeds stale -> reconnecting websocket")
                         break
                 else:
