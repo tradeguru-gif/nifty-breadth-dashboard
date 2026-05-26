@@ -1349,26 +1349,57 @@ def on_open(wsapp):
     logger.info("WebSocket Opened")
     if sws and CE_TOKEN and PE_TOKEN and NIFTY_TOKEN:
         tokens = [
+def on_message(wsapp, message):
+    logger.info(f"RAW TICK: {message}")  # Add this temporarily
+    # ... rest
             {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]},
             {"exchangeType": 1, "tokens": [NIFTY_TOKEN]}
         ]
         sws.subscribe(correlation_id="tradeguru", mode=1, token_list=tokens)
         logger.info(f"Subscribed CE={CE_TOKEN} PE={PE_TOKEN} NIFTY={NIFTY_TOKEN}")
 
-def on_data(wsapp, message):
-    print(f"📊 TICK RECEIVED: {message[:200]}")  # first 200 chars
-    ... # rest of your code
-
+def on_message(wsapp, message):
+    global tick_counter, last_tick_time, ...
+    try:
+        tick = message if isinstance(message, dict) else {}
+        token = str(tick.get("token") or tick.get("tk") or "")
+        # ... rest of logic
+    # message is already a dict from your _parse_binary_data patch
+    global tick_counter, last_tick_time, ...
+    
+    try:
+        if isinstance(message, bytes):
+            return  # Let the patched parser handle it, or parse manually
+        tick = message if isinstance(message, dict) else json.loads(message)
+        # ... your parsing logic
+    # REMOVE THIS: print(f"📊 TICK RECEIVED: {message[:200]}")
     global tick_counter, last_tick_time, last_ce_tick, last_pe_tick, last_spot_tick, last_engine_run
     global spot_cache
+    
     try:
         if not message:
             return
         tick = message if isinstance(message, dict) else json.loads(message)
+        # ... rest of parsing logic must be indented inside this function
+    print(f"📊 TICK RECEIVED: {message[:200]}")  # first 200 chars
+    ... # rest of your code
+
+    def on_message(wsapp, message):
+    global tick_counter, last_tick_time, last_ce_tick, last_pe_tick, last_spot_tick, last_engine_run
+    global spot_cache
+    
+    try:
+        if not message:
+            return
+            
+        # SmartWebSocketV2 passes parsed dict after your patch
+        tick = message if isinstance(message, dict) else {}
+        
         token = str(tick.get("token") or tick.get("tk") or "")
         ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
-        volume = tick.get("volume_trade_for_the_day") or tick.get("v") or 0
-        oi = tick.get("open_interest") or tick.get("oi") or 0
+        # ... rest exactly as you have it
+        
+        last_tick_time = time.time()  # CRITICAL: Update this so engine knows ticks are flowing
 
         # Severity 5 Fix: Parse bid/ask from tick data
         bid = tick.get("best_bid_price") or tick.get("bp") or tick.get("bid") or 0
@@ -1433,7 +1464,7 @@ def on_data(wsapp, message):
             avg_volume = (latest_ticks.get("ce_volume", 0) + latest_ticks.get("pe_volume", 0)) / 2
             update_timeframes(avg_price, avg_volume)
 
-            if ce > 0 and pe > 0 and (time.time() - last_engine_run >= CONFIG["ENGINE_INTERVAL_SEC"]) and len(ce_price_history) >= 30 and len(pe_price_history) >= 30:
+            if ce > 0 and pe > 0 and ... len(ce_price_history) >= 30 and len(pe_price_history) >= 30:
                 last_engine_run = time.time()
                 run_signal_engine(ce, pe, list(ce_price_history), list(pe_price_history), list(ce_volume_history), list(pe_volume_history))
     except Exception as e:
@@ -1569,9 +1600,9 @@ def start_websocket():
 
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_open
-            sws.on_message = on_data
-            sws.on_error = on_error
-            sws.on_close = on_close
+sws.on_message = on_message  # Use on_message, not on_data
+sws.on_error = on_error
+sws.on_close = on_close
             ws_running = True
             logger.info("Connecting WebSocket (rate-limit protected)")
             last_tick_time = time.time()
