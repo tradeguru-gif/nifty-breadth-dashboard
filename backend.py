@@ -1705,67 +1705,14 @@ def test_signal():
 # ============================================================
 # WEBSOCKET ISOLATED SUPERVISOR
 # ============================================================
-import threading
-import time
-
-# Create a dedicated, atomic lock to prevent multi-threaded race conditions during resets
-ws_lock = threading.Lock()
-is_connecting = False
-
-#def safe_websocket_supervisor():
-    #""" Runs completely isolated from the Gunicorn HTTP request paths """
-    #global is_connecting
-    
-    # Give Render 5 seconds to finish assigning network routes cleanly
-   # time.sleep(5)
-    
-    while True:
-        try:
-            # CHECK: If the socket is already up and running, do not call restart!
-            if 'ws_running' in globals() and ws_running:
-                time.sleep(5)
-                continue
-
-            with ws_lock:
-                if is_connecting:
-                    time.sleep(2)
-                    continue
-                is_connecting = True
-            
-            # Reset stale indicators right before launching the interface bridge
-            global last_ce_tick, last_pe_tick, last_spot_tick
-            now = time.time()
-            last_ce_tick = now
-            last_pe_tick = now
-            last_spot_tick = now
-            
-            logger.info("Supervisor: Launching isolated WebSocket channel...")
-            restart_websocket() 
-            
-        except Exception as supervisor_err:
-            logger.error(f"Supervisor thread exception caught: {supervisor_err}")
-        finally:
-            with ws_lock:
-                is_connecting = False
-            # Wait 15 seconds to give the auth handshake plenty of room to clear
-            time.sleep(15)
-
-# ============================================================
-# SAFE ENTRYPOINT EXECUTION
-# ============================================================
+#===========================================================
 # ============================================================
 # SAFE ENTRYPOINT EXECUTION
 # ============================================================
 if __name__ == "__main__":
-    # Local development (manual run)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 else:
-    # Production on Render (Gunicorn)
     logger.info("Gunicorn environment detected. Launching WebSocket engine...")
-    # Start the WebSocket connection once – it contains its own reconnection logic
     ws_thread = threading.Thread(target=start_websocket, daemon=True)
     ws_thread.start()
-    # (Optional) Start watchdog if you want extra monitoring
-    # watchdog_thread = threading.Thread(target=watchdog, daemon=True)
-    # watchdog_thread.start()
