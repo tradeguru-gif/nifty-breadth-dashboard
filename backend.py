@@ -1753,13 +1753,19 @@ def safe_websocket_supervisor():
 # ============================================================
 # SAFE ENTRYPOINT EXECUTION
 # ============================================================
+# ============================================================
+# SAFE ENTRYPOINT EXECUTION
+# ============================================================
 if __name__ == "__main__":
-    # Local terminal testing (only runs if you execute 'python backend.py' manually)
+    # Local development
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 else:
-    # WHEN DEPLOYED ON RENDER (Spawned via Gunicorn):
-    # This spins your streaming socket processing engine entirely out of Gunicorn's request pool
-    logger.info("Gunicorn environment detected. Launching non-blocking background supervisor...")
-    supervisor_worker = threading.Thread(target=safe_websocket_supervisor, daemon=True)
-    supervisor_worker.start()
+    # Production on Render (Gunicorn)
+    logger.info("Gunicorn environment detected. Launching WebSocket engine...")
+    # Start the WebSocket connection once – it contains its own reconnection logic
+    ws_thread = threading.Thread(target=start_websocket, daemon=True)
+    ws_thread.start()
+    # (Optional) Start watchdog if needed
+    # watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    # watchdog_thread.start()
