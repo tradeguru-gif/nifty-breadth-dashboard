@@ -1,21 +1,49 @@
 import os
 import time
 import logging
-import threading
 import json
 import requests
 import math
 import signal
+import threading
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta
+
+# Third-party Framework & API Imports
 from flask import Flask, jsonify, g
 from flask_cors import CORS
+import pyotp
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-import pyotp
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 1. Initialize Application Settings & Extensions
+app = Flask(__name__)
+CORS(app)
+
+# 2. Define Background Worker Core Functions
+def run_signal_engine():
+    while True:
+        # Put your market logic, WebSocket watchers, or API fetches here
+        print("Market closed. Sleeping 5 minutes...")
+        time.sleep(300)
+
+# 3. Fire up Background Thread immediately (Non-blocking)
+threading.Thread(target=run_signal_engine, daemon=True).start()
+
+# 4. Define HTTP Server Endpoints
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "Signal Engine Running smoothly in background thread."
+    }), 200
+
+# 5. Production App Entrypoint
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
 # ============================================================
 # GRACEFUL SHUTDOWN HANDLER (Severity 7 Fix)
 # ============================================================
