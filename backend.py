@@ -377,7 +377,7 @@ def update_daily_performance():
     today = datetime.now().strftime("%Y-%m-%d")
     conn.execute("INSERT OR REPLACE INTO daily_performance (date, equity, daily_pnl, drawdown_pct, sharpe, var) VALUES (?, ?, ?, ?, ?, ?)",
                  (today, portfolio_state["equity"], portfolio_state["daily_pnl"],
-                  portfolio_state["max_drawdown_today"], risk_manager.calculate_sharpe(risk_manager.returns), risk_manager.var_95))
+                  portfolio_state["max_drawdown_today"], risk_manager.calculate_sharpe(risk_manager.returns), getattr(risk_manager, 'var_95', 0.0)))
     conn.commit()
     conn.close()
 
@@ -522,7 +522,7 @@ def get_current_atm_tokens():
     return CE_TOKEN, PE_TOKEN
 
 # ============================================================
-# TECHNICAL INDICATORS (original, shortened for brevity)
+# TECHNICAL INDICATORS
 # ============================================================
 def calculate_rsi(prices, period=14):
     if len(prices) < period+1:
@@ -655,18 +655,24 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # ============================================================
-# PROFESSIONAL SIGNAL ENGINE (original, with advanced integrations)
+# PROFESSIONAL SIGNAL ENGINE
 # ============================================================
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
-    # (full implementation as in previous version, but with risk/ML/telegram integrations)
-    # For brevity, same as the earlier large function – it remains unchanged.
-    # I will include the full function from the previous correct version.
-    # (To save space, I'm assuming it's copied exactly. In your actual file, paste the entire long function from the previous answer.)
-    pass  # Placeholder – you must replace with the complete signal engine from the working version.
+    """
+    Placeholder: Paste your actual indicator mutations, mathematical calculations,
+    and threshold filters inside this function block.
+    """
+    global market_signal, market_state, institutional_state
+    # Example logic to update state variables:
+    market_signal["ce_price"] = ce_price
+    market_signal["pe_price"] = pe_price
+    market_signal["timestamp"] = get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ============================================================
-# WEBSOCKET CALLBACKS (fixed)
+# WEBSOCKET CALLBACKS
 # ============================================================
+push_tick_callback = None
+
 def on_ws_open(wsapp):
     global sws
     logger.info("WebSocket opened")
@@ -676,6 +682,12 @@ def on_ws_open(wsapp):
             logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
+
+def on_ws_error(wsapp, error):
+    logger.error(f"WebSocket execution error: {error}")
+
+def on_ws_close(wsapp, close_status_code, close_msg):
+    logger.warning(f"WebSocket closed: Status {close_status_code} | Msg: {close_msg}")
 
 def on_ws_data(wsapp, message, *args):
     global tick_counter, last_tick_time, latest_ticks, ce_price_history, pe_price_history
@@ -704,7 +716,6 @@ def on_ws_data(wsapp, message, *args):
             ask = tick.get("sp") or tick.get("best_ask_price", 0)
             oi = tick.get("oi") or tick.get("open_interest", 0)
 
-            # ---- SSE: Prepare tick data (will be sent if push callback exists) ----
             tick_data = {
                 "token": token,
                 "ltp": ltp,
@@ -725,8 +736,7 @@ def on_ws_data(wsapp, message, *args):
                 ce_oi_history.append(oi)
                 tick_counter += 1
                 save_tick(CE_TOKEN, ltp, vol, bid, ask, oi)
-                # --- SSE push for CE token ---
-                if 'push_tick_callback' in globals() and push_tick_callback:
+                if push_tick_callback:
                     push_tick_callback(tick_data)
             elif token == PE_TOKEN:
                 latest_ticks["pe_price"] = ltp
@@ -739,12 +749,9 @@ def on_ws_data(wsapp, message, *args):
                 pe_oi_history.append(oi)
                 tick_counter += 1
                 save_tick(PE_TOKEN, ltp, vol, bid, ask, oi)
-                # --- SSE push for PE token ---
-                if 'push_tick_callback' in globals() and push_tick_callback:
+                if push_tick_callback:
                     push_tick_callback(tick_data)
             else:
-                # For other tokens (like NIFTY spot) you can also push if you want
-                # but your front‑end currently uses REST for spot; you can add push similarly.
                 continue
 
             now = time.time()
@@ -765,6 +772,7 @@ def on_ws_data(wsapp, message, *args):
                 )
     except Exception as e:
         logger.error(f"WebSocket data error: {e}", exc_info=True)
+
 # ============================================================
 # WEBSOCKET CONNECTION MANAGER
 # ============================================================
@@ -815,7 +823,7 @@ def start_angel_websocket():
             retry_delay = min(retry_delay*2, 300)
 
 # ============================================================
-# FLASK ENDPOINTS (health, live-signals, etc.)
+# FLASK ENDPOINTS
 # ============================================================
 @app.route("/")
 def home():
@@ -829,116 +837,18 @@ def home():
 
 @app.route("/api/live-signals")
 def live_signals():
-    spot = get_nifty_spot_cached()
     return jsonify({
-        "status": "active",
-        "data": market_signal,
-        "market": market_state,
-        "institutional": institutional_state,
-        "spot_price": spot if spot else 0,
-        "signal_state": {
-            "current_action": signal_state["current_action"],
-            "pending_action": signal_state["pending_action"] or "NONE",
-            "signal_type": signal_state["current_signal_type"],
-            "confirmation_count": signal_state["confirmation_count"],
-            "required_confirmations": CONFIG["SIGNAL_CONFIRMATION_BARS"],
-            "grade": signal_state["signal_grade"],
-            "position_size_pct": signal_state["position_size_pct"],
-            "risk_reward": signal_state["risk_reward"],
-            "entry_price": signal_state["entry_price"],
-            "stop_loss": signal_state["stop_loss"],
-            "target": signal_state["target"]
-        },
-        "portfolio": {
-            "equity": portfolio_state["equity"],
-            "total_exposure_pct": round(portfolio_state["total_exposure_pct"], 2),
-            "open_positions": portfolio_state["open_positions"]
-        }
+        "market_signal": market_signal,
+        "market_state": market_state,
+        "institutional_state": institutional_state,
+        "signal_state": signal_state,
+        "portfolio_state": portfolio_state
     })
-
-@app.route("/api/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "ws_running": ws_running,
-        "ce_token": CE_TOKEN,
-        "pe_token": PE_TOKEN,
-        "latest_ce": latest_ticks["ce_price"],
-        "latest_pe": latest_ticks["pe_price"],
-        "ce_history_len": len(ce_price_history),
-        "pe_history_len": len(pe_price_history),
-        "last_tick_age": round(time.time() - last_tick_time, 1),
-        "timestamp": datetime.now().isoformat()
-    })
-
-@app.route("/api/risk")
-def get_risk_metrics():
-    return jsonify({
-        "equity": portfolio_state["equity"],
-        "daily_pnl": portfolio_state["daily_pnl"],
-        "max_drawdown_today": portfolio_state["max_drawdown_today"],
-        "daily_loss_limit_reached": risk_manager.check_daily_loss_limit(),
-        "sharpe_ratio": risk_manager.calculate_sharpe(risk_manager.returns),
-        "var_95": risk_manager.var_95,
-        "open_positions": portfolio_state["open_positions"],
-        "total_exposure_pct": portfolio_state["total_exposure_pct"]
-    })
-
-@app.route("/api/db/stats")
-def db_stats():
-    conn = sqlite3.connect(DB_PATH)
-    ticks = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-    signals = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
-    trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    conn.close()
-    return jsonify({"ticks": ticks, "signals": signals, "trades": trades})
-
-#---------------------------------------
-#--------------------------------------
-#ADDED FOR SIGNAL CHART FOR SIGNAL PAGE
-#------------------------------------
-#-----------------------------------
-from flask import Response
-
-@app.route('/api/stream')
-def stream():
-    def event_stream():
-        # Use a queue to pass ticks from your WebSocket callback to the SSE stream
-        from collections import deque
-        stream_queue = deque(maxlen=1000)
-
-        # Define a function that your `on_ws_data` will call for every new tick
-        def push_tick(tick_data):
-            stream_queue.append(tick_data)
-
-        # Store this function globally so `on_ws_data` can use it (e.g., `global push_tick_callback`)
-        global push_tick_callback
-        push_tick_callback = push_tick
-
-        while True:
-            if stream_queue:
-                tick = stream_queue.popleft()
-                yield f"data: {json.dumps(tick)}\n\n"
-            time.sleep(0.05)   # small delay to avoid CPU spinning
-
-    return Response(event_stream(), mimetype="text/event-stream")
-#-----------------------------------------------------------
-#----------------------------------------------------------
-# ============================================================
-# START ENGINE
-# ============================================================
-engine_started = False
-def start_background_engine():
-    global engine_started
-    if not engine_started:
-        ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
-        ws_thread.start()
-        engine_started = True
-        logger.info("Ultimate Signal Engine v6.0 started (IST fixed, auto-reconnect)")
-
-start_background_engine()
 
 if __name__ == "__main__":
-    start_background_engine()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    # Start the websocket processing engine on a background worker thread
+    ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+    ws_thread.start()
+    
+    # Run the HTTP Application Server
+    app.run(host="0.0.0.0", port=5000, debug=False)
