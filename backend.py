@@ -1733,18 +1733,16 @@ def safe_websocket_supervisor():
             
             logger.info("Supervisor: Launching isolated WebSocket channel...")
             
-            # Run your existing socket attachment method here
-            # Make sure this call does not crash out the global scope if it fails
-            connect_websocket_loop() 
+            # FIX: Swapped placeholder for your script's native execution function
+            restart_websocket() 
             
         except Exception as supervisor_err:
             logger.error(f"Supervisor thread exception caught: {supervisor_err}")
         finally:
             with ws_lock:
                 is_connecting = False
-            # Wait 10 seconds before letting the supervisor attempt any automated recovery loop
-            time.sleep(10)
-
+            # Sleep 15 seconds to let the socket session settle fully
+            time.sleep(15)
 # ============================================================
 # SAFE ENTRYPOINT EXECUTION
 # ============================================================
