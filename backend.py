@@ -24,7 +24,7 @@ CORS(app)
 
 # 2. Define Background Worker Core Functions
 def run_signal_engine():
-    while True:
+    
         # Put your market logic, WebSocket watchers, or API fetches here
         print("Market closed. Sleeping 5 minutes...")
         time.sleep(300)
@@ -502,27 +502,27 @@ def get_current_atm_tokens():
     if not spot:
         logger.error("No spot - cannot auto-fetch tokens")
         return
-    
+
     atm_strike = round(spot / 50) * 50
     logger.info(f"ATM strike = {atm_strike}")
-    
+
     try:
         data = load_scrip_master()
     except Exception as e:
         logger.error(f"Failed to load scrip master: {e}")
         return
-        
+
     nifty_opts = []
     for item in data:
         if (item.get("name") == "NIFTY" and
             item.get("instrumenttype") == "OPTIDX" and
             item.get("exch_seg") == "NFO"):
             nifty_opts.append(item)
-            
+
     if not nifty_opts:
         logger.error("No NIFTY OPTIDX found")
         return
-        
+
     parsed = []
     for opt in nifty_opts:
         try:
@@ -532,35 +532,29 @@ def get_current_atm_tokens():
         except:
             continue
 
-    # 1. Strip time to keep today's expiry completely valid all day long
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
-    
-    # Filter out past contracts
-    # Option 1: strictly future expiry (any day after today)
-future = [p for p in parsed if p["expiry"] > today_date_only]
 
-# Option 2 (recommended): only future Thursdays (weekly expiry)
-future = [p for p in parsed if p["expiry"] > today_date_only and p["expiry"].weekday() == 3]
+    # FIX: strictly future expiry AND only Thursdays (weekly expiry)
+    future = [p for p in parsed if p["expiry"] > today_date_only and p["expiry"].weekday() == 3]
+    if not future:
+        logger.error("No future Thursday expiry found")
+        return
 
-        
-    # 2. Lock onto the NEAREST expiry first, and isolate only those contracts
     nearest_expiry = min(p["expiry"] for p in future)
     current_expiry_contracts = [p for p in future if p["expiry"] == nearest_expiry]
-    
-    # 3. Match strike purely within today's isolated active expiry pool
+
     atm_opts = [p for p in current_expiry_contracts if p["strike"] == atm_strike]
-    
+
     if not atm_opts:
-        # Fallback to closest available strike ONLY within the current expiry pool
         strikes = sorted(set(p["strike"] for p in current_expiry_contracts))
         nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
         atm_opts = [p for p in current_expiry_contracts if p["strike"] == nearest_strike]
         atm_strike = nearest_strike
-        
+
     ce = [p for p in atm_opts if "CE" in p["symbol"]]
     pe = [p for p in atm_opts if "PE" in p["symbol"]]
-    
+
     if ce and pe:
         CE_TOKEN = ce[0]["token"]
         PE_TOKEN = pe[0]["token"]
