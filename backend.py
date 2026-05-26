@@ -531,8 +531,12 @@ def get_current_atm_tokens():
         except:
             continue
     # Severity 6 Fix: Use IST for expiry comparison
-    today_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    future = [p for p in parsed if p["expiry"] >= today_ist]
+    # Severity 6 Fix: Strip out hours/minutes to keep today's expiry valid all day long
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    today_date_only = datetime(now_ist.year, now_ist.month, now_ist.day)
+    
+    # This keeps today's contract active until the trading session finishes
+    future = [p for p in parsed if p["expiry"] >= today_date_only]
     if not future:
         logger.error("No future expiry found")
         return
