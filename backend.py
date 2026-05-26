@@ -1702,18 +1702,60 @@ def test_signal():
 # ============================================================
 # START ENGINE (with graceful shutdown)
 # ============================================================
-engine_started = False
+import threading
+import time
 
-def start_background_engine():
-    global engine_started
-    if not engine_started:
-        threading.Thread(target=watchdog, daemon=True).start()
-        threading.Thread(target=start_websocket, daemon=True).start()
-        engine_started = True
-        logger.info("Ultimate Signal Engine v9.0 Started (All 10 severity fixes applied)")
+# Create a dedicated, atomic lock to prevent multi-threaded race conditions during resets
+ws_lock = threading.Lock()
+is_connecting = False
 
-start_background_engine()
+def safe_websocket_supervisor():
+    """ Runs completely isolated from the Gunicorn HTTP request paths """
+    global is_connecting
+    
+    # Give the web application 5 seconds to finish spinning up cleanly first
+    time.sleep(5)
+    
+    while True:
+        try:
+            with ws_lock:
+                if is_connecting:
+                    time.sleep(2)
+                    continue
+                is_connecting = True
+            
+            # Explicitly clear out old timestamps before initiating a new socket bridge
+            global last_ce_tick, last_pe_tick, last_spot_tick
+            now = time.time()
+            last_ce_tick = now
+            last_pe_tick = now
+            last_spot_tick = now
+            
+            logger.info("Supervisor: Launching isolated WebSocket channel...")
+            
+            # Run your existing socket attachment method here
+            # Make sure this call does not crash out the global scope if it fails
+            connect_websocket_loop() 
+            
+        except Exception as supervisor_err:
+            logger.error(f"Supervisor thread exception caught: {supervisor_err}")
+        finally:
+            with ws_lock:
+                is_connecting = False
+            # Wait 10 seconds before letting the supervisor attempt any automated recovery loop
+            time.sleep(10)
 
+# ============================================================
+# SAFE ENTRYPOINT EXECUTION
+# ============================================================
 if __name__ == "__main__":
+    # Local terminal testing
+    app.run(host="0.0.0.0", port=10000)
+else:
+    # WHEN DEPLOYED ON RENDER:
+    # This spins your streaming socket processing engine entirely out of Gunicorn's request pool
+    logger.info("Gunicorn environment detected. Launching non-blocking background supervisor...")
+    supervisor_worker = threading.Thread(target=safe_websocket_supervisor, daemon=True)
+    supervisor_worker.start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True)
