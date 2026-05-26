@@ -73,6 +73,41 @@ def _patched_on_close(self, wsapp, *args):
 
 SmartWebSocketV2._on_close = _patched_on_close
 
+# ============================================================
+# SMARTWEBSOCKETV2 RATE LIMIT FIX - Disable aggressive internal retry
+# ============================================================
+# Angel One limits: max 3 concurrent connections, rate limited on reconnects
+# We MUST disable SmartAPI's internal retry and handle it ourselves with backoff
+
+_original_smartws_init = SmartWebSocketV2.__init__
+
+def _patched_smartws_init(self, auth_token, api_key, client_code, feed_token):
+    _original_smartws_init(self, auth_token, api_key, client_code, feed_token)
+    # Disable internal auto-reconnect - our outer loop handles it
+    self._should_reconnect = False
+    self._max_retry_attempts = 1
+    self._retry_delay = 0
+
+SmartWebSocketV2.__init__ = _patched_smartws_init
+
+# Override reconnect to prevent aggressive retry loops
+if hasattr(SmartWebSocketV2, '_reconnect'):
+    _orig_reconnect = SmartWebSocketV2._reconnect
+    def _patched_reconnect(self, wsapp):
+        logger.warning("SmartAPI internal reconnect blocked - using custom backoff")
+        pass
+    SmartWebSocketV2._reconnect = _patched_reconnect
+
+# Override on_close to not trigger auto-reconnect
+if hasattr(SmartWebSocketV2, 'on_close'):
+    def _patched_smartws_on_close(self, wsapp, *args):
+        logger.info("SmartWebSocketV2 closed - NOT auto-reconnecting, outer loop will handle")
+        self.HB_THREAD_FLAG = False
+        self._is_first_connect = False
+    SmartWebSocketV2.on_close = _patched_smartws_on_close
+
+
+
 # ------------------------------------------------------------
 
 app = Flask(__name__)
@@ -90,10 +125,6 @@ ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
     raise ValueError("Missing Angel One credentials")
-
-# ---------- TEST MODE OVERRIDE ----------
-FORCE_MARKET_OPEN = os.getenv("FORCE_MARKET_OPEN", "false").lower() == "true"
-
 # ---------- Global State ----------
 CE_TOKEN = None
 PE_TOKEN = None
@@ -166,10 +197,6 @@ def is_market_open():
     market_end = dt_time(15, 30)
 
     logger.debug(f"[TZ-CHECK] UTC: {datetime.utcnow()} | IST: {now_ist} | Weekday: {now_ist.weekday()} | Time: {now_ist.time()} | Open: {market_start <= now_ist.time() <= market_end}")
-
-    if FORCE_MARKET_OPEN:
-        logger.info("[TZ-CHECK] FORCE_MARKET_OPEN enabled - bypassing market hours check")
-        return True
 
     return market_start <= now_ist.time() <= market_end
 
@@ -315,7 +342,7 @@ CONFIG = {
     "REST_COOLDOWN_SEC": 5,
     "WATCHDOG_INTERVAL_SEC": 30,
     "WATCHDOG_STALE_LIMIT": 120,
-    "WS_BASE_RETRY_SEC": 5,       # Severity 9 Fix: Exponential backoff base
+    "WS_BASE_RETRY_SEC": 15,      # FIX: Increased to 15s to avoid Angel One 429 rate limit
     "WS_MAX_RETRY_SEC": 300,      # Severity 9 Fix: Max 5 minutes
     "WS_MAX_RETRIES": 20          # Severity 9 Fix: Max retry attempts
 }
@@ -1430,6 +1457,8 @@ def start_websocket():
     global ws_running, sws, CE_TOKEN, PE_TOKEN, NIFTY_TOKEN, last_tick_time
     retry_count = 0
     retry_delay = CONFIG["WS_BASE_RETRY_SEC"]
+    last_connect_attempt = 0
+    MIN_CONNECT_INTERVAL = 10  # Minimum seconds between connection attempts to avoid 429
 
     while engine_active and not shutdown_requested:
         try:
@@ -1441,6 +1470,15 @@ def start_websocket():
                 logger.info("Market closed. Sleeping 5 minutes...")
                 time.sleep(300)
                 continue
+
+            # RATE LIMIT PROTECTION: Enforce minimum interval between connection attempts
+            now = time.time()
+            time_since_last = now - last_connect_attempt
+            if time_since_last < MIN_CONNECT_INTERVAL:
+                wait = MIN_CONNECT_INTERVAL - time_since_last
+                logger.info(f"Rate limit protection: waiting {wait:.1f}s before next connect attempt")
+                time.sleep(wait)
+            last_connect_attempt = time.time()
 
             auth_token, feed_token, obj = get_auth_token()
 
@@ -1468,28 +1506,46 @@ def start_websocket():
             retry_count = 0
             retry_delay = CONFIG["WS_BASE_RETRY_SEC"]
 
+            # CRITICAL: Close any existing connection before creating new one
+            if sws:
+                try:
+                    logger.info("Closing previous WebSocket before reconnect...")
+                    sws.close_connection()
+                    sws = None
+                    time.sleep(2)  # Give server time to clean up
+                except Exception as e:
+                    logger.debug(f"Error closing old WS: {e}")
+
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_open
             sws.on_message = on_data
             sws.on_error = on_error
             sws.on_close = on_close
             ws_running = True
-            logger.info("Connecting WebSocket")
+            logger.info("Connecting WebSocket (rate-limit protected)")
             last_tick_time = time.time()
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
 
+            # Connection monitoring loop
+            stale_check_count = 0
             while ws_running and engine_active and not shutdown_requested:
                 time.sleep(1)
                 if shutdown_requested:
                     break
+
                 now = time.time()
                 ce_stale = now - last_ce_tick > CONFIG["STALE_TICK_SEC"]
                 pe_stale = now - last_pe_tick > CONFIG["STALE_TICK_SEC"]
                 spot_stale = now - last_spot_tick > CONFIG["STALE_TICK_SEC"]
+
                 if ce_stale and pe_stale and spot_stale:
-                    logger.warning("All feeds stale -> reconnecting websocket")
-                    break
+                    stale_check_count += 1
+                    if stale_check_count >= 3:  # Confirm stale for 3 seconds before reconnect
+                        logger.warning("All feeds stale -> reconnecting websocket")
+                        break
+                else:
+                    stale_check_count = 0
 
         except Exception as e:
             logger.exception(f"WebSocket connection error: {e}")
