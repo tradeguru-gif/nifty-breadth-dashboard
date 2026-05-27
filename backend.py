@@ -979,6 +979,23 @@ def health():
         "ce_history_len": len(ce_price_history),
         "pe_history_len": len(pe_price_history)
     })
+# Add a basic route to confirm the app is running
+@app.route('/')
+def home():
+    return jsonify({"status": "API is running", "message": "Use /api/live-signals or /api/health"})
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "ws_running": ws_running,
+        "market_open": is_market_open(),
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "last_tick_age": round(time.time() - last_tick_time, 1) if last_tick_time else None,
+        "ce_history_len": len(ce_price_history),
+        "pe_history_len": len(pe_price_history)
+    })
 
 if __name__ == '__main__':
     # 1. Force a temporary test state right now so the UI populates immediately
