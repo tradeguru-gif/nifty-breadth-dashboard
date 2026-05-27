@@ -166,7 +166,7 @@ market_signal = {
     "atr_pct": 0.0, "adx": 0.0, "bb_position": 50.0, "rsi_divergence": "NONE",
     "iv_rank": 50, "signal_grade": "D", "regime": "RANGING", "session_phase": "UNKNOWN",
     "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0,
-    "spot_price": 0  # ADDED for frontend
+    "spot_price": 0
 }
 
 market_state = {
@@ -804,12 +804,12 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "iv_rank": int(ce_iv * 100), "signal_grade": grade, "regime": regime, "session_phase": phase,
         "ce_spread_pct": round(ce_spread_pct, 2), "pe_spread_pct": round(pe_spread_pct, 2),
         "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
-        "spot_price": spot   # ADDED
+        "spot_price": spot
     })
     
     # Update market_state
     market_state.update({
-        "rsi": round(rsi_ce, 1), "action": action_str,   # mapped action
+        "rsi": round(rsi_ce, 1), "action": action_str,
         "confidence": round(confidence, 1),
         "regime": regime, "session_phase": phase, "momentum": "BULLISH" if rsi_diff > 10 else "BEARISH" if rsi_diff < -10 else "NEUTRAL",
         "strength": "HIGH" if adx_ce > 25 else "LOW", "trend": "UPTREND" if regime == "TRENDING_BULL" else "DOWNTREND" if regime == "TRENDING_BEAR" else "SIDEWAYS",
@@ -954,7 +954,12 @@ def start_websocket_engine():
 # FLASK WEB ENDPOINTS FOR UI STREAMING
 # --------------------------------------------------
 app = Flask(__name__)
-CORS(app)
+# Allow your Cloudflare Worker domain (and also allow during development)
+CORS(app, resources={r"/*": {"origins": ["https://icy-wave-c82f.tradeguru-net.workers.dev", "https://your-blogger-domain.blogspot.com", "http://localhost:5000"]}})
+
+@app.route('/')
+def home():
+    return jsonify({"status": "API is running", "message": "Use /api/live-signals or /api/health"})
 
 @app.route('/api/live-signals', methods=['GET'])
 def get_signals():
@@ -965,24 +970,8 @@ def get_signals():
         "market_signal": market_signal,
         "market_state": market_state,
         "institutional_state": institutional_state,
-        "portfolio_state": portfolio_state   # ADDED
+        "portfolio_state": portfolio_state
     })
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({
-        "ws_running": ws_running,
-        "market_open": is_market_open(),
-        "ce_token": CE_TOKEN,
-        "pe_token": PE_TOKEN,
-        "last_tick_age": round(time.time() - last_tick_time, 1) if last_tick_time else None,
-        "ce_history_len": len(ce_price_history),
-        "pe_history_len": len(pe_price_history)
-    })
-# Add a basic route to confirm the app is running
-@app.route('/')
-def home():
-    return jsonify({"status": "API is running", "message": "Use /api/live-signals or /api/health"})
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -997,42 +986,8 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
-
-# --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
-# --------------------------------------------------
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": ["https://icy-wave-c82f.tradeguru-net.workers.dev"]}})
-
-@app.route('/api/live-signals', methods=['GET'])
-def get_signals():
-    return jsonify({
-        "market_signal": market_signal,
-        "market_state": market_state,
-        "institutional_state": institutional_state,
-        "portfolio_state": portfolio_state
-    })
-
-# ---------- INSERT THE NEW HEALTH ROUTE HERE ----------
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({
-        "ws_running": ws_running,
-        "market_open": is_market_open(),
-        "ce_token": CE_TOKEN,
-        "pe_token": PE_TOKEN,
-        "last_tick_age": round(time.time() - last_tick_time, 1) if last_tick_time else None,
-        "ce_history_len": len(ce_price_history),
-        "pe_history_len": len(pe_price_history)
-    })
-# -------------------------------------------------------
-
 if __name__ == '__main__':
-    # ... rest of your main block
-
-
-if __name__ == '__main__':
-    # 1. Force a temporary test state right now so the UI populates immediately
+    # Force a temporary test state right now so the UI populates immediately
     test_action = "BUY CE"
     market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
@@ -1043,8 +998,8 @@ if __name__ == '__main__':
     
     logger.info("Injecting test signal data for UI validation...")
 
-    # 2. Initialize background process thread for the live data loop
+    # Initialize background process thread for the live data loop
     threading.Thread(target=start_websocket_engine, daemon=True).start()
     
-    # 3. Spin up the Flask server (This locks the script and keeps it running)
+    # Spin up the Flask server
     app.run(host='0.0.0.0', port=5000, debug=False)
