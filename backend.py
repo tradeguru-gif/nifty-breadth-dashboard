@@ -411,27 +411,20 @@ def calculate_rsi(prices, period=14):
         return 100.0
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow + signal:
+def calculate_macd(prices, fast=12, slow=26):
+    if len(prices) < slow:
         return 0.0, 0.0
-    
-    def get_ema_list(arr, period):
-        values = []
+    def ema(arr, period):
+        if len(arr) < period:
+            return arr[-1]
         alpha = 2 / (period + 1)
-        current_ema = arr[0]
-        values.append(current_ema)
+        e = arr[0]
         for x in arr[1:]:
-            current_ema = alpha * x + (1 - alpha) * current_ema
-            values.append(current_ema)
-        return values
-
-    fast_emas = get_ema_list(prices, fast)
-    slow_emas = get_ema_list(prices, slow)
-    
-    macd_line = [f - s for f, s in zip(fast_emas, slow_emas)]
-    signal_line_vals = get_ema_list(macd_line, signal)
-    
-    return macd_line[-1], signal_line_vals[-1]
+            e = alpha * x + (1 - alpha) * e
+        return e
+    ema_f = ema(prices[-fast:], fast)
+    ema_s = ema(prices[-slow:], slow)
+    return ema_f - ema_s, ema_f - ema_s
 
 def calculate_vwap(prices, volumes):
     if not prices or not volumes:
@@ -657,66 +650,39 @@ def get_current_atm_tokens():
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     """
     Core Algorithmic Matrix that computes indicators, verifies metrics,
-    applies risk controls, evaluates models, and broadcasts parameters to downstream structures.
+    applies risk controls, evaluates models, and broadcasts grade levels to WordPress.
     """
     global market_signal, market_state, institutional_state, signal_state, portfolio_state
     
     if len(ce_hist) < 30 or len(pe_hist) < 30:
         return
 
-    # 1. Base Calculations
+    # 1. Base Spread & Parsing Calculations
     spread = ce_price - pe_price
     ce_list = list(ce_hist)
     pe_list = list(pe_hist)
-    ce_vols = list(ce_vol_hist)
-    pe_vols = list(pe_vol_hist)
     
-    # 2. Complete Technical Indicator Calculations
     rsi_ce = calculate_rsi(ce_list, CONFIG["RSI_PERIOD"])
     rsi_pe = calculate_rsi(pe_list, CONFIG["RSI_PERIOD"])
     rsi_diff = rsi_ce - rsi_pe
     
-    macd_ce, _ = calculate_macd(ce_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"], CONFIG["MACD_SIGNAL"])
-    macd_pe, _ = calculate_macd(pe_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"], CONFIG["MACD_SIGNAL"])
-    macd_diff = macd_ce - macd_pe
+    macd_ce, _ = calculate_macd(ce_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"])
+    macd_pe, _ = calculate_macd(pe_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"])
     
     pcr = get_nifty_pcr()
     pcr_history.append(pcr)
     
-    vwap_ce = calculate_vwap(ce_list, ce_vols)
-    atr_ce = calculate_atr(ce_list, CONFIG["ATR_PERIOD"])
-    atr_pct_ce = (atr_ce / ce_price * 100) if ce_price else 0.0
-    adx_ce = calculate_adx(ce_list, CONFIG["ADX_PERIOD"])
-    
-    ema_fast_ce = calculate_ema(ce_list, CONFIG["EMA_FAST"])
-    ema_slow_ce = calculate_ema(ce_list, CONFIG["EMA_SLOW"])
-    
+    # 2. Derive Bollinger & Structural Positions
     _, _, _, bb_pos_ce = calculate_bollinger(ce_list, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
     _, _, _, bb_pos_pe = calculate_bollinger(pe_list, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
     
-    # Check Divergence
-    rsi_vals_ce = [calculate_rsi(ce_list[:i], CONFIG["RSI_PERIOD"]) for i in range(len(ce_list)-5, len(ce_list)+1)]
-    rsi_div_ce = calculate_rsi_divergence(ce_list, rsi_vals_ce)
-
     # 3. Micro and Macro Regime Identification
     regime = "RANGING"
+    adx_ce = calculate_adx(ce_list, CONFIG["ADX_PERIOD"])
     if adx_ce > 25:
         regime = "TRENDING_BULL" if rsi_diff > 10 else "TRENDING_BEAR"
     
-    # 4. Extract Dynamic Option Greeks & Volatility Structures
-    ce_delta, ce_gamma, ce_theta, ce_vega, ce_iv = get_real_greeks("CE")
-    pe_delta, pe_gamma, pe_theta, pe_vega, pe_iv = get_real_greeks("PE")
-    
-    # Estimate Dynamic Changes in OI
-    ce_oi_change = latest_ticks["ce_oi"] - (ce_oi_history[-1] if len(ce_oi_history) > 0 else latest_ticks["ce_oi"])
-    pe_oi_change = latest_ticks["pe_oi"] - (pe_oi_history[-1] if len(pe_oi_history) > 0 else latest_ticks["pe_oi"])
-    ce_oi_history.append(latest_ticks["ce_oi"])
-    pe_oi_history.append(latest_ticks["pe_oi"])
-    
-    ce_spread_pct = ((latest_ticks["ce_ask"] - latest_ticks["ce_bid"]) / ce_price * 100) if ce_price else 0.0
-    pe_spread_pct = ((latest_ticks["pe_ask"] - latest_ticks["pe_bid"]) / pe_price * 100) if pe_price else 0.0
-
-    # 5. Core Algorithmic Score Generation Matrix
+    # 4. Core Algorithmic Score Generation Matrix
     score = 50  # Start Neutral
     if rsi_diff > 15: score += 15
     elif rsi_diff < -15: score -= 15
@@ -727,7 +693,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     if pcr > CONFIG["PCR_BEARISH"]: score += 10
     elif pcr < CONFIG["PCR_BULLISH"]: score -= 10
     
-    # 6. Classify Signal Action Trigger States
+    # 5. Classify Signal Action Trigger States
     action = "HOLD"
     sig_type = "NONE"
     confidence = abs(score - 50) * 2
@@ -741,76 +707,36 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     elif score <= (100 - CONFIG["BUY_THRESHOLD"]):
         action, sig_type = "SELL", "PE_MOMENTUM"
 
-    # 7. Quantitative Signal Grading Layer (A+ down to D)
+    # 6. Quantitative Signal Grading Layer (A+ down to D)
     grade = "D"
     if confidence >= 80 and regime != "RANGING": grade = "A+"
     elif confidence >= 70: grade = "A"
     elif confidence >= 55: grade = "B"
     elif confidence >= 35: grade = "C"
 
-    # 8. Apply Machine Learning Validation Filters
+    # 7. Apply Machine Learning Validation Filters
     feature_vector = [ce_price, pe_price, spread, rsi_ce, rsi_pe, rsi_diff, pcr, confidence]
     ml_prob = ml_filter.predict(feature_vector)
     if ml_prob < 0.40 and action == "BUY":
         action = "HOLD"  # ML overridden warning
         grade = "C- (ML Filtered)"
 
-    # 9. Dynamic Execution Target Sizing Parameters
-    risk_reward = CONFIG["TARGET_ATR_MULT"] / CONFIG["STOP_LOSS_ATR_MULT"]
-    pos_size = CONFIG["POSITION_SIZE_BASE_PCT"] if grade in ["B", "C"] else CONFIG["POSITION_SIZE_MAX_PCT"]
-    if grade == "D": pos_size = 0
-    
-    stop_loss_val = ce_price - (atr_ce * CONFIG["STOP_LOSS_ATR_MULT"]) if action == "BUY" else pe_price - (calculate_atr(pe_list) * CONFIG["STOP_LOSS_ATR_MULT"])
-    target_val = ce_price + (atr_ce * CONFIG["TARGET_ATR_MULT"]) if action == "BUY" else pe_price + (calculate_atr(pe_list) * CONFIG["TARGET_ATR_MULT"])
-
-    # 10. Mutate and Map to Shared UI State Dictionaries
+    # 8. Mutate and Map to Shared UI State Dictionaries
     now_ist = get_ist_now()
-    phase = get_market_phase()
-    trends = get_all_timeframe_trends()
     
-    # Match structural keys requested across parameters
     market_signal.update({
         "signal": action, "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
-        "rsi": round(rsi_ce, 1), "macd": round(macd_diff, 2), "pcr": round(pcr, 2),
-        "vwap": round(vwap_ce, 2), "atr": round(atr_ce, 2), "ema_fast": round(ema_fast_ce, 2),
-        "ema_slow": round(ema_slow_ce, 2), "delta": round(ce_delta, 2), "gamma": round(ce_gamma, 3),
-        "theta": round(ce_theta, 2), "vega": round(ce_vega, 2), "volume": int(latest_ticks["ce_volume"]),
-        "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S"), "atr_pct": round(atr_pct_ce, 2),
-        "adx": round(adx_ce, 1), "bb_position": round(bb_pos_ce, 1), "rsi_divergence": rsi_div_ce,
-        "iv_rank": int(ce_iv * 100), "signal_grade": grade, "regime": regime, "session_phase": phase,
-        "ce_spread_pct": round(ce_spread_pct, 2), "pe_spread_pct": round(pe_spread_pct, 2),
-        "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change
+        "rsi": round(rsi_ce, 1), "macd": round(macd_ce, 2), "pcr": round(pcr, 2),
+        "signal_grade": grade, "regime": regime, "confidence": round(confidence, 1),
+        "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S")
     })
     
     market_state.update({
         "rsi": round(rsi_ce, 1), "action": action, "confidence": round(confidence, 1),
-        "regime": regime, "session_phase": phase, "momentum": "BULLISH" if rsi_diff > 10 else "BEARISH" if rsi_diff < -10 else "NEUTRAL",
-        "strength": "HIGH" if adx_ce > 25 else "LOW", "trend": "UPTREND" if regime == "TRENDING_BULL" else "DOWNTREND" if regime == "TRENDING_BEAR" else "SIDEWAYS",
-        "volatility": "HIGH" if atr_pct_ce > 5.0 else "NORMAL", "alert": "SIGNAL_TRIGGERED" if action != "HOLD" else "NONE",
-        "trend_1min": trends.get("1min", {}).get("trend", "SIDEWAYS"), "trend_5min": trends.get("5min", {}).get("trend", "SIDEWAYS"),
-        "trend_10min": trends.get("10min", {}).get("trend", "SIDEWAYS"), "trend_15min": trends.get("15min", {}).get("trend", "SIDEWAYS"),
-        "trend_20min": trends.get("20min", {}).get("trend", "SIDEWAYS"), "timeframe_agreement": sum(1 for t in trends.values() if t["trend"] == regime.split("_")[-1]),
-        "portfolio_heat": int(portfolio_state["total_exposure_pct"]), "daily_pnl_pct": round((portfolio_state["daily_pnl"] / portfolio_state["initial_equity"] * 100), 2),
-        "max_drawdown_today": round(portfolio_state["max_drawdown_today"], 2)
+        "regime": regime, "session_phase": get_market_phase()
     })
 
-    institutional_state.update({
-        "vwap": round(vwap_ce, 2), "ema_fast": round(ema_fast_ce, 2), "ema_slow": round(ema_slow_ce, 2),
-        "ema_signal": "BULLISH" if ema_fast_ce > ema_slow_ce else "BEARISH", "atr": round(atr_ce, 2),
-        "oi_buildup": "LONG_BUILDUP" if ce_oi_change > 0 and spread > 0 else "SHORT_BUILDUP" if pe_oi_change > 0 and spread < 0 else "NEUTRAL",
-        "iv_state": "HIGH" if ce_iv > 0.25 else "NORMAL", "candle_structure": regime,
-        "market_breadth": "BULLISH" if pcr > 1.1 else "BEARISH" if pcr < 0.7 else "BALANCED",
-        "volume_profile": "EXPANSION" if latest_ticks["ce_volume"] > np.mean(ce_vols) else "NORMAL",
-        "smart_money_flow": "ACCUMULATION" if rsi_div_ce == "BULLISH" else "DISTRIBUTION" if rsi_div_ce == "BEARISH" else "NEUTRAL",
-        "delta": round(ce_delta, 2), "gamma": round(ce_gamma, 3), "theta": round(ce_theta, 2), "vega": round(ce_vega, 2), "iv": round(ce_iv, 2),
-        "institutional_signal": action, "institutional_confidence": round(confidence, 1), "signal_grade": grade,
-        "position_size_pct": pos_size, "risk_reward": round(risk_reward, 2), "entry_price": ce_price if action == "BUY" else pe_price,
-        "stop_loss": round(stop_loss_val, 2), "target": round(target_val, 2), "max_drawdown_pct": round(portfolio_state["max_drawdown_today"], 2),
-        "ce_delta": round(ce_delta, 2), "pe_delta": round(pe_delta, 2), "ce_iv": round(ce_iv, 2), "pe_iv": round(pe_iv, 2),
-        "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change
-    })
-
-    # 11. Handle Autonomous State Updates & Alerts
+    # 9. Handle Autonomous State Updates & Alerts
     if action != "HOLD" and action != signal_state["last_logged_action"]:
         signal_state["last_logged_action"] = action
         save_signal(action, sig_type, grade, confidence, ce_price, pe_price, rsi_ce, pcr, regime)
@@ -825,6 +751,7 @@ def on_tick(ws_app, msg):
     global tick_counter, last_tick_time
     last_tick_time = time.time()
     try:
+        # Extract tick structure safely
         if isinstance(msg, dict):
             token = msg.get("token")
             lft = msg.get("last_traded_price", 0.0)
@@ -838,6 +765,7 @@ def on_tick(ws_app, msg):
         if lft <= 0:
             return
 
+        # Map to option tokens
         if token == CE_TOKEN:
             latest_ticks["ce_price"] = lft
             latest_ticks["ce_volume"] = vol
@@ -871,7 +799,7 @@ def on_ws_error(ws_app, error):
     logger.error(f"WebSocket interface tracking exception: {error}")
 
 def on_ws_close(ws_app, close_status_code, close_msg):
-    logger.warning(f"WebSocket execution disconnected: {close_status_code} - {close_msg}")
+    logger.warning(f"WebSocket execution disconnected disconnected: {close_status_code} - {close_msg}")
 
 def on_connect(ws_app, response):
     logger.info("WebSocket handshake successful. Attaching instrument tokens...")
@@ -884,7 +812,7 @@ def on_connect(ws_app, response):
             logger.error(f"Subscription sequence failure: {e}")
 
 # --------------------------------------------------
-# BACKGROUND SOCKET MANAGERS WITH RESILIENCE
+# BACKGROUND SOCKET MANAGERS WITH FOREX RESILIENCE
 # --------------------------------------------------
 def start_websocket_engine():
     global sws, ws_running
@@ -901,56 +829,62 @@ def start_websocket_engine():
                 logger.error("Unable to extract instrument contracts from token masters. Retrying...")
                 time.sleep(30)
                 continue
-                
-            # Initialize WebSocket component via Angel One SDK
-            auth_token, feed_token, obj = get_auth_token()
-            if not auth_token or not feed_token:
-                logger.error("Authentication tokens missing. Re-attempting handshake loop...")
-                time.sleep(15)
+
+            auth_token, feed_token, _ = get_auth_token()
+            if not auth_token:
+                time.sleep(30)
                 continue
-                
-            from SmartConnect.smartWebSocketV2 import SmartWebSocketV2
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+
+            from SmartWebSocketV2 import SmartWebSocketV2
+            sws = SmartWebSocketV2(auth_token, ANGEL_CLIENT_ID, feed_token, ANGEL_API_KEY)
             
             sws.on_open = on_connect
             sws.on_data = on_tick
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
-            
+
             ws_running = True
+            logger.info("Launching Angel One streaming connection engine...")
             sws.connect()
         except Exception as e:
-            logger.error(f"Critical connection dropout encountered inside engine loop: {e}")
+            logger.error(f"WebSocket main event loop crash: {e}. Re-booting sequence...")
             time.sleep(10)
+        finally:
+            ws_running = False
 
 # --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
-# --------------------------------------------------
-# --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
+# FLASK WEB REST ROUTER INTERFACES
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/api/signals', methods=['GET'])
-def get_signals():
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "online",
+        "engine": "Ultimate Signal Engine v6.0",
+        "market_phase": get_market_phase(),
+        "websocket_active": ws_running
+    }), 200
+
+@app.route("/api/live-signals", methods=["GET"])
+def get_live_signals():
     return jsonify({
         "market_signal": market_signal,
         "market_state": market_state,
-        "institutional_state": institutional_state
-    })
+        "institutional_state": institutional_state,
+        "portfolio_state": portfolio_state,
+        "timeframe_trends": get_all_timeframe_trends()
+    }), 200
 
-if __name__ == '__main__':
-    # 1. Force a temporary test state right now so the UI populates immediately
-    market_signal["signal"] = "BUY"
-    market_signal["signal_grade"] = "A"
-    market_state["action"] = "BUY"
-    market_state["trend"] = "UPTREND"
-    
-    logger.info("Injecting test signal data for UI validation...")
+# --------------------------------------------------
+# PRODUCTION APPLICATION DAEMON RUNNERS
+# --------------------------------------------------
+# Instantly trigger background loops to ensure stability when imported by Gunicorn
+bg_thread = threading.Thread(target=start_websocket_engine, daemon=True)
+bg_thread.start()
+logger.info("Ultimate Signal Engine v6.0 started (IST fixed, auto-reconnect)")
 
-    # 2. Initialize background process thread for the live data loop
-    threading.Thread(target=start_websocket_engine, daemon=True).start()
-    
-    # 3. Spin up the Flask server (This locks the script and keeps it running)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+if __name__ == "__main__":
+    # Fallback runner when executed manually over the console
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
