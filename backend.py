@@ -997,6 +997,40 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
+
+# --------------------------------------------------
+# FLASK WEB ENDPOINTS FOR UI STREAMING
+# --------------------------------------------------
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": ["https://icy-wave-c82f.tradeguru-net.workers.dev"]}})
+
+@app.route('/api/live-signals', methods=['GET'])
+def get_signals():
+    return jsonify({
+        "market_signal": market_signal,
+        "market_state": market_state,
+        "institutional_state": institutional_state,
+        "portfolio_state": portfolio_state
+    })
+
+# ---------- INSERT THE NEW HEALTH ROUTE HERE ----------
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({
+        "ws_running": ws_running,
+        "market_open": is_market_open(),
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "last_tick_age": round(time.time() - last_tick_time, 1) if last_tick_time else None,
+        "ce_history_len": len(ce_price_history),
+        "pe_history_len": len(pe_price_history)
+    })
+# -------------------------------------------------------
+
+if __name__ == '__main__':
+    # ... rest of your main block
+
+
 if __name__ == '__main__':
     # 1. Force a temporary test state right now so the UI populates immediately
     test_action = "BUY CE"
