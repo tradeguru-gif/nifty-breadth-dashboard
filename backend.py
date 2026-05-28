@@ -986,20 +986,37 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
+# ... all your imports, config, functions ...
+
+app = Flask(__name__)
+CORS(app, ...)
+
+@app.route('/')
+def home(): ...
+
+@app.route('/api/live-signals', methods=['GET'])
+def get_signals(): ...
+
+@app.route('/api/health', methods=['GET'])
+def health(): ...
+
+# 👇 NEW WEBHOOK ROUTE
+@app.route('/api/angelone-webhook', methods=['POST'])
+def angelone_webhook():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data"}), 400
+    logger.info(f"Received AngelOne webhook: {data}")
+    return jsonify({"status": "received"}), 200
+
 if __name__ == '__main__':
-    # Force a temporary test state right now so the UI populates immediately
+    # Your test signal injection (keep it)
     test_action = "BUY CE"
     market_signal["signal"] = test_action
-    market_signal["signal_grade"] = "A"
-    market_state["action"] = test_action
-    market_state["trend"] = "UPTREND"
-    market_signal["spot_price"] = get_nifty_spot_cached() or 24500
-    market_signal["timestamp"] = datetime.now().isoformat()
+    # ... rest of your test injection ...
     
-    logger.info("Injecting test signal data for UI validation...")
-
-    # Initialize background process thread for the live data loop
     threading.Thread(target=start_websocket_engine, daemon=True).start()
     
-    # Spin up the Flask server
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # 👇 ONLY CHANGE: use PORT env var
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
