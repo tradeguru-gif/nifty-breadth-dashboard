@@ -953,9 +953,17 @@ def start_websocket_engine():
 # --------------------------------------------------
 # FLASK WEB ENDPOINTS FOR UI STREAMING
 # --------------------------------------------------
+# --------------------------------------------------
+# FLASK WEB ENDPOINTS FOR UI STREAMING
+# --------------------------------------------------
 app = Flask(__name__)
-# Allow your Cloudflare Worker domain (and also allow during development)
-CORS(app, resources={r"/*": {"origins": ["https://icy-wave-c82f.tradeguru-net.workers.dev", "https://your-blogger-domain.blogspot.com", "http://localhost:5000"]}})
+
+# ✅ Correct CORS configuration (no extra positional arguments)
+CORS(app, resources={r"/*": {"origins": [
+    "https://icy-wave-c82f.tradeguru-net.workers.dev",
+    "https://your-blogger-domain.blogspot.com",
+    "http://localhost:5000"
+]}})
 
 @app.route('/')
 def home():
@@ -986,37 +994,31 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
-# ... all your imports, config, functions ...
-
-app = Flask(__name__)
-CORS(app, ...)
-
-@app.route('/')
-def home(): ...
-
-@app.route('/api/live-signals', methods=['GET'])
-def get_signals(): ...
-
-@app.route('/api/health', methods=['GET'])
-def health(): ...
-
-# 👇 NEW WEBHOOK ROUTE
+# 👇 NEW WEBHOOK ENDPOINT for AngelOne POST callbacks
 @app.route('/api/angelone-webhook', methods=['POST'])
 def angelone_webhook():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data"}), 400
     logger.info(f"Received AngelOne webhook: {data}")
+    # TODO: Process order updates, trade confirmations, etc.
     return jsonify({"status": "received"}), 200
 
 if __name__ == '__main__':
-    # Your test signal injection (keep it)
+    # Force a temporary test state right now so the UI populates immediately
     test_action = "BUY CE"
     market_signal["signal"] = test_action
-    # ... rest of your test injection ...
+    market_signal["signal_grade"] = "A"
+    market_state["action"] = test_action
+    market_state["trend"] = "UPTREND"
+    market_signal["spot_price"] = get_nifty_spot_cached() or 24500
+    market_signal["timestamp"] = datetime.now().isoformat()
     
+    logger.info("Injecting test signal data for UI validation...")
+
+    # Initialize background process thread for the live data loop
     threading.Thread(target=start_websocket_engine, daemon=True).start()
     
-    # 👇 ONLY CHANGE: use PORT env var
+    # ✅ Use Render's PORT environment variable (default 5000 for local)
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
