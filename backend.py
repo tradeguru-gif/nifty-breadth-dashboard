@@ -1,5 +1,4 @@
-# backend.py - Corrected Professional Version
-# All signal parameters preserved, WebSocket engine starts reliably under Gunicorn
+# backend.py - Complete Professional Version with 2m & 3m Timeframes
 
 import os
 import sys
@@ -17,10 +16,10 @@ from collections import deque
 import requests
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify, request   # FIX: added 'request'
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-# Third-party packages with safe imports
+# Third-party packages
 try:
     import pyotp
 except ImportError:
@@ -48,7 +47,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("backend")
 
 # --------------------------------------------------
-# ENVIRONMENT VARIABLES (with validation)
+# ENVIRONMENT VARIABLES
 # --------------------------------------------------
 ANGEL_CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID", "")
 ANGEL_PASSWORD = os.environ.get("ANGEL_PASSWORD", "")
@@ -57,9 +56,8 @@ ANGEL_TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Validate critical credentials at startup (but don't crash if missing – will retry later)
 if not all([ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_API_KEY, ANGEL_TOTP_SECRET]):
-    logger.warning("Some Angel One credentials are missing. WebSocket will retry until market open.")
+    logger.warning("Some Angel One credentials are missing. WebSocket will retry later.")
 
 # --------------------------------------------------
 # SQLITE DATABASE
@@ -88,7 +86,7 @@ def init_db():
 init_db()
 
 # --------------------------------------------------
-# GLOBAL STATE VARIABLES (unchanged)
+# GLOBAL STATE VARIABLES
 # --------------------------------------------------
 CE_TOKEN = None
 PE_TOKEN = None
@@ -118,13 +116,21 @@ sws = None
 last_tick_time = time.time()
 engine_active = True
 
+# --------------------------------------------------
+# TIMEFRAME CANDLE AGGREGATION (new: 2m, 3m)
+# --------------------------------------------------
 timeframe_history = {
     "1min": deque(maxlen=60),
+    "2min": deque(maxlen=30),
+    "3min": deque(maxlen=20),
     "5min": deque(maxlen=20),
     "10min": deque(maxlen=15),
     "15min": deque(maxlen=10),
     "20min": deque(maxlen=10)
 }
+_last_candle_time = {tf: 0 for tf in timeframe_history.keys()}
+_current_candle = {tf: {"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0} for tf in timeframe_history.keys()}
+
 last_minute_snapshot = {"time": 0, "price": 0, "volume": 0}
 
 signal_state = {
@@ -179,7 +185,9 @@ market_state = {
     "action": "HOLD", "confidence": 0, "volatility": "NORMAL", "alert": "NONE",
     "regime": "UNKNOWN", "session_phase": "UNKNOWN",
     "trend_1min": "SIDEWAYS", "trend_5min": "SIDEWAYS", "trend_10min": "SIDEWAYS",
-    "trend_15min": "SIDEWAYS", "trend_20min": "SIDEWAYS", "timeframe_agreement": 0,
+    "trend_15min": "SIDEWAYS", "trend_20min": "SIDEWAYS",
+    "trend_2min": "SIDEWAYS", "trend_3min": "SIDEWAYS",   # new
+    "timeframe_agreement": 0,
     "portfolio_heat": 0, "daily_pnl_pct": 0, "max_drawdown_today": 0
 }
 
@@ -213,7 +221,7 @@ CONFIG = {
 }
 
 # --------------------------------------------------
-# RISK MANAGEMENT & ML CLASSES (unchanged)
+# RISK MANAGEMENT, ML, SLIPPAGE
 # --------------------------------------------------
 class RiskManager:
     def __init__(self, initial_equity=100000, daily_loss_limit_pct=2.0):
@@ -317,7 +325,7 @@ class SlippageModel:
 slippage_model = SlippageModel()
 
 # --------------------------------------------------
-# UTILITY FUNCTIONS (unchanged)
+# UTILITIES
 # --------------------------------------------------
 def send_telegram_alert(message):
     if not TELEGRAM_AVAILABLE or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -372,7 +380,7 @@ def update_daily_performance():
         logger.error(f"Performance update failed: {e}")
 
 # --------------------------------------------------
-# MARKET HOURS & TIMEZONE
+# MARKET HOURS
 # --------------------------------------------------
 def get_ist_now():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -404,7 +412,7 @@ def get_market_phase():
         return "POST_MARKET"
 
 # --------------------------------------------------
-# TECHNICAL INDICATORS (unchanged)
+# TECHNICAL INDICATORS
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period+1:
@@ -522,7 +530,7 @@ def analyze_timeframe_trend(history):
     n = len(history)
     if n < 2:
         return "SIDEWAYS", 0.0
-    prices = [h["price"] for h in history]
+    prices = [h["close"] for h in history]   # use close price for trend
     x = list(range(n))
     x_mean = sum(x) / n
     y_mean = sum(prices) / n
@@ -541,7 +549,7 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # --------------------------------------------------
-# AUTH, DATA CACHING, TOKEN RESOLUTION
+# AUTH & DATA FETCHING
 # --------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 AUTH_CACHE_TTL = 3600
@@ -668,7 +676,7 @@ def get_current_atm_tokens():
         return None, None
 
 # --------------------------------------------------
-# SIGNAL ENGINE (unchanged)
+# SIGNAL ENGINE (unchanged logic, uses new trends)
 # --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     global market_signal, market_state, institutional_state, signal_state, portfolio_state
@@ -781,9 +789,14 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "regime": regime, "session_phase": phase, "momentum": "BULLISH" if rsi_diff > 10 else "BEARISH" if rsi_diff < -10 else "NEUTRAL",
         "strength": "HIGH" if adx_ce > 25 else "LOW", "trend": "UPTREND" if regime == "TRENDING_BULL" else "DOWNTREND" if regime == "TRENDING_BEAR" else "SIDEWAYS",
         "volatility": "HIGH" if atr_pct_ce > 5.0 else "NORMAL", "alert": "SIGNAL_TRIGGERED" if raw_action != "HOLD" else "NONE",
-        "trend_1min": trends.get("1min", {}).get("trend", "SIDEWAYS"), "trend_5min": trends.get("5min", {}).get("trend", "SIDEWAYS"),
-        "trend_10min": trends.get("10min", {}).get("trend", "SIDEWAYS"), "trend_15min": trends.get("15min", {}).get("trend", "SIDEWAYS"),
-        "trend_20min": trends.get("20min", {}).get("trend", "SIDEWAYS"), "timeframe_agreement": sum(1 for t in trends.values() if t["trend"] == regime.split("_")[-1]),
+        "trend_1min": trends.get("1min", {}).get("trend", "SIDEWAYS"),
+        "trend_2min": trends.get("2min", {}).get("trend", "SIDEWAYS"),
+        "trend_3min": trends.get("3min", {}).get("trend", "SIDEWAYS"),
+        "trend_5min": trends.get("5min", {}).get("trend", "SIDEWAYS"),
+        "trend_10min": trends.get("10min", {}).get("trend", "SIDEWAYS"),
+        "trend_15min": trends.get("15min", {}).get("trend", "SIDEWAYS"),
+        "trend_20min": trends.get("20min", {}).get("trend", "SIDEWAYS"),
+        "timeframe_agreement": sum(1 for tf in ["1min","2min","3min","5min","10min","15min","20min"] if trends.get(tf, {}).get("trend") == regime.split("_")[-1]),
         "portfolio_heat": int(portfolio_state["total_exposure_pct"]), "daily_pnl_pct": round((portfolio_state["daily_pnl"] / portfolio_state["initial_equity"] * 100), 2),
         "max_drawdown_today": round(portfolio_state["max_drawdown_today"], 2)
     })
@@ -809,7 +822,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         send_telegram_alert(msg)
 
 # --------------------------------------------------
-# WEBSOCKET CALLBACKS
+# WEBSOCKET CALLBACKS (with candle aggregation)
 # --------------------------------------------------
 def on_tick(ws_app, msg):
     global tick_counter, last_tick_time
@@ -844,6 +857,45 @@ def on_tick(ws_app, msg):
             pe_price_history.append(lft)
             pe_volume_history.append(vol)
             save_tick(token, lft, vol, bid, ask, oi)
+        else:
+            return
+
+        # ----- Candle aggregation for all timeframes (using CE price) -----
+        now = time.time()
+        # mapping timeframe name to seconds
+        tf_seconds = {
+            "1min": 60, "2min": 120, "3min": 180, "5min": 300,
+            "10min": 600, "15min": 900, "20min": 1200
+        }
+        for tf, seconds in tf_seconds.items():
+            candle_time = int(now / seconds) * seconds
+            if _last_candle_time[tf] != candle_time:
+                # Save previous candle
+                if _last_candle_time[tf] != 0 and _current_candle[tf]["close"] != 0:
+                    timeframe_history[tf].append({
+                        "time": _last_candle_time[tf],
+                        "open": _current_candle[tf]["open"],
+                        "high": _current_candle[tf]["high"],
+                        "low": _current_candle[tf]["low"],
+                        "close": _current_candle[tf]["close"],
+                        "volume": _current_candle[tf]["volume"]
+                    })
+                # Start new candle
+                _current_candle[tf] = {
+                    "open": latest_ticks["ce_price"],
+                    "high": latest_ticks["ce_price"],
+                    "low": latest_ticks["ce_price"],
+                    "close": latest_ticks["ce_price"],
+                    "volume": latest_ticks["ce_volume"]
+                }
+                _last_candle_time[tf] = candle_time
+            else:
+                # Update current candle
+                _current_candle[tf]["high"] = max(_current_candle[tf]["high"], latest_ticks["ce_price"])
+                _current_candle[tf]["low"] = min(_current_candle[tf]["low"], latest_ticks["ce_price"])
+                _current_candle[tf]["close"] = latest_ticks["ce_price"]
+                _current_candle[tf]["volume"] += latest_ticks["ce_volume"]
+
         tick_counter += 1
         if tick_counter % 5 == 0:
             run_signal_engine(
@@ -852,7 +904,7 @@ def on_tick(ws_app, msg):
                 ce_volume_history, pe_volume_history
             )
     except Exception as e:
-        logger.error(f"Error in on_tick: {e}")
+        logger.error(f"Error in on_tick: {e}", exc_info=True)
 
 def on_ws_error(ws_app, error):
     logger.error(f"WebSocket error: {error}")
@@ -871,7 +923,7 @@ def on_connect(ws_app, response):
             logger.error(f"Subscription failed: {e}")
 
 # --------------------------------------------------
-# WEBSOCKET ENGINE (SINGLE DEFINITION)
+# WEBSOCKET ENGINE (single definition)
 # --------------------------------------------------
 def start_websocket_engine():
     global sws, ws_running
@@ -909,7 +961,6 @@ def start_websocket_engine():
 # --------------------------------------------------
 # START WEBSOCKET THREAD AT MODULE LOAD (FOR GUNICORN)
 # --------------------------------------------------
-# Use a sentinel attribute to start only once per worker
 if not hasattr(start_websocket_engine, '_thread_started'):
     try:
         logger.info("=== STARTING WEBSOCKET ENGINE (module level) ===")
@@ -967,7 +1018,6 @@ def angelone_webhook():
         if data is None:
             return jsonify({"error": "Invalid JSON"}), 400
         logger.info(f"Webhook received: {data}")
-        # TODO: Process order updates
         return _corsify_actual_response(jsonify({"status": "received"}))
     else:
         return jsonify({"error": "Method not allowed"}), 405
