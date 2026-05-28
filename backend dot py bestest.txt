@@ -1,3 +1,6 @@
+# backend_corrected.py
+# Complete corrected version with all signal parameters for frontend dashboard
+
 import os
 import sys
 import math
@@ -162,7 +165,8 @@ market_signal = {
     "theta": 0.0, "vega": 0.0, "volume": 0, "timestamp": "",
     "atr_pct": 0.0, "adx": 0.0, "bb_position": 50.0, "rsi_divergence": "NONE",
     "iv_rank": 50, "signal_grade": "D", "regime": "RANGING", "session_phase": "UNKNOWN",
-    "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0
+    "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0,
+    "spot_price": 0  # ADDED for frontend
 }
 
 market_state = {
@@ -652,7 +656,7 @@ def get_current_atm_tokens():
         return None, None
 
 # --------------------------------------------------
-# GRADE-ONE ALGORITHMIC QUANT SIGNAL ENGINE
+# GRADE-ONE ALGORITHMIC QUANT SIGNAL ENGINE (with action string mapping)
 # --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     """
@@ -727,19 +731,19 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     if pcr > CONFIG["PCR_BEARISH"]: score += 10
     elif pcr < CONFIG["PCR_BULLISH"]: score -= 10
     
-    # 6. Classify Signal Action Trigger States
-    action = "HOLD"
+    # 6. Classify Signal Action Trigger States (raw decision)
+    raw_action = "HOLD"
     sig_type = "NONE"
     confidence = abs(score - 50) * 2
     
     if score >= CONFIG["STRONG_BUY_THRESHOLD"]:
-        action, sig_type = "BUY", "STRONG_CE"
+        raw_action, sig_type = "BUY", "STRONG_CE"
     elif score >= CONFIG["BUY_THRESHOLD"]:
-        action, sig_type = "BUY", "CE_MOMENTUM"
+        raw_action, sig_type = "BUY", "CE_MOMENTUM"
     elif score <= (100 - CONFIG["STRONG_BUY_THRESHOLD"]):
-        action, sig_type = "SELL", "STRONG_PE"
+        raw_action, sig_type = "SELL", "STRONG_PE"
     elif score <= (100 - CONFIG["BUY_THRESHOLD"]):
-        action, sig_type = "SELL", "PE_MOMENTUM"
+        raw_action, sig_type = "SELL", "PE_MOMENTUM"
 
     # 7. Quantitative Signal Grading Layer (A+ down to D)
     grade = "D"
@@ -751,26 +755,46 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
     # 8. Apply Machine Learning Validation Filters
     feature_vector = [ce_price, pe_price, spread, rsi_ce, rsi_pe, rsi_diff, pcr, confidence]
     ml_prob = ml_filter.predict(feature_vector)
-    if ml_prob < 0.40 and action == "BUY":
-        action = "HOLD"  # ML overridden warning
+    if ml_prob < 0.40 and raw_action == "BUY":
+        raw_action = "HOLD"  # ML overridden warning
         grade = "C- (ML Filtered)"
+
+    # ========== NEW: Map raw_action and sig_type to frontend-friendly action string ==========
+    if raw_action == "BUY":
+        if "STRONG" in sig_type:
+            action_str = "STRONG BUY CE"
+        elif "MOMENTUM" in sig_type:
+            action_str = "BUY CE"
+        else:
+            action_str = "CONSIDER CE BUY"
+    elif raw_action == "SELL":
+        if "STRONG" in sig_type:
+            action_str = "STRONG BUY PE"
+        elif "MOMENTUM" in sig_type:
+            action_str = "BUY PE"
+        else:
+            action_str = "CONSIDER PE BUY"
+    else:
+        action_str = "HOLD"
 
     # 9. Dynamic Execution Target Sizing Parameters
     risk_reward = CONFIG["TARGET_ATR_MULT"] / CONFIG["STOP_LOSS_ATR_MULT"]
     pos_size = CONFIG["POSITION_SIZE_BASE_PCT"] if grade in ["B", "C"] else CONFIG["POSITION_SIZE_MAX_PCT"]
     if grade == "D": pos_size = 0
     
-    stop_loss_val = ce_price - (atr_ce * CONFIG["STOP_LOSS_ATR_MULT"]) if action == "BUY" else pe_price - (calculate_atr(pe_list) * CONFIG["STOP_LOSS_ATR_MULT"])
-    target_val = ce_price + (atr_ce * CONFIG["TARGET_ATR_MULT"]) if action == "BUY" else pe_price + (calculate_atr(pe_list) * CONFIG["TARGET_ATR_MULT"])
+    stop_loss_val = ce_price - (atr_ce * CONFIG["STOP_LOSS_ATR_MULT"]) if raw_action == "BUY" else pe_price - (calculate_atr(pe_list) * CONFIG["STOP_LOSS_ATR_MULT"])
+    target_val = ce_price + (atr_ce * CONFIG["TARGET_ATR_MULT"]) if raw_action == "BUY" else pe_price + (calculate_atr(pe_list) * CONFIG["TARGET_ATR_MULT"])
 
     # 10. Mutate and Map to Shared UI State Dictionaries
     now_ist = get_ist_now()
     phase = get_market_phase()
     trends = get_all_timeframe_trends()
+    spot = get_nifty_spot_cached() or 0
     
-    # Match structural keys requested across parameters
+    # Update market_signal
     market_signal.update({
-        "signal": action, "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
+        "signal": action_str,   # using mapped action
+        "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
         "rsi": round(rsi_ce, 1), "macd": round(macd_diff, 2), "pcr": round(pcr, 2),
         "vwap": round(vwap_ce, 2), "atr": round(atr_ce, 2), "ema_fast": round(ema_fast_ce, 2),
         "ema_slow": round(ema_slow_ce, 2), "delta": round(ce_delta, 2), "gamma": round(ce_gamma, 3),
@@ -779,14 +803,17 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "adx": round(adx_ce, 1), "bb_position": round(bb_pos_ce, 1), "rsi_divergence": rsi_div_ce,
         "iv_rank": int(ce_iv * 100), "signal_grade": grade, "regime": regime, "session_phase": phase,
         "ce_spread_pct": round(ce_spread_pct, 2), "pe_spread_pct": round(pe_spread_pct, 2),
-        "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change
+        "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
+        "spot_price": spot   # ADDED
     })
     
+    # Update market_state
     market_state.update({
-        "rsi": round(rsi_ce, 1), "action": action, "confidence": round(confidence, 1),
+        "rsi": round(rsi_ce, 1), "action": action_str,   # mapped action
+        "confidence": round(confidence, 1),
         "regime": regime, "session_phase": phase, "momentum": "BULLISH" if rsi_diff > 10 else "BEARISH" if rsi_diff < -10 else "NEUTRAL",
         "strength": "HIGH" if adx_ce > 25 else "LOW", "trend": "UPTREND" if regime == "TRENDING_BULL" else "DOWNTREND" if regime == "TRENDING_BEAR" else "SIDEWAYS",
-        "volatility": "HIGH" if atr_pct_ce > 5.0 else "NORMAL", "alert": "SIGNAL_TRIGGERED" if action != "HOLD" else "NONE",
+        "volatility": "HIGH" if atr_pct_ce > 5.0 else "NORMAL", "alert": "SIGNAL_TRIGGERED" if raw_action != "HOLD" else "NONE",
         "trend_1min": trends.get("1min", {}).get("trend", "SIDEWAYS"), "trend_5min": trends.get("5min", {}).get("trend", "SIDEWAYS"),
         "trend_10min": trends.get("10min", {}).get("trend", "SIDEWAYS"), "trend_15min": trends.get("15min", {}).get("trend", "SIDEWAYS"),
         "trend_20min": trends.get("20min", {}).get("trend", "SIDEWAYS"), "timeframe_agreement": sum(1 for t in trends.values() if t["trend"] == regime.split("_")[-1]),
@@ -803,19 +830,19 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "volume_profile": "EXPANSION" if latest_ticks["ce_volume"] > np.mean(ce_vols) else "NORMAL",
         "smart_money_flow": "ACCUMULATION" if rsi_div_ce == "BULLISH" else "DISTRIBUTION" if rsi_div_ce == "BEARISH" else "NEUTRAL",
         "delta": round(ce_delta, 2), "gamma": round(ce_gamma, 3), "theta": round(ce_theta, 2), "vega": round(ce_vega, 2), "iv": round(ce_iv, 2),
-        "institutional_signal": action, "institutional_confidence": round(confidence, 1), "signal_grade": grade,
-        "position_size_pct": pos_size, "risk_reward": round(risk_reward, 2), "entry_price": ce_price if action == "BUY" else pe_price,
+        "institutional_signal": action_str, "institutional_confidence": round(confidence, 1), "signal_grade": grade,
+        "position_size_pct": pos_size, "risk_reward": round(risk_reward, 2), "entry_price": ce_price if raw_action == "BUY" else pe_price,
         "stop_loss": round(stop_loss_val, 2), "target": round(target_val, 2), "max_drawdown_pct": round(portfolio_state["max_drawdown_today"], 2),
         "ce_delta": round(ce_delta, 2), "pe_delta": round(pe_delta, 2), "ce_iv": round(ce_iv, 2), "pe_iv": round(pe_iv, 2),
         "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change
     })
 
     # 11. Handle Autonomous State Updates & Alerts
-    if action != "HOLD" and action != signal_state["last_logged_action"]:
-        signal_state["last_logged_action"] = action
-        save_signal(action, sig_type, grade, confidence, ce_price, pe_price, rsi_ce, pcr, regime)
+    if raw_action != "HOLD" and action_str != signal_state["last_logged_action"]:
+        signal_state["last_logged_action"] = action_str
+        save_signal(action_str, sig_type, grade, confidence, ce_price, pe_price, rsi_ce, pcr, regime)
         
-        msg = f"🚨 <b>Nifty Grade-{grade} Signal Triggered</b> 🚨\nAction: {action}\nType: {sig_type}\nCE Price: {ce_price} | PE Price: {pe_price}\nConfidence: {confidence}%"
+        msg = f"🚨 <b>Nifty Grade-{grade} Signal Triggered</b> 🚨\nAction: {action_str}\nType: {sig_type}\nCE Price: {ce_price} | PE Price: {pe_price}\nConfidence: {confidence}%"
         send_telegram_alert(msg)
 
 # --------------------------------------------------
@@ -926,26 +953,42 @@ def start_websocket_engine():
 # --------------------------------------------------
 # FLASK WEB ENDPOINTS FOR UI STREAMING
 # --------------------------------------------------
-# --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
-# --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/api/signals', methods=['GET'])
+@app.route('/api/live-signals', methods=['GET'])
 def get_signals():
+    # Ensure spot_price and timestamp are fresh
+    market_signal["spot_price"] = get_nifty_spot_cached() or 0
+    market_signal["timestamp"] = datetime.now().isoformat()
     return jsonify({
         "market_signal": market_signal,
         "market_state": market_state,
-        "institutional_state": institutional_state
+        "institutional_state": institutional_state,
+        "portfolio_state": portfolio_state   # ADDED
+    })
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({
+        "ws_running": ws_running,
+        "market_open": is_market_open(),
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "last_tick_age": round(time.time() - last_tick_time, 1) if last_tick_time else None,
+        "ce_history_len": len(ce_price_history),
+        "pe_history_len": len(pe_price_history)
     })
 
 if __name__ == '__main__':
     # 1. Force a temporary test state right now so the UI populates immediately
-    market_signal["signal"] = "BUY"
+    test_action = "BUY CE"
+    market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
-    market_state["action"] = "BUY"
+    market_state["action"] = test_action
     market_state["trend"] = "UPTREND"
+    market_signal["spot_price"] = get_nifty_spot_cached() or 24500
+    market_signal["timestamp"] = datetime.now().isoformat()
     
     logger.info("Injecting test signal data for UI validation...")
 
