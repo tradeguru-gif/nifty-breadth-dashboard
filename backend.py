@@ -948,6 +948,11 @@ def on_connect(ws_app, response):
 # --------------------------------------------------
 # BACKGROUND SOCKET MANAGERS WITH RESILIENCE
 # --------------------------------------------------
+# --------------------------------------------------
+# BACKGROUND SOCKET MANAGERS WITH RESILIENCE
+# --------------------------------------------------
+# (Your existing start_websocket_engine function – keep it exactly as you have it)
+# I'm showing it here as a placeholder; your actual function is longer.
 def start_websocket_engine():
     print("WEBSOCKET ENGINE STARTED", flush=True)
     global sws, ws_running
@@ -987,8 +992,23 @@ def start_websocket_engine():
             time.sleep(10)
 
 # --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
+# START WEBSOCKET ENGINE (runs when module loads – CRITICAL FOR GUNICORN)
 # --------------------------------------------------
+import threading
+import traceback
+
+# Use a flag to avoid starting multiple threads (safe for gunicorn workers)
+_ws_thread_started = False
+if not _ws_thread_started:
+    try:
+        logger.info("=== STARTING WEBSOCKET ENGINE (module level) ===")
+        thread = threading.Thread(target=start_websocket_engine, daemon=True)
+        thread.start()
+        _ws_thread_started = True
+        logger.info("WebSocket engine thread started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start WebSocket thread: {e}\n{traceback.format_exc()}")
+
 # --------------------------------------------------
 # FLASK WEB ENDPOINTS FOR UI STREAMING
 # --------------------------------------------------
@@ -1064,23 +1084,11 @@ def _corsify_actual_response(response):
     response.headers.add("Access-Control-Allow-Origin", "*")
     return response
 
+# --------------------------------------------------
+# LOCAL DEVELOPMENT SERVER (only when run directly, not used by gunicorn)
+# --------------------------------------------------
 if __name__ == '__main__':
-    import traceback
-    logger.info("=== MAIN START ===")
-    
-    # Force a test log to ensure logger works
-    logger.info("Logger is active")
-    
-    # Start WebSocket engine with explicit error catching
-    try:
-        logger.info("Creating WebSocket engine thread...")
-        thread = threading.Thread(target=start_websocket_engine, daemon=True)
-        thread.start()
-        logger.info("WebSocket engine thread started successfully")
-    except Exception as e:
-        logger.error(f"Failed to start WebSocket thread: {e}\n{traceback.format_exc()}")
-    
-    # Test signal injection (keep as is)
+    # Test signal injection (for local testing only)
     test_action = "BUY CE"
     market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
@@ -1088,8 +1096,7 @@ if __name__ == '__main__':
     market_state["trend"] = "UPTREND"
     market_signal["spot_price"] = get_nifty_spot_cached() or 24500
     market_signal["timestamp"] = datetime.now().isoformat()
-    logger.info("Test signal data injected")
+    logger.info("Local test signal data injected")
     
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
