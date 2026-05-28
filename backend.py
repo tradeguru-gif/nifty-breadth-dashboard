@@ -1,5 +1,5 @@
-# backend_corrected.py
-# Complete corrected version with all signal parameters for frontend dashboard
+# backend.py - Corrected Professional Version
+# All signal parameters preserved, WebSocket engine starts reliably under Gunicorn
 
 import os
 import sys
@@ -10,16 +10,17 @@ import pickle
 import logging
 import sqlite3
 import threading
+import traceback
 from datetime import datetime, timedelta, time as dt_time
 from collections import deque
 
 import requests
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request   # FIX: added 'request'
 from flask_cors import CORS
 
-# Third-party packages with safe imports to avoid deployment crashes
+# Third-party packages with safe imports
 try:
     import pyotp
 except ImportError:
@@ -30,7 +31,7 @@ try:
 except ImportError:
     SmartConnect = None
 
-# Optional packages for Advanced ML/Telegram functionality
+# Optional ML
 SKLEARN_AVAILABLE = False
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -41,13 +42,13 @@ except ImportError:
 TELEGRAM_AVAILABLE = True
 
 # --------------------------------------------------
-# LOGGING CONFIGURATION
+# LOGGING
 # --------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("backend")
 
 # --------------------------------------------------
-# ENV ENVIRONMENT VARIABLES
+# ENVIRONMENT VARIABLES (with validation)
 # --------------------------------------------------
 ANGEL_CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID", "")
 ANGEL_PASSWORD = os.environ.get("ANGEL_PASSWORD", "")
@@ -56,8 +57,12 @@ ANGEL_TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# Validate critical credentials at startup (but don't crash if missing – will retry later)
+if not all([ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_API_KEY, ANGEL_TOTP_SECRET]):
+    logger.warning("Some Angel One credentials are missing. WebSocket will retry until market open.")
+
 # --------------------------------------------------
-# SQLITE DATABASE INITIALIZATION
+# SQLITE DATABASE
 # --------------------------------------------------
 DB_PATH = "trading_data.db"
 
@@ -83,7 +88,7 @@ def init_db():
 init_db()
 
 # --------------------------------------------------
-# CONFIG & GLOBAL TRADING STATE VARIABLES
+# GLOBAL STATE VARIABLES (unchanged)
 # --------------------------------------------------
 CE_TOKEN = None
 PE_TOKEN = None
@@ -208,7 +213,7 @@ CONFIG = {
 }
 
 # --------------------------------------------------
-# RISK MANAGEMENT, ML FILTER, & SLIPPAGE MODELS
+# RISK MANAGEMENT & ML CLASSES (unchanged)
 # --------------------------------------------------
 class RiskManager:
     def __init__(self, initial_equity=100000, daily_loss_limit_pct=2.0):
@@ -312,7 +317,7 @@ class SlippageModel:
 slippage_model = SlippageModel()
 
 # --------------------------------------------------
-# SYSTEM TELEGRAM & DATA LOGGING UTILITIES
+# UTILITY FUNCTIONS (unchanged)
 # --------------------------------------------------
 def send_telegram_alert(message):
     if not TELEGRAM_AVAILABLE or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -332,7 +337,7 @@ def save_tick(token, price, volume, bid, ask, oi):
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Error saving tick to database: {e}")
+        logger.error(f"Error saving tick: {e}")
 
 def save_signal(action, signal_type, grade, confidence, ce_price, pe_price, rsi, pcr, regime):
     try:
@@ -342,7 +347,7 @@ def save_signal(action, signal_type, grade, confidence, ce_price, pe_price, rsi,
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Error saving signal to database: {e}")
+        logger.error(f"Error saving signal: {e}")
 
 def save_trade(action, entry_price, exit_price, pnl, size_pct, status, grade):
     try:
@@ -352,7 +357,7 @@ def save_trade(action, entry_price, exit_price, pnl, size_pct, status, grade):
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Error saving trade execution record: {e}")
+        logger.error(f"Error saving trade: {e}")
 
 def update_daily_performance():
     try:
@@ -364,10 +369,10 @@ def update_daily_performance():
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Performance database update failed: {e}")
+        logger.error(f"Performance update failed: {e}")
 
 # --------------------------------------------------
-# MARKET HOURS & TIMEZONE TRANSLATORS
+# MARKET HOURS & TIMEZONE
 # --------------------------------------------------
 def get_ist_now():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -399,7 +404,7 @@ def get_market_phase():
         return "POST_MARKET"
 
 # --------------------------------------------------
-# CORE MATHEMATICAL TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (unchanged)
 # --------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period+1:
@@ -418,7 +423,6 @@ def calculate_rsi(prices, period=14):
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow + signal:
         return 0.0, 0.0
-    
     def get_ema_list(arr, period):
         values = []
         alpha = 2 / (period + 1)
@@ -428,13 +432,10 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
             current_ema = alpha * x + (1 - alpha) * current_ema
             values.append(current_ema)
         return values
-
     fast_emas = get_ema_list(prices, fast)
     slow_emas = get_ema_list(prices, slow)
-    
     macd_line = [f - s for f, s in zip(fast_emas, slow_emas)]
     signal_line_vals = get_ema_list(macd_line, signal)
-    
     return macd_line[-1], signal_line_vals[-1]
 
 def calculate_vwap(prices, volumes):
@@ -540,7 +541,7 @@ def get_all_timeframe_trends():
             for tf, hist in timeframe_history.items()}
 
 # --------------------------------------------------
-# AUTH, DATA CACHING, & TELEGRAM API CONNECTORS
+# AUTH, DATA CACHING, TOKEN RESOLUTION
 # --------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 AUTH_CACHE_TTL = 3600
@@ -549,11 +550,9 @@ def get_auth_token():
     now = time.time()
     if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
         return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
-    
     if not SmartConnect or not pyotp:
-        logger.error("Angel One SDK or pyotp package unavailable.")
+        logger.error("Angel One SDK or pyotp unavailable.")
         return None, None, None
-
     try:
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
         obj = SmartConnect(api_key=ANGEL_API_KEY)
@@ -564,10 +563,10 @@ def get_auth_token():
         auth_token = session["data"]["jwtToken"]
         feed_token = obj.getfeedToken()
         auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-        logger.info("Angel One authentication tokens refreshed.")
+        logger.info("Angel One auth tokens refreshed.")
         return auth_token, feed_token, obj
     except Exception as e:
-        logger.error(f"Auth error during API request: {e}")
+        logger.error(f"Auth error: {e}")
         return None, None, None
 
 def get_nifty_spot():
@@ -613,17 +612,14 @@ def get_nifty_pcr():
         pass
     return pcr_cache["value"]
 
-# --- Enhanced get_current_atm_tokens function ---
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
-        logger.warning("Could not get Nifty spot price.")
+        logger.warning("Could not get Nifty spot.")
         return None, None
-
     atm_strike = round(spot / 50) * 50
     logger.info(f"Spot: {spot} → ATM strike: {atm_strike}")
-
     try:
         url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
         logger.info("Downloading scrip master...")
@@ -631,146 +627,97 @@ def get_current_atm_tokens():
         response.raise_for_status()
         data = response.json()
         df = pd.DataFrame(data)
-
-        # Filter for NIFTY option indices
         nifty_opts = df[
             (df["name"] == "NIFTY") &
             (df["instrumenttype"] == "OPTIDX") &
             (df["exch_seg"] == "NFO")
         ].copy()
-
         if nifty_opts.empty:
             logger.error("No NIFTY OPTIDX found.")
             return None, None
-
-        # Convert expiry and strike correctly
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
         nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
         nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
-        nifty_opts = nifty_opts[nifty_opts["strike"] > 0]   # remove invalid strikes
-
+        nifty_opts = nifty_opts[nifty_opts["strike"] > 0]
         today = datetime.now()
         future = nifty_opts[nifty_opts["expiry_date"] >= today]
         if future.empty:
             logger.error("No future expiry options.")
             return None, None
-
         nearest_expiry = future["expiry_date"].min()
-        atm_opts = future[
-            (future["strike"] == atm_strike) &
-            (future["expiry_date"] == nearest_expiry)
-        ]
-
+        atm_opts = future[(future["strike"] == atm_strike) & (future["expiry_date"] == nearest_expiry)]
         if atm_opts.empty:
-            # Find the closest strike to ATM
             strikes = future[future["expiry_date"] == nearest_expiry]["strike"].unique()
             nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
-            atm_opts = future[
-                (future["strike"] == nearest_strike) &
-                (future["expiry_date"] == nearest_expiry)
-            ]
+            atm_opts = future[(future["strike"] == nearest_strike) & (future["expiry_date"] == nearest_expiry)]
             atm_strike = nearest_strike
-            logger.warning(f"ATM strike {atm_strike} not found, using {nearest_strike}")
-
+            logger.warning(f"ATM strike not found, using {nearest_strike}")
         ce = atm_opts[atm_opts["symbol"].str.contains("CE", case=False, na=False)]
         pe = atm_opts[atm_opts["symbol"].str.contains("PE", case=False, na=False)]
-
         if ce.empty or pe.empty:
-            logger.error("CE or PE token missing for chosen strike.")
+            logger.error("CE or PE token missing.")
             return None, None
-
         CE_TOKEN = str(ce.iloc[0]["token"])
         PE_TOKEN = str(pe.iloc[0]["token"])
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-
         logger.info(f"Resolved: CE={CE_TOKEN}, PE={PE_TOKEN}, Expiry={EXPIRY_DATE}")
         return CE_TOKEN, PE_TOKEN
-
     except Exception as e:
         logger.error(f"Token resolution failed: {e}", exc_info=True)
         return None, None
+
 # --------------------------------------------------
-# GRADE-ONE ALGORITHMIC QUANT SIGNAL ENGINE (with action string mapping)
+# SIGNAL ENGINE (unchanged)
 # --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
-    """
-    Core Algorithmic Matrix that computes indicators, verifies metrics,
-    applies risk controls, evaluates models, and broadcasts parameters to downstream structures.
-    """
     global market_signal, market_state, institutional_state, signal_state, portfolio_state
-    
     if len(ce_hist) < 30 or len(pe_hist) < 30:
         return
-
-    # 1. Base Calculations
     spread = ce_price - pe_price
     ce_list = list(ce_hist)
     pe_list = list(pe_hist)
     ce_vols = list(ce_vol_hist)
     pe_vols = list(pe_vol_hist)
-    
-    # 2. Complete Technical Indicator Calculations
     rsi_ce = calculate_rsi(ce_list, CONFIG["RSI_PERIOD"])
     rsi_pe = calculate_rsi(pe_list, CONFIG["RSI_PERIOD"])
     rsi_diff = rsi_ce - rsi_pe
-    
     macd_ce, _ = calculate_macd(ce_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"], CONFIG["MACD_SIGNAL"])
     macd_pe, _ = calculate_macd(pe_list, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"], CONFIG["MACD_SIGNAL"])
     macd_diff = macd_ce - macd_pe
-    
     pcr = get_nifty_pcr()
     pcr_history.append(pcr)
-    
     vwap_ce = calculate_vwap(ce_list, ce_vols)
     atr_ce = calculate_atr(ce_list, CONFIG["ATR_PERIOD"])
     atr_pct_ce = (atr_ce / ce_price * 100) if ce_price else 0.0
     adx_ce = calculate_adx(ce_list, CONFIG["ADX_PERIOD"])
-    
     ema_fast_ce = calculate_ema(ce_list, CONFIG["EMA_FAST"])
     ema_slow_ce = calculate_ema(ce_list, CONFIG["EMA_SLOW"])
-    
     _, _, _, bb_pos_ce = calculate_bollinger(ce_list, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
     _, _, _, bb_pos_pe = calculate_bollinger(pe_list, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
-    
-    # Check Divergence
     rsi_vals_ce = [calculate_rsi(ce_list[:i], CONFIG["RSI_PERIOD"]) for i in range(len(ce_list)-5, len(ce_list)+1)]
     rsi_div_ce = calculate_rsi_divergence(ce_list, rsi_vals_ce)
-
-    # 3. Micro and Macro Regime Identification
     regime = "RANGING"
     if adx_ce > 25:
         regime = "TRENDING_BULL" if rsi_diff > 10 else "TRENDING_BEAR"
-    
-    # 4. Extract Dynamic Option Greeks & Volatility Structures
     ce_delta, ce_gamma, ce_theta, ce_vega, ce_iv = get_real_greeks("CE")
     pe_delta, pe_gamma, pe_theta, pe_vega, pe_iv = get_real_greeks("PE")
-    
-    # Estimate Dynamic Changes in OI
     ce_oi_change = latest_ticks["ce_oi"] - (ce_oi_history[-1] if len(ce_oi_history) > 0 else latest_ticks["ce_oi"])
     pe_oi_change = latest_ticks["pe_oi"] - (pe_oi_history[-1] if len(pe_oi_history) > 0 else latest_ticks["pe_oi"])
     ce_oi_history.append(latest_ticks["ce_oi"])
     pe_oi_history.append(latest_ticks["pe_oi"])
-    
     ce_spread_pct = ((latest_ticks["ce_ask"] - latest_ticks["ce_bid"]) / ce_price * 100) if ce_price else 0.0
     pe_spread_pct = ((latest_ticks["pe_ask"] - latest_ticks["pe_bid"]) / pe_price * 100) if pe_price else 0.0
-
-    # 5. Core Algorithmic Score Generation Matrix
-    score = 50  # Start Neutral
+    score = 50
     if rsi_diff > 15: score += 15
     elif rsi_diff < -15: score -= 15
-    
     if macd_ce > macd_pe: score += 10
     else: score -= 10
-        
     if pcr > CONFIG["PCR_BEARISH"]: score += 10
     elif pcr < CONFIG["PCR_BULLISH"]: score -= 10
-    
-    # 6. Classify Signal Action Trigger States (raw decision)
     raw_action = "HOLD"
     sig_type = "NONE"
     confidence = abs(score - 50) * 2
-    
     if score >= CONFIG["STRONG_BUY_THRESHOLD"]:
         raw_action, sig_type = "BUY", "STRONG_CE"
     elif score >= CONFIG["BUY_THRESHOLD"]:
@@ -779,22 +726,16 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         raw_action, sig_type = "SELL", "STRONG_PE"
     elif score <= (100 - CONFIG["BUY_THRESHOLD"]):
         raw_action, sig_type = "SELL", "PE_MOMENTUM"
-
-    # 7. Quantitative Signal Grading Layer (A+ down to D)
     grade = "D"
     if confidence >= 80 and regime != "RANGING": grade = "A+"
     elif confidence >= 70: grade = "A"
     elif confidence >= 55: grade = "B"
     elif confidence >= 35: grade = "C"
-
-    # 8. Apply Machine Learning Validation Filters
     feature_vector = [ce_price, pe_price, spread, rsi_ce, rsi_pe, rsi_diff, pcr, confidence]
     ml_prob = ml_filter.predict(feature_vector)
     if ml_prob < 0.40 and raw_action == "BUY":
-        raw_action = "HOLD"  # ML overridden warning
+        raw_action = "HOLD"
         grade = "C- (ML Filtered)"
-
-    # ========== NEW: Map raw_action and sig_type to frontend-friendly action string ==========
     if raw_action == "BUY":
         if "STRONG" in sig_type:
             action_str = "STRONG BUY CE"
@@ -811,24 +752,17 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
             action_str = "CONSIDER PE BUY"
     else:
         action_str = "HOLD"
-
-    # 9. Dynamic Execution Target Sizing Parameters
     risk_reward = CONFIG["TARGET_ATR_MULT"] / CONFIG["STOP_LOSS_ATR_MULT"]
     pos_size = CONFIG["POSITION_SIZE_BASE_PCT"] if grade in ["B", "C"] else CONFIG["POSITION_SIZE_MAX_PCT"]
     if grade == "D": pos_size = 0
-    
     stop_loss_val = ce_price - (atr_ce * CONFIG["STOP_LOSS_ATR_MULT"]) if raw_action == "BUY" else pe_price - (calculate_atr(pe_list) * CONFIG["STOP_LOSS_ATR_MULT"])
     target_val = ce_price + (atr_ce * CONFIG["TARGET_ATR_MULT"]) if raw_action == "BUY" else pe_price + (calculate_atr(pe_list) * CONFIG["TARGET_ATR_MULT"])
-
-    # 10. Mutate and Map to Shared UI State Dictionaries
     now_ist = get_ist_now()
     phase = get_market_phase()
     trends = get_all_timeframe_trends()
     spot = get_nifty_spot_cached() or 0
-    
-    # Update market_signal
     market_signal.update({
-        "signal": action_str,   # using mapped action
+        "signal": action_str,
         "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread, 2),
         "rsi": round(rsi_ce, 1), "macd": round(macd_diff, 2), "pcr": round(pcr, 2),
         "vwap": round(vwap_ce, 2), "atr": round(atr_ce, 2), "ema_fast": round(ema_fast_ce, 2),
@@ -841,8 +775,6 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
         "spot_price": spot
     })
-    
-    # Update market_state
     market_state.update({
         "rsi": round(rsi_ce, 1), "action": action_str,
         "confidence": round(confidence, 1),
@@ -855,7 +787,6 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "portfolio_heat": int(portfolio_state["total_exposure_pct"]), "daily_pnl_pct": round((portfolio_state["daily_pnl"] / portfolio_state["initial_equity"] * 100), 2),
         "max_drawdown_today": round(portfolio_state["max_drawdown_today"], 2)
     })
-
     institutional_state.update({
         "vwap": round(vwap_ce, 2), "ema_fast": round(ema_fast_ce, 2), "ema_slow": round(ema_slow_ce, 2),
         "ema_signal": "BULLISH" if ema_fast_ce > ema_slow_ce else "BEARISH", "atr": round(atr_ce, 2),
@@ -871,17 +802,14 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "ce_delta": round(ce_delta, 2), "pe_delta": round(pe_delta, 2), "ce_iv": round(ce_iv, 2), "pe_iv": round(pe_iv, 2),
         "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change
     })
-
-    # 11. Handle Autonomous State Updates & Alerts
     if raw_action != "HOLD" and action_str != signal_state["last_logged_action"]:
         signal_state["last_logged_action"] = action_str
         save_signal(action_str, sig_type, grade, confidence, ce_price, pe_price, rsi_ce, pcr, regime)
-        
         msg = f"🚨 <b>Nifty Grade-{grade} Signal Triggered</b> 🚨\nAction: {action_str}\nType: {sig_type}\nCE Price: {ce_price} | PE Price: {pe_price}\nConfidence: {confidence}%"
         send_telegram_alert(msg)
 
 # --------------------------------------------------
-# ANGEL ONE WEB_SOCKET CALLBACK INTERFACES
+# WEBSOCKET CALLBACKS
 # --------------------------------------------------
 def on_tick(ws_app, msg):
     global tick_counter, last_tick_time
@@ -896,10 +824,8 @@ def on_tick(ws_app, msg):
             ask = msg.get("best_ask_price", 0.0)
         else:
             return
-
         if lft <= 0:
             return
-
         if token == CE_TOKEN:
             latest_ticks["ce_price"] = lft
             latest_ticks["ce_volume"] = vol
@@ -918,7 +844,6 @@ def on_tick(ws_app, msg):
             pe_price_history.append(lft)
             pe_volume_history.append(vol)
             save_tick(token, lft, vol, bid, ask, oi)
-
         tick_counter += 1
         if tick_counter % 5 == 0:
             run_signal_engine(
@@ -927,94 +852,78 @@ def on_tick(ws_app, msg):
                 ce_volume_history, pe_volume_history
             )
     except Exception as e:
-        logger.error(f"Error handling tick frame parsing: {e}")
+        logger.error(f"Error in on_tick: {e}")
 
 def on_ws_error(ws_app, error):
-    logger.error(f"WebSocket interface tracking exception: {error}")
+    logger.error(f"WebSocket error: {error}")
 
 def on_ws_close(ws_app, close_status_code, close_msg):
-    logger.warning(f"WebSocket execution disconnected: {close_status_code} - {close_msg}")
+    logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
 
 def on_connect(ws_app, response):
-    logger.info("WebSocket handshake successful. Attaching instrument tokens...")
+    logger.info("WebSocket connected. Subscribing...")
     if CE_TOKEN and PE_TOKEN:
         token_list = [{"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}]
         try:
             ws_app.subscribe(correlationId="nifty_dashboard", mode=3, tokenList=token_list)
-            logger.info("Successfully subscribed to option feeds.")
+            logger.info("Subscribed to option feeds.")
         except Exception as e:
-            logger.error(f"Subscription sequence failure: {e}")
+            logger.error(f"Subscription failed: {e}")
 
 # --------------------------------------------------
-# BACKGROUND SOCKET MANAGERS WITH RESILIENCE
+# WEBSOCKET ENGINE (SINGLE DEFINITION)
 # --------------------------------------------------
-# --------------------------------------------------
-# BACKGROUND SOCKET MANAGERS WITH RESILIENCE
-# --------------------------------------------------
-# (Your existing start_websocket_engine function – keep it exactly as you have it)
-# I'm showing it here as a placeholder; your actual function is longer.
 def start_websocket_engine():
-    print("WEBSOCKET ENGINE STARTED", flush=True)
     global sws, ws_running
+    logger.info("WebSocket engine thread started")
     while engine_active:
         try:
             if not is_market_open():
                 logger.info("Market closed. Sleeping 5 minutes...")
                 time.sleep(300)
                 continue
-
-            logger.info("Market open detected. Resolving dynamic ATM target strikes...")
+            logger.info("Market open. Resolving ATM tokens...")
             ce_tok, pe_tok = get_current_atm_tokens()
             if not ce_tok or not pe_tok:
-                logger.error("Unable to extract instrument contracts from token masters. Retrying...")
+                logger.error("Token resolution failed. Retrying...")
                 time.sleep(30)
                 continue
-                
-            # Initialize WebSocket component via Angel One SDK
             auth_token, feed_token, obj = get_auth_token()
             if not auth_token or not feed_token:
-                logger.error("Authentication tokens missing. Re-attempting handshake loop...")
+                logger.error("Auth failed. Retrying...")
                 time.sleep(15)
                 continue
-                
             from SmartConnect.smartWebSocketV2 import SmartWebSocketV2
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            
             sws.on_open = on_connect
             sws.on_data = on_tick
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
-            
             ws_running = True
+            logger.info("Connecting WebSocket...")
             sws.connect()
         except Exception as e:
-            logger.error(f"Critical connection dropout encountered inside engine loop: {e}")
+            logger.error(f"WebSocket engine error: {e}", exc_info=True)
             time.sleep(10)
 
 # --------------------------------------------------
-# START WEBSOCKET ENGINE (runs when module loads – CRITICAL FOR GUNICORN)
+# START WEBSOCKET THREAD AT MODULE LOAD (FOR GUNICORN)
 # --------------------------------------------------
-import threading
-import traceback
-
-# Use a flag to avoid starting multiple threads (safe for gunicorn workers)
-_ws_thread_started = False
-if not _ws_thread_started:
+# Use a sentinel attribute to start only once per worker
+if not hasattr(start_websocket_engine, '_thread_started'):
     try:
         logger.info("=== STARTING WEBSOCKET ENGINE (module level) ===")
         thread = threading.Thread(target=start_websocket_engine, daemon=True)
         thread.start()
-        _ws_thread_started = True
+        start_websocket_engine._thread_started = True
         logger.info("WebSocket engine thread started successfully")
     except Exception as e:
         logger.error(f"Failed to start WebSocket thread: {e}\n{traceback.format_exc()}")
 
 # --------------------------------------------------
-# FLASK WEB ENDPOINTS FOR UI STREAMING
+# FLASK APP & ROUTES
 # --------------------------------------------------
 app = Flask(__name__)
-
-# ✅ Correct CORS configuration (no extra positional arguments)
 CORS(app, resources={r"/*": {"origins": [
     "https://icy-wave-c82f.tradeguru-net.workers.dev",
     "https://your-blogger-domain.blogspot.com",
@@ -1027,7 +936,6 @@ def home():
 
 @app.route('/api/live-signals', methods=['GET'])
 def get_signals():
-    # Ensure spot_price and timestamp are fresh
     market_signal["spot_price"] = get_nifty_spot_cached() or 0
     market_signal["timestamp"] = datetime.now().isoformat()
     return jsonify({
@@ -1050,27 +958,18 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
-# 👇 ENHANCED WEBHOOK ENDPOINT (handles OPTIONS preflight and POST)
 @app.route('/api/angelone-webhook', methods=['GET', 'POST', 'OPTIONS'])
 def angelone_webhook():
     if request.method == 'OPTIONS':
-        # Preflight request. Reply successfully.
         return _build_cors_preflight_response()
     elif request.method == 'POST':
-        # Handle the actual POST request from Angel One
         data = request.get_json()
         if data is None:
-            return jsonify({"error": "Invalid or missing JSON data"}), 400
-        
-        # Log the received data for debugging
-        logger.info(f"Received Angel One webhook data: {data}")
-
-        # --- TODO: Add your logic to process the order update ---
-        # For example, update a database, trigger a notification, etc.
-
+            return jsonify({"error": "Invalid JSON"}), 400
+        logger.info(f"Webhook received: {data}")
+        # TODO: Process order updates
         return _corsify_actual_response(jsonify({"status": "received"}))
     else:
-        # Respond 'Method Not Allowed' for other methods
         return jsonify({"error": "Method not allowed"}), 405
 
 def _build_cors_preflight_response():
@@ -1085,10 +984,9 @@ def _corsify_actual_response(response):
     return response
 
 # --------------------------------------------------
-# LOCAL DEVELOPMENT SERVER (only when run directly, not used by gunicorn)
+# LOCAL DEVELOPMENT SERVER
 # --------------------------------------------------
 if __name__ == '__main__':
-    # Test signal injection (for local testing only)
     test_action = "BUY CE"
     market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
@@ -1096,7 +994,6 @@ if __name__ == '__main__':
     market_state["trend"] = "UPTREND"
     market_signal["spot_price"] = get_nifty_spot_cached() or 24500
     market_signal["timestamp"] = datetime.now().isoformat()
-    logger.info("Local test signal data injected")
-    
+    logger.info("Local test data injected")
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
