@@ -613,48 +613,83 @@ def get_nifty_pcr():
         pass
     return pcr_cache["value"]
 
+# --- Enhanced get_current_atm_tokens function ---
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
+        logger.warning("Could not get Nifty spot price.")
         return None, None
+
     atm_strike = round(spot / 50) * 50
+    logger.info(f"Spot: {spot} → ATM strike: {atm_strike}")
+
     try:
         url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
-        resp = requests.get(url, timeout=30)
-        df = pd.DataFrame(resp.json())
-        nifty_opts = df[(df["name"] == "NIFTY") & (df["instrumenttype"] == "OPTIDX") & (df["exch_seg"] == "NFO")].copy()
+        logger.info("Downloading scrip master...")
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        df = pd.DataFrame(data)
+
+        # Filter for NIFTY option indices
+        nifty_opts = df[
+            (df["name"] == "NIFTY") &
+            (df["instrumenttype"] == "OPTIDX") &
+            (df["exch_seg"] == "NFO")
+        ].copy()
+
         if nifty_opts.empty:
+            logger.error("No NIFTY OPTIDX found.")
             return None, None
+
+        # Convert expiry and strike correctly
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
         nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
         nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
-        nifty_opts = nifty_opts.dropna(subset=["strike"])
+        nifty_opts = nifty_opts[nifty_opts["strike"] > 0]   # remove invalid strikes
+
         today = datetime.now()
         future = nifty_opts[nifty_opts["expiry_date"] >= today]
         if future.empty:
+            logger.error("No future expiry options.")
             return None, None
+
         nearest_expiry = future["expiry_date"].min()
-        atm_opts = future[(future["strike"] == atm_strike) & (future["expiry_date"] == nearest_expiry)]
+        atm_opts = future[
+            (future["strike"] == atm_strike) &
+            (future["expiry_date"] == nearest_expiry)
+        ]
+
         if atm_opts.empty:
+            # Find the closest strike to ATM
             strikes = future[future["expiry_date"] == nearest_expiry]["strike"].unique()
             nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
-            atm_opts = future[(future["strike"] == nearest_strike) & (future["expiry_date"] == nearest_expiry)]
+            atm_opts = future[
+                (future["strike"] == nearest_strike) &
+                (future["expiry_date"] == nearest_expiry)
+            ]
             atm_strike = nearest_strike
-        ce = atm_opts[atm_opts["symbol"].str.contains("CE")]
-        pe = atm_opts[atm_opts["symbol"].str.contains("PE")]
+            logger.warning(f"ATM strike {atm_strike} not found, using {nearest_strike}")
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", case=False, na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", case=False, na=False)]
+
         if ce.empty or pe.empty:
+            logger.error("CE or PE token missing for chosen strike.")
             return None, None
+
         CE_TOKEN = str(ce.iloc[0]["token"])
         PE_TOKEN = str(pe.iloc[0]["token"])
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-        logger.info(f"Tokens dynamically resolved: CE={CE_TOKEN}, PE={PE_TOKEN}")
-        return CE_TOKEN, PE_TOKEN
-    except Exception as e:
-        logger.error(f"Failed resolving instrument token rules: {e}")
-        return None, None
 
+        logger.info(f"Resolved: CE={CE_TOKEN}, PE={PE_TOKEN}, Expiry={EXPIRY_DATE}")
+        return CE_TOKEN, PE_TOKEN
+
+    except Exception as e:
+        logger.error(f"Token resolution failed: {e}", exc_info=True)
+        return None, None
 # --------------------------------------------------
 # GRADE-ONE ALGORITHMIC QUANT SIGNAL ENGINE (with action string mapping)
 # --------------------------------------------------
