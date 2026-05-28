@@ -949,6 +949,7 @@ def on_connect(ws_app, response):
 # BACKGROUND SOCKET MANAGERS WITH RESILIENCE
 # --------------------------------------------------
 def start_websocket_engine():
+    print("WEBSOCKET ENGINE STARTED", flush=True)
     global sws, ws_running
     while engine_active:
         try:
@@ -1064,7 +1065,22 @@ def _corsify_actual_response(response):
     return response
 
 if __name__ == '__main__':
-    # Force a temporary test state right now so the UI populates immediately
+    import traceback
+    logger.info("=== MAIN START ===")
+    
+    # Force a test log to ensure logger works
+    logger.info("Logger is active")
+    
+    # Start WebSocket engine with explicit error catching
+    try:
+        logger.info("Creating WebSocket engine thread...")
+        thread = threading.Thread(target=start_websocket_engine, daemon=True)
+        thread.start()
+        logger.info("WebSocket engine thread started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start WebSocket thread: {e}\n{traceback.format_exc()}")
+    
+    # Test signal injection (keep as is)
     test_action = "BUY CE"
     market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
@@ -1072,12 +1088,8 @@ if __name__ == '__main__':
     market_state["trend"] = "UPTREND"
     market_signal["spot_price"] = get_nifty_spot_cached() or 24500
     market_signal["timestamp"] = datetime.now().isoformat()
+    logger.info("Test signal data injected")
     
-    logger.info("Injecting test signal data for UI validation...")
-
-    # Initialize background process thread for the live data loop
-    threading.Thread(target=start_websocket_engine, daemon=True).start()
-    
-    # ✅ Use Render's PORT environment variable (default 5000 for local)
     port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
