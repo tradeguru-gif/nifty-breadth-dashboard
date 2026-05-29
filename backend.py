@@ -927,37 +927,67 @@ def on_connect(ws_app, response):
 # --------------------------------------------------
 def start_websocket_engine():
     global sws, ws_running
-    logger.info("WebSocket engine thread started")
+    logger.info("🟢 WebSocket engine thread STARTED")
+    
+    # Log current time for debugging
+    now_utc = datetime.utcnow()
+    now_ist = get_ist_now()
+    logger.info(f"📅 UTC time: {now_utc}")
+    logger.info(f"📅 IST time: {now_ist}")
+    logger.info(f"📊 Market open check: {is_market_open()}")
+    
+    loop_count = 0
     while engine_active:
+        loop_count += 1
+        logger.info(f"🔄 Engine loop iteration {loop_count}")
+        
         try:
-            if not is_market_open():
-                logger.info("Market closed. Sleeping 5 minutes...")
+            # Check market open
+            market_open = is_market_open()
+            logger.info(f"📊 Market open = {market_open}")
+            
+            if not market_open:
+                logger.info("🌙 Market closed. Sleeping 5 minutes...")
                 time.sleep(300)
                 continue
-            logger.info("Market open. Resolving ATM tokens...")
+
+            logger.info("☀️ Market OPEN. Resolving ATM tokens...")
             ce_tok, pe_tok = get_current_atm_tokens()
+            logger.info(f"🔑 Token resolution result: CE={ce_tok}, PE={pe_tok}")
+            
             if not ce_tok or not pe_tok:
-                logger.error("Token resolution failed. Retrying...")
+                logger.error("❌ Token resolution failed. Retrying in 30 seconds...")
                 time.sleep(30)
                 continue
+                
+            logger.info("🔐 Getting auth tokens...")
             auth_token, feed_token, obj = get_auth_token()
+            logger.info(f"🔑 Auth result: token={'OK' if auth_token else 'FAIL'}, feed={'OK' if feed_token else 'FAIL'}")
+            
             if not auth_token or not feed_token:
-                logger.error("Auth failed. Retrying...")
+                logger.error("❌ Auth failed. Retrying in 15 seconds...")
                 time.sleep(15)
                 continue
+                
+            logger.info("📡 Importing SmartWebSocketV2...")
             from SmartConnect.smartWebSocketV2 import SmartWebSocketV2
+            
+            logger.info("🔌 Creating WebSocket connection...")
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+            
             sws.on_open = on_connect
             sws.on_data = on_tick
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
+            
             ws_running = True
-            logger.info("Connecting WebSocket...")
+            logger.info("✅ WebSocket ready. Connecting...")
             sws.connect()
+            
         except Exception as e:
-            logger.error(f"WebSocket engine error: {e}", exc_info=True)
+            logger.error(f"💥 WebSocket engine crashed: {e}")
+            logger.error(f"📋 Traceback: {traceback.format_exc()}")
             time.sleep(10)
-
 # --------------------------------------------------
 # START WEBSOCKET THREAD AT MODULE LOAD (FOR GUNICORN)
 # --------------------------------------------------
