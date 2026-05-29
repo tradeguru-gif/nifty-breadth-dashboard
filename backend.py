@@ -558,9 +558,15 @@ def get_auth_token():
     now = time.time()
     if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
         return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
-    if not SmartConnect or not pyotp:
-        logger.error("Angel One SDK or pyotp unavailable.")
+    
+    # Import inside function to ensure they are available
+    try:
+        import pyotp
+        from SmartConnect import SmartConnect
+    except ImportError as e:
+        logger.error(f"Failed to import required modules: {e}")
         return None, None, None
+
     try:
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
         obj = SmartConnect(api_key=ANGEL_API_KEY)
@@ -576,7 +582,6 @@ def get_auth_token():
     except Exception as e:
         logger.error(f"Auth error: {e}")
         return None, None, None
-
 def get_nifty_spot():
     try:
         url = "https://www.nseindia.com/api/allIndices"
