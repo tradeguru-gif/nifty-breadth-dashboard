@@ -565,17 +565,13 @@ def get_auth_token():
         # Generate TOTP
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
         
-        # REST API login
-        login_url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
-        
-        payload = {
-            "clientid": ANGEL_CLIENT_ID,
-            "password": ANGEL_PASSWORD,
-            "totp": totp
-        }
+        # Use the CORRECT API endpoint and headers
+        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
         
         headers = {
             "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
             "Content-Type": "application/json",
             "X-UserType": "USER",
             "X-SourceID": "WEB",
@@ -585,7 +581,22 @@ def get_auth_token():
             "X-PrivateKey": ANGEL_API_KEY
         }
         
-        response = requests.post(login_url, json=payload, headers=headers, timeout=10)
+        payload = {
+            "clientid": ANGEL_CLIENT_ID,
+            "password": ANGEL_PASSWORD,
+            "totp": totp
+        }
+        
+        logger.info(f"Attempting login for client: {ANGEL_CLIENT_ID}")
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        logger.info(f"Response status: {response.status_code}")
+        logger.info(f"Response text: {response.text[:200]}")  # Log first 200 chars
+        
+        if response.status_code != 200:
+            logger.error(f"HTTP error: {response.status_code}")
+            return None, None, None
+            
         data = response.json()
         
         if not data.get("status"):
@@ -593,8 +604,9 @@ def get_auth_token():
             return None, None, None
         
         auth_token = data["data"]["jwtToken"]
+        refresh_token = data["data"]["refreshToken"]
         
-        # Get feed token
+        # Get feed token using a separate call
         feed_url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/getUserProfile"
         feed_headers = {
             "Accept": "application/json",
@@ -607,7 +619,7 @@ def get_auth_token():
             "X-PrivateKey": ANGEL_API_KEY
         }
         
-        feed_response = requests.get(feed_url, headers=feed_headers, timeout=10)
+        feed_response = requests.get(feed_url, headers=feed_headers, timeout=30)
         feed_data = feed_response.json()
         feed_token = feed_data.get("data", {}).get("feedToken", "")
         
@@ -617,28 +629,15 @@ def get_auth_token():
             "timestamp": now, 
             "obj": None
         })
-        logger.info("Angel One auth tokens refreshed via REST API.")
+        logger.info("✅ Angel One auth tokens refreshed successfully.")
         return auth_token, feed_token, None
         
-    except Exception as e:
-        logger.error(f"Auth error: {e}")
-        return None, None, None                    
-    except ImportError as e:
-        logger.error(f"Failed to import pyotp: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error: {e}")
         return None, None, None
-
-    try:
-        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-        obj = SmartConnect(api_key=ANGEL_API_KEY)
-        session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-        if not session.get("status"):
-            logger.error("Angel One authentication failed.")
-            return None, None, None
-        auth_token = session["data"]["jwtToken"]
-        feed_token = obj.getfeedToken()
-        auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-        logger.info("Angel One auth tokens refreshed.")
-        return auth_token, feed_token, obj
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        return None, None, None
     except Exception as e:
         logger.error(f"Auth error: {e}")
         return None, None, None
@@ -1069,6 +1068,39 @@ if not hasattr(start_websocket_engine, '_thread_started'):
 # --------------------------------------------------
 # FLASK APP & ROUTES
 # --------------------------------------------------
+@app.route('/api/test-auth', methods=['GET'])
+def test_auth():
+    """Test endpoint to debug authentication"""
+    try:
+        import pyotp
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        
+        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
+        headers = {
+            "Content-Type": "application/json",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress": "00:00:00:00:00:00",
+            "X-PrivateKey": ANGEL_API_KEY
+        }
+        payload = {
+            "clientid": ANGEL_CLIENT_ID,
+            "password": ANGEL_PASSWORD,
+            "totp": totp
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        return jsonify({
+            "status_code": response.status_code,
+            "response_text": response.text[:500],
+            "headers_sent": list(headers.keys())
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": [
     "https://icy-wave-c82f.tradeguru-net.workers.dev",
