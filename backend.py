@@ -559,12 +559,30 @@ def get_auth_token():
     if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
         return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
     
-    # Import inside function with correct package name
+    # Import using multiple fallback patterns
     try:
         import pyotp
-        from smartapi import SmartConnect   # ✅ CORRECT IMPORT
+        
+        # Try different import patterns
+        SmartConnect = None
+        try:
+            from smartapi import SmartConnect
+            logger.info("Imported SmartConnect from smartapi")
+        except ImportError:
+            try:
+                from SmartConnect import SmartConnect
+                logger.info("Imported SmartConnect from SmartConnect")
+            except ImportError:
+                try:
+                    import smartapi
+                    SmartConnect = smartapi.SmartConnect
+                    logger.info("Imported SmartConnect via smartapi module")
+                except ImportError as e:
+                    logger.error(f"All import attempts failed: {e}")
+                    return None, None, None
+                    
     except ImportError as e:
-        logger.error(f"Failed to import required modules: {e}")
+        logger.error(f"Failed to import pyotp: {e}")
         return None, None, None
 
     try:
