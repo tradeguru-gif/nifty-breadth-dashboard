@@ -26,7 +26,7 @@ except ImportError:
     pyotp = None
 
 try:
-    from SmartConnect import SmartConnect
+    from smartapi import SmartConnect
 except ImportError:
     SmartConnect = None
 
@@ -559,10 +559,10 @@ def get_auth_token():
     if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
         return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
     
-    # Import inside function to ensure they are available
+    # Import inside function with correct package name
     try:
         import pyotp
-        from SmartConnect import SmartConnect
+        from smartapi import SmartConnect   # ✅ CORRECT IMPORT
     except ImportError as e:
         logger.error(f"Failed to import required modules: {e}")
         return None, None, None
