@@ -117,7 +117,7 @@ last_tick_time = time.time()
 engine_active = True
 
 # --------------------------------------------------
-# TIMEFRAME CANDLE AGGREGATION (new: 2m, 3m)
+# TIMEFRAME CANDLE AGGREGATION
 # --------------------------------------------------
 timeframe_history = {
     "1min": deque(maxlen=60),
@@ -186,7 +186,7 @@ market_state = {
     "regime": "UNKNOWN", "session_phase": "UNKNOWN",
     "trend_1min": "SIDEWAYS", "trend_5min": "SIDEWAYS", "trend_10min": "SIDEWAYS",
     "trend_15min": "SIDEWAYS", "trend_20min": "SIDEWAYS",
-    "trend_2min": "SIDEWAYS", "trend_3min": "SIDEWAYS",   # new
+    "trend_2min": "SIDEWAYS", "trend_3min": "SIDEWAYS",
     "timeframe_agreement": 0,
     "portfolio_heat": 0, "daily_pnl_pct": 0, "max_drawdown_today": 0
 }
@@ -530,7 +530,7 @@ def analyze_timeframe_trend(history):
     n = len(history)
     if n < 2:
         return "SIDEWAYS", 0.0
-    prices = [h["close"] for h in history]   # use close price for trend
+    prices = [h["close"] for h in history]
     x = list(range(n))
     x_mean = sum(x) / n
     y_mean = sum(prices) / n
@@ -591,7 +591,7 @@ def get_auth_token():
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         
         logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response text: {response.text[:200]}")  # Log first 200 chars
+        logger.info(f"Response text: {response.text[:200]}")
         
         if response.status_code != 200:
             logger.error(f"HTTP error: {response.status_code}")
@@ -641,6 +641,7 @@ def get_auth_token():
     except Exception as e:
         logger.error(f"Auth error: {e}")
         return None, None, None
+
 def get_nifty_spot():
     try:
         url = "https://www.nseindia.com/api/allIndices"
@@ -740,7 +741,7 @@ def get_current_atm_tokens():
         return None, None
 
 # --------------------------------------------------
-# SIGNAL ENGINE (unchanged logic, uses new trends)
+# SIGNAL ENGINE
 # --------------------------------------------------
 def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
     global market_signal, market_state, institutional_state, signal_state, portfolio_state
@@ -886,7 +887,7 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         send_telegram_alert(msg)
 
 # --------------------------------------------------
-# WEBSOCKET CALLBACKS (with candle aggregation)
+# WEBSOCKET CALLBACKS
 # --------------------------------------------------
 def on_tick(ws_app, msg):
     global tick_counter, last_tick_time
@@ -924,9 +925,8 @@ def on_tick(ws_app, msg):
         else:
             return
 
-        # ----- Candle aggregation for all timeframes (using CE price) -----
+        # Candle aggregation for all timeframes
         now = time.time()
-        # mapping timeframe name to seconds
         tf_seconds = {
             "1min": 60, "2min": 120, "3min": 180, "5min": 300,
             "10min": 600, "15min": 900, "20min": 1200
@@ -934,7 +934,6 @@ def on_tick(ws_app, msg):
         for tf, seconds in tf_seconds.items():
             candle_time = int(now / seconds) * seconds
             if _last_candle_time[tf] != candle_time:
-                # Save previous candle
                 if _last_candle_time[tf] != 0 and _current_candle[tf]["close"] != 0:
                     timeframe_history[tf].append({
                         "time": _last_candle_time[tf],
@@ -944,7 +943,6 @@ def on_tick(ws_app, msg):
                         "close": _current_candle[tf]["close"],
                         "volume": _current_candle[tf]["volume"]
                     })
-                # Start new candle
                 _current_candle[tf] = {
                     "open": latest_ticks["ce_price"],
                     "high": latest_ticks["ce_price"],
@@ -954,7 +952,6 @@ def on_tick(ws_app, msg):
                 }
                 _last_candle_time[tf] = candle_time
             else:
-                # Update current candle
                 _current_candle[tf]["high"] = max(_current_candle[tf]["high"], latest_ticks["ce_price"])
                 _current_candle[tf]["low"] = min(_current_candle[tf]["low"], latest_ticks["ce_price"])
                 _current_candle[tf]["close"] = latest_ticks["ce_price"]
@@ -987,13 +984,12 @@ def on_connect(ws_app, response):
             logger.error(f"Subscription failed: {e}")
 
 # --------------------------------------------------
-# WEBSOCKET ENGINE (single definition)
+# WEBSOCKET ENGINE
 # --------------------------------------------------
 def start_websocket_engine():
     global sws, ws_running
     logger.info("🟢 WebSocket engine thread STARTED")
     
-    # Log current time for debugging
     now_utc = datetime.utcnow()
     now_ist = get_ist_now()
     logger.info(f"📅 UTC time: {now_utc}")
@@ -1006,7 +1002,6 @@ def start_websocket_engine():
         logger.info(f"🔄 Engine loop iteration {loop_count}")
         
         try:
-            # Check market open
             market_open = is_market_open()
             logger.info(f"📊 Market open = {market_open}")
             
@@ -1034,7 +1029,10 @@ def start_websocket_engine():
                 continue
                 
             logger.info("📡 Importing SmartWebSocketV2...")
-            from SmartConnect.smartWebSocketV2 import SmartWebSocketV2
+            try:
+                from smartapi.smartWebSocketV2 import SmartWebSocketV2
+            except ImportError:
+                from SmartConnect.smartWebSocketV2 import SmartWebSocketV2
             
             logger.info("🔌 Creating WebSocket connection...")
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
@@ -1052,8 +1050,9 @@ def start_websocket_engine():
             logger.error(f"💥 WebSocket engine crashed: {e}")
             logger.error(f"📋 Traceback: {traceback.format_exc()}")
             time.sleep(10)
+
 # --------------------------------------------------
-# START WEBSOCKET THREAD AT MODULE LOAD (FOR GUNICORN)
+# START WEBSOCKET THREAD AT MODULE LOAD
 # --------------------------------------------------
 if not hasattr(start_websocket_engine, '_thread_started'):
     try:
@@ -1068,39 +1067,6 @@ if not hasattr(start_websocket_engine, '_thread_started'):
 # --------------------------------------------------
 # FLASK APP & ROUTES
 # --------------------------------------------------
-@app.route('/api/test-auth', methods=['GET'])
-def test_auth():
-    """Test endpoint to debug authentication"""
-    try:
-        import pyotp
-        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-        
-        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
-        headers = {
-            "Content-Type": "application/json",
-            "X-UserType": "USER",
-            "X-SourceID": "WEB",
-            "X-ClientLocalIP": "127.0.0.1",
-            "X-ClientPublicIP": "127.0.0.1",
-            "X-MACAddress": "00:00:00:00:00:00",
-            "X-PrivateKey": ANGEL_API_KEY
-        }
-        payload = {
-            "clientid": ANGEL_CLIENT_ID,
-            "password": ANGEL_PASSWORD,
-            "totp": totp
-        }
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        return jsonify({
-            "status_code": response.status_code,
-            "response_text": response.text[:500],
-            "headers_sent": list(headers.keys())
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": [
     "https://icy-wave-c82f.tradeguru-net.workers.dev",
@@ -1148,6 +1114,38 @@ def angelone_webhook():
         return _corsify_actual_response(jsonify({"status": "received"}))
     else:
         return jsonify({"error": "Method not allowed"}), 405
+
+@app.route('/api/test-auth', methods=['GET'])
+def test_auth():
+    """Test endpoint to debug authentication"""
+    try:
+        import pyotp
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        
+        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
+        headers = {
+            "Content-Type": "application/json",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress": "00:00:00:00:00:00",
+            "X-PrivateKey": ANGEL_API_KEY
+        }
+        payload = {
+            "clientid": ANGEL_CLIENT_ID,
+            "password": ANGEL_PASSWORD,
+            "totp": totp
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        return jsonify({
+            "status_code": response.status_code,
+            "response_text": response.text[:500],
+            "headers_sent": list(headers.keys())
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def _build_cors_preflight_response():
     response = jsonify()
