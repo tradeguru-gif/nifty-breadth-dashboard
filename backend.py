@@ -559,28 +559,70 @@ def get_auth_token():
     if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
         return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
     
-    # Import using multiple fallback patterns
     try:
         import pyotp
         
-        # Try different import patterns
-        SmartConnect = None
-        try:
-            from smartapi import SmartConnect
-            logger.info("Imported SmartConnect from smartapi")
-        except ImportError:
-            try:
-                from SmartConnect import SmartConnect
-                logger.info("Imported SmartConnect from SmartConnect")
-            except ImportError:
-                try:
-                    import smartapi
-                    SmartConnect = smartapi.SmartConnect
-                    logger.info("Imported SmartConnect via smartapi module")
-                except ImportError as e:
-                    logger.error(f"All import attempts failed: {e}")
-                    return None, None, None
-                    
+        # Generate TOTP
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        
+        # REST API login
+        login_url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/loginByPassword"
+        
+        payload = {
+            "clientid": ANGEL_CLIENT_ID,
+            "password": ANGEL_PASSWORD,
+            "totp": totp
+        }
+        
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress": "00:00:00:00:00:00",
+            "X-PrivateKey": ANGEL_API_KEY
+        }
+        
+        response = requests.post(login_url, json=payload, headers=headers, timeout=10)
+        data = response.json()
+        
+        if not data.get("status"):
+            logger.error(f"Login failed: {data}")
+            return None, None, None
+        
+        auth_token = data["data"]["jwtToken"]
+        
+        # Get feed token
+        feed_url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/user/v1/getUserProfile"
+        feed_headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {auth_token}",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress": "00:00:00:00:00:00",
+            "X-PrivateKey": ANGEL_API_KEY
+        }
+        
+        feed_response = requests.get(feed_url, headers=feed_headers, timeout=10)
+        feed_data = feed_response.json()
+        feed_token = feed_data.get("data", {}).get("feedToken", "")
+        
+        auth_cache.update({
+            "token": auth_token, 
+            "feed_token": feed_token, 
+            "timestamp": now, 
+            "obj": None
+        })
+        logger.info("Angel One auth tokens refreshed via REST API.")
+        return auth_token, feed_token, None
+        
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        return None, None, None                    
     except ImportError as e:
         logger.error(f"Failed to import pyotp: {e}")
         return None, None, None
