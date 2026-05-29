@@ -1161,6 +1161,25 @@ def _corsify_actual_response(response):
 # --------------------------------------------------
 # LOCAL DEVELOPMENT SERVER
 # --------------------------------------------------
+@app.route('/api/my-ip', methods=['GET'])
+def get_my_ip():
+    try:
+        # Get the public IP of your Render server
+        response = requests.get('https://api.ipify.org?format=json', timeout=10)
+        public_ip = response.json().get("ip")
+        
+        # Also get the IP from a backup service
+        response2 = requests.get('https://httpbin.org/ip', timeout=10)
+        backup_ip = response2.json().get("origin")
+        
+        return jsonify({
+            "render_outgoing_ip": public_ip,
+            "backup_ip": backup_ip,
+            "message": "Use this IP to whitelist in Angel One dashboard"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     test_action = "BUY CE"
     market_signal["signal"] = test_action
