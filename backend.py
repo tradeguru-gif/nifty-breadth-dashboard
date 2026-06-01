@@ -18,6 +18,9 @@ import pyotp
 # ============================================================
 # INITIALIZATION, LOGGING & DEPENDENCIES
 # ============================================================
+# ============================================================
+# INITIALIZATION, LOGGING & DEPENDENCIES
+# ============================================================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,29 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
+
+# ============================================================
+# ADD THIS NEW ROUTE RIGHT HERE BELOW THE INITIALIZATION
+# ============================================================
+
+# Global dictionary to temporarily hold the data coming from main.py
+latest_signals = {}
+
+@app.route('/api/update-signals-internal', methods=['POST'])
+def update_signals_internal():
+    global latest_signals
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data received"}), 400
+            
+        # Update our global storage with the fresh market numbers
+        latest_signals = data
+        return jsonify({"status": "success", "message": "Signals updated internally"}), 200
+    except Exception as e:
+        logger.error(f"Error updating internal signals: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 try:
     import telebot
