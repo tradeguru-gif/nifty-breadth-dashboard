@@ -1,3 +1,12 @@
+# === ML Import Diagnostic (top of backend.py, after imports) ===
+try:
+    import sklearn
+    print(f"[DIAG] sklearn version: {sklearn.__version__}")
+except Exception as e:
+    print(f"[DIAG] sklearn import FAILED: {type(e).__name__}: {e}")
+# ================================================================
+
+
 import os
 import time
 import logging
