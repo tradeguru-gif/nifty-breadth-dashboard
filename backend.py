@@ -43,9 +43,6 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
 CORS(app)
 application = app
@@ -341,11 +338,91 @@ CONFIG = {
     "ORDER_FLOW_IMBALANCE_PERIOD": 10,   # Ticks for order flow calc
     "LARGE_ORDER_THRESHOLD": 1000000,    # 10L = large order
     "TAPE_READING_ENABLED": True,
+
+    # ═══════════════════════════════════════════════════════════════
+    # GRADE 1 PRO: SAFETY & RISK PARAMETERS
+    # ═══════════════════════════════════════════════════════════════
+    # --- Circuit Breakers ---
+    "CIRCUIT_BREAKER_ENABLED": True,
+    "CIRCUIT_BREAKER_DAILY_LOSS_PCT": 3.0,      # Hard stop at 3% daily loss
+    "CIRCUIT_BREAKER_CONSECUTIVE_SL": 3,         # Stop after 3 consecutive SL hits
+    "CIRCUIT_BREAKER_VIX_SPIKE_PCT": 15,         # Stop if VIX spikes 15% in 10min
+    "CIRCUIT_BREAKER_GAP_UP_DOWN_PCT": 2.0,      # Stop if spot gaps >2%
+
+    # --- Slippage Protection ---
+    "MAX_SLIPPAGE_PCT": 0.5,                     # Max 0.5% slippage allowed
+    "SLIPPAGE_ADJUSTMENT": True,                 # Auto-adjust entry for slippage
+
+    # --- Liquidity Filters ---
+    "MIN_PREMIUM_FOR_TRADE": 10.0,               # Min premium Rs 10
+    "MAX_PREMIUM_FOR_TRADE": 2000.0,             # Max premium Rs 2000
+    "MIN_VOLUME_FOR_TRADE": 100,                 # Min 100 contracts volume
+    "MIN_OI_FOR_TRADE": 500,                     # Min 500 OI
+
+    # --- Time-Based Filters ---
+    "NO_TRADE_FIRST_15_MIN": True,               # No trades 9:15-9:30 (opening vol)
+    "NO_TRADE_LAST_30_MIN": True,                # No trades 15:00-15:30 (closing vol)
+    "NO_TRADE_LUNCH_12_30_13_30": True,          # No trades 12:30-13:30 (low vol)
+    "NO_TRADE_WEDNESDAY_EXPIRY": True,           # Extra caution on expiry day
+
+    # --- Signal Quality Gates ---
+    "MIN_SIGNAL_CONFIDENCE_PCT": 55,             # Min 55% confidence to enter
+    "MIN_CONFLUENCE_FACTORS": 3,                 # Min 3 factors must align
+    "REQUIRE_VOLUME_CONFIRMATION": True,         # Volume must confirm signal
+    "REQUIRE_TREND_ALIGNMENT": True,             # Price must align with EMA trend
+
+    # --- Position Safety ---
+    "MAX_POSITIONS_OPEN": 1,                     # Only 1 position at a time
+    "FORCE_EXIT_ON_MARGIN_CALL": True,           # Exit if margin < 20%
+    "AUTO_REDUCE_SIZE_ON_DRAWDOWN": True,        # Reduce size after 1.5% DD
+    "DRAWDOWN_REDUCTION_FACTOR": 0.6,            # Reduce to 60% size after DD
+
+    # --- Premium Decay Protection ---
+    "THETA_DECAY_AVOID_HOURS": 2,                # Avoid new entries last 2 hours
+    "THETA_DECAY_MAX_PREMIUM_PCT": 30,           # Max 30% theta decay expected
+
+    # --- Correlation Risk ---
+    "MAX_CORRELATED_EXPOSURE_PCT": 5.0,          # Max 5% in correlated assets
+    "BANKNIFTY_CORR_MIN": 0.3,                   # Min correlation with BN
+
+    # --- Execution Safety ---
+    "ORDER_RETRY_MAX": 3,                        # Max 3 order retries
+    "ORDER_TIMEOUT_SEC": 10,                     # 10 sec order timeout
+    "PAPER_TRADE_MODE": False,                   # Set True for paper trading
+
+    # --- Logging & Audit ---
+    "AUDIT_ALL_SIGNALS": True,                   # Log every signal decision
+    "AUDIT_ALL_TRADES": True,                    # Log every trade execution
+    "ALERT_ON_EVERY_EXIT": True,                 # Alert on every exit
+
+    # --- Recovery Mode ---
+    "RECOVERY_COOLDOWN_MULTIPLIER": 2.0,         # 2x cooldown after SL
+    "RECOVERY_SIZE_REDUCTION": 0.5,              # 50% size after SL
+    "RECOVERY_MAX_ATTEMPTS": 2,                  # Max 2 recovery attempts
 }
 
 signal_buffer = {"ce_count": 0, "pe_count": 0, "last_signal_time": 0, "consecutive_ce": 0, "consecutive_pe": 0}
 daily_trade_count = 0
 last_trade_date = ""
+
+# ═══════════════════════════════════════════════════════════════
+# GRADE 1 PRO: SAFETY STATE
+# ═══════════════════════════════════════════════════════════════
+safety_state = {
+    "consecutive_sl_count": 0,
+    "last_sl_time": 0,
+    "recovery_mode": False,
+    "recovery_attempts": 0,
+    "circuit_breaker_triggered": False,
+    "circuit_breaker_reason": "",
+    "circuit_breaker_time": 0,
+    "daily_sl_count": 0,
+    "last_gap_check_price": 0.0,
+    "last_gap_check_time": 0,
+    "paper_trade_pnl": 0.0,
+    "total_paper_trades": 0,
+    "paper_win_count": 0,
+}
 
 # Debug log
 signal_debug_log = deque(maxlen=200)
@@ -384,6 +461,176 @@ def log_signal_debug(msg):
     signal_debug_log.append(entry)
     if CONFIG.get("SIGNAL_DEBUG_MODE", False):
         logger.info(f"[SIGNAL_DEBUG] {msg}")
+
+# ═══════════════════════════════════════════════════════════════
+# GRADE 1 PRO: SAFETY CHECK FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
+def check_circuit_breakers():
+    """Check all circuit breaker conditions. Returns (ok, reason) tuple."""
+    global safety_state
+
+    if not CONFIG.get("CIRCUIT_BREAKER_ENABLED", True):
+        return True, ""
+
+    # Check if already triggered and not reset
+    if safety_state["circuit_breaker_triggered"]:
+        # Auto-reset after 30 minutes
+        if time.time() - safety_state["circuit_breaker_time"] > 1800:
+            safety_state["circuit_breaker_triggered"] = False
+            safety_state["circuit_breaker_reason"] = ""
+            log_signal_debug("CIRCUIT BREAKER: Auto-reset after 30min cooldown")
+            return True, ""
+        return False, safety_state["circuit_breaker_reason"]
+
+    # Daily loss circuit breaker
+    daily_loss_pct = (portfolio_state["initial_equity"] - portfolio_state["equity"]) / portfolio_state["initial_equity"] * 100
+    if daily_loss_pct >= CONFIG.get("CIRCUIT_BREAKER_DAILY_LOSS_PCT", 3.0):
+        safety_state["circuit_breaker_triggered"] = True
+        safety_state["circuit_breaker_time"] = time.time()
+        safety_state["circuit_breaker_reason"] = f"Daily loss limit {daily_loss_pct:.2f}% >= {CONFIG.get('CIRCUIT_BREAKER_DAILY_LOSS_PCT', 3.0)}%"
+        log_signal_debug(f"CIRCUIT BREAKER TRIGGERED: {safety_state['circuit_breaker_reason']}")
+        send_telegram_alert(f"🚨 <b>CIRCUIT BREAKER</b>\n{safety_state['circuit_breaker_reason']}\nTrading HALTED for 30min")
+        return False, safety_state["circuit_breaker_reason"]
+
+    # Consecutive SL circuit breaker
+    if safety_state["consecutive_sl_count"] >= CONFIG.get("CIRCUIT_BREAKER_CONSECUTIVE_SL", 3):
+        safety_state["circuit_breaker_triggered"] = True
+        safety_state["circuit_breaker_time"] = time.time()
+        safety_state["circuit_breaker_reason"] = f"{safety_state['consecutive_sl_count']} consecutive stop losses"
+        log_signal_debug(f"CIRCUIT BREAKER TRIGGERED: {safety_state['circuit_breaker_reason']}")
+        send_telegram_alert(f"🚨 <b>CIRCUIT BREAKER</b>\n{safety_state['circuit_breaker_reason']}\nTrading HALTED for 30min")
+        return False, safety_state["circuit_breaker_reason"]
+
+    return True, ""
+
+def check_time_filters():
+    """Check if current time allows trading."""
+    now = get_ist_now()
+
+    # No trade first 15 min
+    if CONFIG.get("NO_TRADE_FIRST_15_MIN", True):
+        if now.time() >= dt_time(9, 15) and now.time() < dt_time(9, 30):
+            return False, "Opening volatility - no trades 9:15-9:30"
+
+    # No trade last 30 min
+    if CONFIG.get("NO_TRADE_LAST_30_MIN", True):
+        if now.time() >= dt_time(15, 0) and now.time() <= dt_time(15, 30):
+            return False, "Closing volatility - no trades after 15:00"
+
+    # No trade lunch
+    if CONFIG.get("NO_TRADE_LUNCH_12_30_13_30", True):
+        if now.time() >= dt_time(12, 30) and now.time() < dt_time(13, 30):
+            return False, "Lunch hour low volume - no trades 12:30-13:30"
+
+    # Wednesday expiry caution
+    if CONFIG.get("NO_TRADE_WEDNESDAY_EXPIRY", True):
+        if now.weekday() == 2:  # Wednesday
+            # More strict on expiry day
+            if now.time() >= dt_time(14, 0):
+                return False, "Expiry day - no trades after 14:00"
+
+    return True, ""
+
+def check_premium_safety(premium, side):
+    """Check if premium is within safe trading range."""
+    min_prem = CONFIG.get("MIN_PREMIUM_FOR_TRADE", 10.0)
+    max_prem = CONFIG.get("MAX_PREMIUM_FOR_TRADE", 2000.0)
+
+    if premium < min_prem:
+        return False, f"Premium {premium} < min {min_prem}"
+    if premium > max_prem:
+        return False, f"Premium {premium} > max {max_prem}"
+
+    # Check volume
+    vol = latest_ticks.get("ce_volume" if side == "CE" else "pe_volume", 0)
+    if vol < CONFIG.get("MIN_VOLUME_FOR_TRADE", 100):
+        return False, f"Volume {vol} < min {CONFIG.get('MIN_VOLUME_FOR_TRADE', 100)}"
+
+    # Check OI
+    oi = latest_ticks.get("ce_oi" if side == "CE" else "pe_oi", 0)
+    if oi < CONFIG.get("MIN_OI_FOR_TRADE", 500):
+        return False, f"OI {oi} < min {CONFIG.get('MIN_OI_FOR_TRADE', 500)}"
+
+    return True, ""
+
+def check_gap_risk():
+    """Check for dangerous gap up/down in spot."""
+    global safety_state
+
+    spot_list = list(spot_price_history)
+    if len(spot_list) < 2:
+        return True, ""
+
+    current_price = spot_list[-1]
+    last_price = safety_state["last_gap_check_price"]
+
+    if last_price == 0 or safety_state["last_gap_check_time"] == 0:
+        safety_state["last_gap_check_price"] = current_price
+        safety_state["last_gap_check_time"] = time.time()
+        return True, ""
+
+    # Check gap every 5 minutes
+    if time.time() - safety_state["last_gap_check_time"] < 300:
+        return True, ""
+
+    gap_pct = abs(current_price - last_price) / last_price * 100 if last_price > 0 else 0
+    max_gap = CONFIG.get("CIRCUIT_BREAKER_GAP_UP_DOWN_PCT", 2.0)
+
+    safety_state["last_gap_check_price"] = current_price
+    safety_state["last_gap_check_time"] = time.time()
+
+    if gap_pct > max_gap:
+        return False, f"Gap detected: {gap_pct:.2f}% > {max_gap}%"
+
+    return True, ""
+
+def check_signal_quality(score, factors, confidence):
+    """Validate signal meets minimum quality gates."""
+    min_conf = CONFIG.get("MIN_SIGNAL_CONFIDENCE_PCT", 55)
+    min_factors = CONFIG.get("MIN_CONFLUENCE_FACTORS", 3)
+
+    if confidence < min_conf:
+        return False, f"Confidence {confidence:.1f}% < min {min_conf}%"
+
+    if len(factors) < min_factors:
+        return False, f"Factors {len(factors)} < min {min_factors}"
+
+    return True, ""
+
+def apply_recovery_adjustments():
+    """Apply position size adjustments when in recovery mode."""
+    global safety_state
+
+    if safety_state["recovery_mode"]:
+        reduction = CONFIG.get("RECOVERY_SIZE_REDUCTION", 0.5)
+        log_signal_debug(f"RECOVERY MODE: Size reduced to {reduction*100:.0f}%")
+        return reduction
+    return 1.0
+
+def update_safety_on_exit(pnl_points, exit_reason):
+    """Update safety state on position exit."""
+    global safety_state
+
+    if pnl_points < 0:
+        safety_state["consecutive_sl_count"] += 1
+        safety_state["last_sl_time"] = time.time()
+        safety_state["daily_sl_count"] += 1
+
+        if safety_state["consecutive_sl_count"] >= 2:
+            safety_state["recovery_mode"] = True
+            safety_state["recovery_attempts"] += 1
+            log_signal_debug(f"RECOVERY MODE ACTIVATED: {safety_state['consecutive_sl_count']} consecutive SL")
+    else:
+        # Winning trade - reset consecutive SL
+        safety_state["consecutive_sl_count"] = 0
+        safety_state["recovery_mode"] = False
+        safety_state["recovery_attempts"] = 0
+
+    if CONFIG.get("PAPER_TRADE_MODE", False):
+        safety_state["paper_trade_pnl"] += pnl_points
+        safety_state["total_paper_trades"] += 1
+        if pnl_points > 0:
+            safety_state["paper_win_count"] += 1
 
 def get_ist_now():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -998,6 +1245,14 @@ class RiskManager:
 
 risk_manager = RiskManager()
 
+def reset_daily_safety():
+    """Reset daily safety counters at market open."""
+    global safety_state
+    safety_state["daily_sl_count"] = 0
+    safety_state["last_gap_check_price"] = 0.0
+    safety_state["last_gap_check_time"] = 0
+    log_signal_debug("DAILY RESET: Safety counters reset for new trading day")
+
 def send_telegram_alert(message):
     if not TELEGRAM_AVAILABLE or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -1082,9 +1337,42 @@ def generate_alert_message(action, strength, spot_price, premium, sl, target, fa
 # ═══════════════════════════════════════════════════════════════
 def run_signal_engine():
     global market_signal, market_state, signal_state, portfolio_state, latest_ticks
-    global signal_buffer, daily_trade_count, ml_model_state
+    global signal_buffer, daily_trade_count, ml_model_state, safety_state
 
     log_signal_debug("=== SIGNAL ENGINE CYCLE START ===")
+
+    # ═══════════════════════════════════════════════════════════════
+    # GRADE 1 PRO: CIRCUIT BREAKER CHECK
+    # ═══════════════════════════════════════════════════════════════
+    cb_ok, cb_reason = check_circuit_breakers()
+    if not cb_ok:
+        market_state["action"] = "CIRCUIT_BREAKER"
+        market_signal["alert_message"] = f"🚫 CIRCUIT BREAKER: {cb_reason}"
+        market_signal["signal_strength"] = "CIRCUIT_BREAKER"
+        log_signal_debug(f"CIRCUIT BREAKER ACTIVE: {cb_reason}")
+        return
+
+    # ═══════════════════════════════════════════════════════════════
+    # GRADE 1 PRO: TIME FILTER CHECK
+    # ═══════════════════════════════════════════════════════════════
+    time_ok, time_reason = check_time_filters()
+    if not time_ok:
+        market_state["action"] = "TIME_FILTER"
+        market_signal["alert_message"] = f"⏸️ TIME FILTER: {time_reason}"
+        market_signal["signal_strength"] = "TIME_HALT"
+        log_signal_debug(f"TIME FILTER: {time_reason}")
+        return
+
+    # ═══════════════════════════════════════════════════════════════
+    # GRADE 1 PRO: GAP RISK CHECK
+    # ═══════════════════════════════════════════════════════════════
+    gap_ok, gap_reason = check_gap_risk()
+    if not gap_ok:
+        market_state["action"] = "GAP_HALT"
+        market_signal["alert_message"] = f"🚫 GAP DETECTED: {gap_reason}"
+        market_signal["signal_strength"] = "GAP_HALT"
+        log_signal_debug(f"GAP RISK: {gap_reason}")
+        return
 
     # Halt checks
     if risk_manager.check_daily_loss_limit():
@@ -1234,6 +1522,7 @@ def run_signal_engine():
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
                 daily_trade_count += 1
+                update_safety_on_exit(pnl_points, "DRAWDOWN")
                 exit_msg = generate_alert_message("EXIT", "DRAWDOWN", latest_ticks["spot_price"], current_premium, 0, 0, [f"Drawdown Alert - {drawdown_pct*100:.1f}% from peak"], 0)
                 send_telegram_alert(exit_msg + f"\n💵 PnL: {round(pnl_points, 2)} pts")
                 log_signal_debug(f"EXIT: Drawdown exit. PnL: {round(pnl_points, 2)}")
@@ -1245,6 +1534,7 @@ def run_signal_engine():
             pnl_points = current_premium - signal_state["entry_price"]
             portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
             daily_trade_count += 1
+            update_safety_on_exit(pnl_points, "STOP_LOSS")
             exit_msg = generate_alert_message("EXIT", "STOP_LOSS", latest_ticks["spot_price"], current_premium, 0, 0, ["Trailing SL Hit"], 0)
             send_telegram_alert(exit_msg + f"\n💵 PnL: {round(pnl_points, 2)} pts")
             log_signal_debug(f"EXIT: Stop loss hit. PnL: {round(pnl_points, 2)}")
@@ -1258,6 +1548,7 @@ def run_signal_engine():
             portfolio_state["winning_trades"] += 1
             portfolio_state["total_trades"] += 1
             portfolio_state["win_rate"] = portfolio_state["winning_trades"] / portfolio_state["total_trades"] * 100
+            update_safety_on_exit(pnl_points, "TARGET")
             exit_msg = generate_alert_message("EXIT", "TARGET", latest_ticks["spot_price"], current_premium, 0, 0, ["Target Achieved"], 100)
             send_telegram_alert(exit_msg + f"\n💵 PnL: {round(pnl_points, 2)} pts")
             log_signal_debug(f"EXIT: Target achieved. PnL: {round(pnl_points, 2)}")
@@ -1271,6 +1562,7 @@ def run_signal_engine():
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
                 daily_trade_count += 1
+                update_safety_on_exit(pnl_points, "PROFIT_LOCK")
                 exit_msg = generate_alert_message("EXIT", "PROFIT_LOCK", latest_ticks["spot_price"], current_premium, 0, 0, [f"Profit Lock - {CONFIG['PROFIT_LOCK_PCT']*100:.0f}% Drawdown from Peak"], 0)
                 send_telegram_alert(exit_msg + f"\n💵 PnL: {round(pnl_points, 2)} pts")
                 log_signal_debug(f"EXIT: Profit lock triggered. PnL: {round(pnl_points, 2)}")
@@ -1284,6 +1576,7 @@ def run_signal_engine():
             pnl_points = current_premium - signal_state["entry_price"]
             portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
             daily_trade_count += 1
+            update_safety_on_exit(pnl_points, "TIME_EXIT")
             exit_msg = generate_alert_message("EXIT", "TIME", latest_ticks["spot_price"], current_premium, 0, 0, [f"Max Hold Time ({max_hold}min)"], 0)
             send_telegram_alert(exit_msg + f"\n💵 PnL: {round(pnl_points, 2)} pts")
             log_signal_debug(f"EXIT: Max hold time ({max_hold}min). PnL: {round(pnl_points, 2)}")
@@ -1300,6 +1593,7 @@ def run_signal_engine():
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
                 daily_trade_count += 1
+                update_safety_on_exit(pnl_points, "MOMENTUM_REVERSAL")
                 reasons = []
                 if rsi_exit: reasons.append(f"RSI<{CONFIG.get('RSI_EXIT_CE', 48)}")
                 if macd_exit: reasons.append(f"MACD reversal<{-CONFIG.get('MACD_EXIT_THRESHOLD', 0.1)}")
@@ -1319,6 +1613,7 @@ def run_signal_engine():
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50 * signal_state.get("lots", 1))
                 daily_trade_count += 1
+                update_safety_on_exit(pnl_points, "MOMENTUM_REVERSAL")
                 reasons = []
                 if rsi_exit: reasons.append(f"RSI>{CONFIG.get('RSI_EXIT_PE', 52)}")
                 if macd_exit: reasons.append(f"MACD reversal>{CONFIG.get('MACD_EXIT_THRESHOLD', 0.1)}")
@@ -1369,6 +1664,15 @@ def run_signal_engine():
                 market_signal["alert_message"] = "⏳ Waiting for CE premium data..."
                 return
 
+            # GRADE 1 PRO: Premium safety check
+            prem_ok, prem_reason = check_premium_safety(ce_premium, "CE")
+            if not prem_ok:
+                market_signal["alert_message"] = f"🚫 CE BLOCKED: {prem_reason}"
+                market_signal["signal_strength"] = "PREMIUM_FILTER"
+                log_signal_debug(f"CE PREMIUM FILTER: {prem_reason}")
+                signal_buffer["ce_count"] = 0
+                return
+
             signal_buffer["ce_count"] += 1
             signal_buffer["pe_count"] = 0
 
@@ -1391,6 +1695,16 @@ def run_signal_engine():
                 signal_buffer["ce_count"] = 0
                 return
 
+            # GRADE 1 PRO: Signal quality gate
+            confidence = min(95, score * 10 + spot_rsi * 0.3 + ml_score * 20)
+            quality_ok, quality_reason = check_signal_quality(score, factors, confidence)
+            if not quality_ok:
+                market_signal["alert_message"] = f"🚫 CE QUALITY GATE: {quality_reason}"
+                market_signal["signal_strength"] = "QUALITY_FILTER"
+                log_signal_debug(f"CE QUALITY GATE: {quality_reason}")
+                signal_buffer["ce_count"] = 0
+                return
+
             log_signal_debug(f"CE CLASSIFY -> Strength:{strength} Score:{score} Factors:{factors} ML:{ml_score:.2f}")
 
             if strength == "WEAK" and not CONFIG.get("WEAK_SIGNAL_ALLOWED", True):
@@ -1409,6 +1723,12 @@ def run_signal_engine():
 
             # Dynamic position sizing
             lots, risk_pct, risk_amount = calculate_position_size(strength, score, spot_atr, vix_value, "BULLISH")
+
+            # GRADE 1 PRO: Recovery mode adjustment
+            recovery_mult = apply_recovery_adjustments()
+            lots = max(1, int(lots * recovery_mult))
+            risk_pct *= recovery_mult
+            log_signal_debug(f"RECOVERY ADJ: mult={recovery_mult:.2f} lots={lots} risk={risk_pct:.2f}%")
 
             entry_mult = adjusted_params.get("entry_atr_mult", CONFIG["ENTRY_ATR_MULT"])
             target_mult = adjusted_params.get("target_atr_mult", CONFIG["TARGET_ATR_MULT"])
@@ -1448,6 +1768,15 @@ def run_signal_engine():
                 market_signal["alert_message"] = "⏳ Waiting for PE premium data..."
                 return
 
+            # GRADE 1 PRO: Premium safety check
+            prem_ok, prem_reason = check_premium_safety(pe_premium, "PE")
+            if not prem_ok:
+                market_signal["alert_message"] = f"🚫 PE BLOCKED: {prem_reason}"
+                market_signal["signal_strength"] = "PREMIUM_FILTER"
+                log_signal_debug(f"PE PREMIUM FILTER: {prem_reason}")
+                signal_buffer["pe_count"] = 0
+                return
+
             signal_buffer["pe_count"] += 1
             signal_buffer["ce_count"] = 0
 
@@ -1470,6 +1799,16 @@ def run_signal_engine():
                 signal_buffer["pe_count"] = 0
                 return
 
+            # GRADE 1 PRO: Signal quality gate
+            confidence = min(95, score * 10 + (100 - spot_rsi) * 0.3 + ml_score * 20)
+            quality_ok, quality_reason = check_signal_quality(score, factors, confidence)
+            if not quality_ok:
+                market_signal["alert_message"] = f"🚫 PE QUALITY GATE: {quality_reason}"
+                market_signal["signal_strength"] = "QUALITY_FILTER"
+                log_signal_debug(f"PE QUALITY GATE: {quality_reason}")
+                signal_buffer["pe_count"] = 0
+                return
+
             log_signal_debug(f"PE CLASSIFY -> Strength:{strength} Score:{score} Factors:{factors} ML:{ml_score:.2f}")
 
             if strength == "WEAK" and not CONFIG.get("WEAK_SIGNAL_ALLOWED", True):
@@ -1488,6 +1827,12 @@ def run_signal_engine():
 
             # Dynamic position sizing
             lots, risk_pct, risk_amount = calculate_position_size(strength, score, spot_atr, vix_value, "BEARISH")
+
+            # GRADE 1 PRO: Recovery mode adjustment
+            recovery_mult = apply_recovery_adjustments()
+            lots = max(1, int(lots * recovery_mult))
+            risk_pct *= recovery_mult
+            log_signal_debug(f"RECOVERY ADJ: mult={recovery_mult:.2f} lots={lots} risk={risk_pct:.2f}%")
 
             entry_mult = adjusted_params.get("entry_atr_mult", CONFIG["ENTRY_ATR_MULT"])
             target_mult = adjusted_params.get("target_atr_mult", CONFIG["TARGET_ATR_MULT"])
@@ -1572,7 +1917,7 @@ def run_signal_engine():
     log_signal_debug("=== SIGNAL ENGINE CYCLE END ===")
 
 def reset_signal_state(current_time):
-    global signal_state, portfolio_state, signal_buffer
+    global signal_state, portfolio_state, signal_buffer, safety_state
 
     # Log trade result for ML training
     if signal_state["current_action"] != "HOLD" and ml_model_state["is_ready"]:
@@ -1587,6 +1932,13 @@ def reset_signal_state(current_time):
     portfolio_state["open_positions"] = 0
     signal_buffer["ce_count"] = 0
     signal_buffer["pe_count"] = 0
+
+    # GRADE 1 PRO: Apply recovery cooldown multiplier after SL
+    if safety_state["recovery_mode"]:
+        recovery_mult = CONFIG.get("RECOVERY_COOLDOWN_MULTIPLIER", 2.0)
+        signal_state["cooldown_until"] = current_time + (CONFIG["COOLDOWN_SEC"] * recovery_mult)
+        log_signal_debug(f"RECOVERY COOLDOWN: {CONFIG['COOLDOWN_SEC'] * recovery_mult:.0f}s (2x multiplier)")
+
     log_signal_debug(f"RESET: Signal state reset. Cooldown: {CONFIG['COOLDOWN_SEC']}s")
 
 # ═══════════════════════════════════════════════════════════════
@@ -1626,7 +1978,11 @@ def on_ws_data(wsapp, message):
         if isinstance(message, bytes):
             if sws is None:
                 return
-            tick = sws._parse_binary_data(message)
+            try:
+                tick = sws._parse_binary_data(message)
+            except Exception as e:
+                logger.error(f"Binary parse error in callback: {e}")
+                return
             if not tick:
                 return
             ticks = [tick]
@@ -1752,7 +2108,7 @@ def start_angel_websocket():
 
 def init_background_threads():
     logger.info("Initializing framework-bound background pipelines...")
-    ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+    ws_thread = threading.Thread(target=start_angel_websocket, daemon=True, name="angel_websocket_thread")
     ws_thread.start()
     logger.info("Background streaming thread successfully bound and deployed.")
 
@@ -1775,6 +2131,12 @@ def home():
         "engine": "Grade 1 Pro Signal Bot - ENHANCED v2.0",
         "market_open": is_market_open(),
         "timestamp": time.time(),
+        "grade1_pro_safety": {
+            "circuit_breaker": safety_state["circuit_breaker_triggered"],
+            "recovery_mode": safety_state["recovery_mode"],
+            "consecutive_sl": safety_state["consecutive_sl_count"],
+            "paper_trade_mode": CONFIG.get("PAPER_TRADE_MODE", False)
+        },
         "features": [
             "Multi-factor signal classification - RELAXED THRESHOLDS",
             "RSI(50/50) + MACD(>0/<0) + ADX(20+) + PCR + Volume confirmation",
@@ -1793,7 +2155,15 @@ def home():
             "Daily max trade limits (15)",
             "Multi-timeframe trend analysis (1m-20m)",
             "BankNifty correlation tracking",
-            "SIGNAL ENGINE DEBUG MODE ENABLED"
+            "SIGNAL ENGINE DEBUG MODE ENABLED",
+            "GRADE 1 PRO: Circuit Breakers (3% daily loss, 3x consecutive SL)",
+            "GRADE 1 PRO: Time Filters (no open/close/lunch trades)",
+            "GRADE 1 PRO: Gap Risk Detection (>2% gap halt)",
+            "GRADE 1 PRO: Premium Safety (Rs 10-2000, min volume/OI)",
+            "GRADE 1 PRO: Signal Quality Gates (55% conf, 3+ factors)",
+            "GRADE 1 PRO: Recovery Mode (50% size after SL, 2x cooldown)",
+            "GRADE 1 PRO: Paper Trade Mode support",
+            "GRADE 1 PRO: Auto circuit breaker reset after 30min"
         ]
     }), 200
 
@@ -1844,6 +2214,20 @@ def live_signals():
             "ml_enabled": CONFIG["ML_ENABLED"],
             "regime": regime_state["current"]
         },
+        "safety_state": {
+            "circuit_breaker_triggered": safety_state["circuit_breaker_triggered"],
+            "circuit_breaker_reason": safety_state["circuit_breaker_reason"],
+            "recovery_mode": safety_state["recovery_mode"],
+            "consecutive_sl_count": safety_state["consecutive_sl_count"],
+            "daily_sl_count": safety_state["daily_sl_count"],
+            "recovery_attempts": safety_state["recovery_attempts"],
+            "paper_trade_pnl": safety_state["paper_trade_pnl"] if CONFIG.get("PAPER_TRADE_MODE", False) else None,
+            "paper_trade_stats": {
+                "total_trades": safety_state["total_paper_trades"],
+                "win_count": safety_state["paper_win_count"],
+                "win_rate": round(safety_state["paper_win_count"] / safety_state["total_paper_trades"] * 100, 1) if safety_state["total_paper_trades"] > 0 else 0
+            } if CONFIG.get("PAPER_TRADE_MODE", False) else None
+        },
         "debug_log": list(signal_debug_log)[-30:]
     }), 200
 
@@ -1861,7 +2245,13 @@ def health_check():
         "ml_ready": ml_model_state["is_ready"],
         "ml_accuracy": ml_model_state["accuracy"],
         "regime": regime_state["current"],
-        "strategy": regime_state["strategy"]
+        "strategy": regime_state["strategy"],
+        "safety": {
+            "circuit_breaker": safety_state["circuit_breaker_triggered"],
+            "recovery_mode": safety_state["recovery_mode"],
+            "consecutive_sl": safety_state["consecutive_sl_count"],
+            "daily_sl": safety_state["daily_sl_count"]
+        }
     }), 200
 
 @app.route("/api/debug/signal-log", methods=["GET"])
@@ -1922,6 +2312,60 @@ def get_ml_status():
         "feature_importance": ml_model_state.get("feature_importance", {}),
         "recent_predictions": list(ml_model_state["prediction_buffer"])[-20:]
     }), 200
+
+@app.route("/api/safety/status", methods=["GET"])
+def get_safety_status():
+    """Returns current safety system status."""
+    return jsonify({
+        "timestamp": get_ist_now().isoformat(),
+        "circuit_breaker": {
+            "triggered": safety_state["circuit_breaker_triggered"],
+            "reason": safety_state["circuit_breaker_reason"],
+            "time_triggered": safety_state["circuit_breaker_time"],
+            "auto_reset_in": max(0, 1800 - (time.time() - safety_state["circuit_breaker_time"])) if safety_state["circuit_breaker_triggered"] else 0
+        },
+        "recovery": {
+            "mode": safety_state["recovery_mode"],
+            "consecutive_sl": safety_state["consecutive_sl_count"],
+            "recovery_attempts": safety_state["recovery_attempts"],
+            "daily_sl_count": safety_state["daily_sl_count"]
+        },
+        "time_filters": {
+            "no_trade_first_15": CONFIG.get("NO_TRADE_FIRST_15_MIN", True),
+            "no_trade_last_30": CONFIG.get("NO_TRADE_LAST_30_MIN", True),
+            "no_trade_lunch": CONFIG.get("NO_TRADE_LUNCH_12_30_13_30", True),
+            "current_time": get_ist_now().strftime("%H:%M:%S"),
+            "market_open": is_market_open()
+        },
+        "paper_trade": {
+            "enabled": CONFIG.get("PAPER_TRADE_MODE", False),
+            "pnl": safety_state["paper_trade_pnl"],
+            "total_trades": safety_state["total_paper_trades"],
+            "win_rate": round(safety_state["paper_win_count"] / safety_state["total_paper_trades"] * 100, 1) if safety_state["total_paper_trades"] > 0 else 0
+        },
+        "config": {
+            "daily_loss_limit": CONFIG.get("CIRCUIT_BREAKER_DAILY_LOSS_PCT", 3.0),
+            "max_consecutive_sl": CONFIG.get("CIRCUIT_BREAKER_CONSECUTIVE_SL", 3),
+            "max_gap_pct": CONFIG.get("CIRCUIT_BREAKER_GAP_UP_DOWN_PCT", 2.0),
+            "min_premium": CONFIG.get("MIN_PREMIUM_FOR_TRADE", 10.0),
+            "max_premium": CONFIG.get("MAX_PREMIUM_FOR_TRADE", 2000.0),
+            "min_confidence": CONFIG.get("MIN_SIGNAL_CONFIDENCE_PCT", 55),
+            "min_factors": CONFIG.get("MIN_CONFLUENCE_FACTORS", 3)
+        }
+    }), 200
+
+@app.route("/api/safety/reset", methods=["POST"])
+def reset_safety():
+    """Manual reset of circuit breaker and recovery mode."""
+    global safety_state
+    safety_state["circuit_breaker_triggered"] = False
+    safety_state["circuit_breaker_reason"] = ""
+    safety_state["recovery_mode"] = False
+    safety_state["consecutive_sl_count"] = 0
+    safety_state["recovery_attempts"] = 0
+    log_signal_debug("SAFETY RESET: Manual reset triggered via API")
+    send_telegram_alert("🔄 <b>SAFETY RESET</b>\nCircuit breaker and recovery mode manually reset")
+    return jsonify({"status": "reset", "message": "Safety systems reset successfully"}), 200
 
 @app.route("/api/backtest/status", methods=["GET"])
 def get_backtest_status():
