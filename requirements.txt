@@ -12,3 +12,4 @@ smartapi-python
 smartapi-python>=1.4.1
 gunicorn
 flask
+smartapi-python
