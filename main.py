@@ -112,9 +112,9 @@ def execute_strategy_tick(obj):
             }
         }
 
-        # Send updated variables over to your running API service panel internally
-        # Update this URL string if your backend receiving port handles updates via a separate local link
-        requests.post("http://127.0.0.1:10000/api/update-signals-internal", json=payload, timeout=2)
+        # --- UPDATED FOR EXTERNAL BACKGROUND WORKER ---
+        # Replaced 127.0.0.1 with your internal Render URL so the background service can talk to the web service
+        requests.post("http://nifty-signal-eajm:10000/api/update-signals-internal", json=payload, timeout=2)
         
         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Spot: {latest_market_data['spot_price']} | ATM: {latest_market_data['atm_strike']} | CE: {latest_market_data['ce_price']}")
 
@@ -149,7 +149,7 @@ while True:
             smart_conn, live_feed_token = login_to_angel_one()
             if smart_conn: 
                 authenticated = True
-            time.sleep(5)
+        time.sleep(5)
             
     # 3. Off-Market Downtime Windows (03:30 PM to 09:17 AM next day)
     else:
