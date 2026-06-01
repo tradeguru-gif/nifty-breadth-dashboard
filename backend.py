@@ -1,18 +1,30 @@
 # === ML Import Diagnostic (top of backend.py, after imports) ===
-try:
-    import subprocess
+# === TOP OF backend.py ===
 import sys
+import logging
 
-# Auto-install scikit-learn if missing
+# Diagnostic: log Python path and installed packages
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Python path: {sys.path[:3]}")
+
+# Try sklearn import with detailed error
 try:
     import sklearn
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn"])
-    import sklearn
-    print(f"[DIAG] sklearn version: {sklearn.__version__}")
+    logger.info(f"sklearn loaded: {sklearn.__version__}")
 except Exception as e:
-    print(f"[DIAG] sklearn import FAILED: {type(e).__name__}: {e}")
-# ================================================================
+    logger.error(f"sklearn import failed: {type(e).__name__}: {e}")
+
+# Try other critical imports
+for pkg in ['numpy', 'pandas', 'flask', 'requests']:
+    try:
+        mod = __import__(pkg)
+        logger.info(f"{pkg} loaded")
+    except Exception as e:
+        logger.error(f"{pkg} import failed: {e}")
+# ===========================
 
 
 import os
