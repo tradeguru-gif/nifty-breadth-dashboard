@@ -570,6 +570,32 @@ def start_angel_websocket():
 # ============================================================
 # API FLASK SERVER ROUTING ENDPOINTS
 # ============================================================
+# ============================================================
+# INITIALIZATION RUNNER HOOK
+# ============================================================
+def init_background_threads():
+    """
+    Guarantees the background streaming daemon runs reliably 
+    under Gunicorn worker process topologies.
+    """
+    logger.info("Initializing framework-bound background pipelines...")
+    ws_thread = threading.Thread(target=start_angel_websocket, daemon=True)
+    ws_thread.start()
+    logger.info("Background streaming thread successfully bound and deployed.")
+
+# Flag to prevent multiple invocations if Gunicorn reloads contexts internally
+_init_completed = False
+
+@app.before_request
+def ensure_threads_are_breathing():
+    global _init_completed
+    if not _init_completed:
+        init_background_threads()
+        _init_completed = True
+
+# ============================================================
+# API FLASK SERVER ROUTING ENDPOINTS
+# ============================================================
 @app.route("/", methods=["GET", "HEAD"])
 def home():
     return jsonify({
@@ -594,9 +620,9 @@ def health_check():
     return jsonify({"status": "OK", "alive": True}), 200
 
 if __name__ == "__main__":
-    # Start the standalone ticker websocket streaming loop safely on a background thread
-    threading.Thread(target=start_angel_websocket, daemon=True).start()
-    
-    # Run the live API server frame to handle external frontend/worker data requests
+    # Local development fallback
+    if not _init_completed:
+        init_background_threads()
+        _init_completed = True
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
