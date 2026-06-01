@@ -1111,4 +1111,4 @@ if __name__ == "__main__":
         init_background_threads()
         _init_completed = True
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)s
+    app.run(host="0.0.0.0", port=port, debug=False)
