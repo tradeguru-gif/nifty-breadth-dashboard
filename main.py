@@ -452,8 +452,6 @@ def on_ws_open(wsapp, open_message):
     logger.info(f"WebSocket opened: {open_message}")
     if sws and CE_TOKEN and PE_TOKEN:
         try:
-            # SmartWebSocketV2 subscribe signature: subscribe(correlation_id, mode, tokens)
-            # mode 1 = LTP, 2 = Quote, 3 = SnapQuote
             subscription_payload = [
                 {"exchangeType": 1, "tokens": [SPOT_TOKEN]},      # NSE Spot
                 {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}  # NFO Options
@@ -462,7 +460,6 @@ def on_ws_open(wsapp, open_message):
             logger.info("Streaming pipeline verified online. Multi-token subscription confirmed.")
         except Exception as e: 
             logger.error(f"Subscription initialization failure: {e}")
-
 def on_ws_error(wsapp, error): 
     logger.error(f"WebSocket Error: {error}")
 
@@ -553,8 +550,8 @@ def start_angel_websocket():
             
             logger.info(f"Initializing SmartWebSocketV2 for ATM Strike {ATM_STRIKE}")
             
-            # SmartWebSocketV2: auth_token, feed_token, client_code
-            sws = SmartWebSocketV2(auth_token, feed_token, ANGEL_CLIENT_ID)
+            # CORRECT constructor: (auth_token, api_key, client_code, feed_token)
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             
             # Assign callbacks
             sws.on_open = on_ws_open
@@ -572,7 +569,6 @@ def start_angel_websocket():
             ws_running = False
             sws = None
             time.sleep(10)
-
 # ============================================================
 # INITIALIZATION RUNNER HOOK
 # ============================================================
