@@ -519,54 +519,74 @@ def on_ws_data(wsapp, message, *args):
 # ============================================================
 # SUPERVISOR BACKGROUND LIFECYCLE DAEMON
 # ============================================================
+import json
+from SmartApi.smartStream import SmartStream
+
 def start_angel_websocket():
-    global ws_running, CE_TOKEN, PE_TOKEN, sws, last_tick_time
-    logger.info("Post deployment synchronization initialization active...")
-    time.sleep(10)
+    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, market_signal
     
-    while engine_active:
+    # Nifty 50 Index Spot configuration constants
+    NIFTY_SPOT_TOKEN = "99926037"
+    
+    while True:
         try:
             if not is_market_open():
-                logger.info("Session outside regular market trading boundaries. Standing by...")
+                logger.info("Market is closed. Sleeping background engine thread...")
                 time.sleep(30)
                 continue
                 
-            auth_token, feed_token, obj = get_auth_token()
-            if not auth_token:
-                time.sleep(10)
-                continue
-                
+            logger.info("Fetching authentic session and feed credentials...")
+            # Make sure you extract the explicit feed token from your login state
+            # Example assuming 'smart_api_client' holds your live wrapper session:
+            # feed_token = smart_api_client.feed_token
+            # client_code = smart_api_client.client_code
+            
             if not CE_TOKEN or not PE_TOKEN:
-                get_current_atm_tokens()
-                if not CE_TOKEN or not PE_TOKEN:
-                    time.sleep(15)
-                    continue
+                logger.info("Option tokens not resolved yet. Executing token lookup sequence...")
+                get_current_atm_tokens() # This updates CE_TOKEN, PE_TOKEN, and ATM_STRIKE
+                
+            if CE_TOKEN and PE_TOKEN:
+                logger.info(f"Initializing SmartStream Pipeline for ATM Strike {ATM_STRIKE}")
+                
+                # Instantiate SmartStream with the explicit FEED_TOKEN, not session token
+                ss = SmartStream(sessionToken=feed_token, clientCode=client_code)
+                
+                def on_tick(ws, msg):
+                    global market_signal
+                    # Log immediately to verify the data stream is alive in Render console
+                    logger.info(f"Incoming Tick Data Vector Received: {msg}")
+                    # Parse your msg packet here to update spot_price, ce_price, and pe_price
                     
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws.on_open = on_ws_open
-            sws.on_data = on_ws_data
-            sws.on_error = on_ws_error
-            sws.on_close = on_ws_close
-            ws_running = True
-            
-            logger.info("Connecting to Angel Live Market Streams Pipeline...")
-            sws.connect()
-            
-            while ws_running and engine_active:
-                time.sleep(1)
-                if time.time() - last_tick_time > 90:
-                    logger.warning("Heartbeat tick timeout detected. Re-establishing pipeline...")
-                    break
-            if sws:
-                try: sws.close()
-                except: pass
-                sws = None
-            ws_running = False
-            time.sleep(5)
-        except Exception as e:
-            logger.error(f"Lifecycle loop tracking system fault: {e}")
-            time.sleep(10)
+                def on_connect(ws, response):
+                    logger.info("WebSocket Handshake Approved! Registering scrip tokens...")
+                    
+                    # Exact structural token payload required by Angel One SmartStream
+                    correlation_payload = [
+                        {"exchangeType": 1, "tokens": [str(CE_TOKEN), str(PE_TOKEN)]}, # Options
+                        {"exchangeType": 3, "tokens": [str(NIFTY_SPOT_TOKEN)]}        # Spot Index
+                    ]
+                    
+                    # Request regular snapquote or full ltp streaming data feeds
+                    ss.subscribe(action=1, exchange_tokens=correlation_payload)
+                    logger.info("Subscription payload successfully transmitted.")
 
+                def on_error(ws, error):
+                    logger.error(f"Streaming Pipeline Exception: {error}")
+
+                def on_close(ws, close_status_code, close_msg):
+                    logger.warning("Streaming connection terminated. Retrying pipeline connection...")
+
+                # Assign callbacks and kick off the connection loop
+                ss.on_tick = on_tick
+                ss.on_connect = on_connect
+                ss.on_error = on_error
+                ss.on_close = on_close
+                
+                ss.connect()
+                
+        except Exception as e:
+            logger.error(f"Critical error in supervisor daemon loop: {str(e)}")
+            time.sleep(10)
 # ============================================================
 # API FLASK SERVER ROUTING ENDPOINTS
 # ============================================================
