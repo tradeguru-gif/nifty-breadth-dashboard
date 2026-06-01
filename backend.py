@@ -2000,4 +2000,8 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     
     # Start Flask app
+<<<<<<< HEAD
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+=======
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+>>>>>>> fe011633fd2beb51f93f4f55313e0751b531d57f
