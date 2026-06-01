@@ -1933,6 +1933,65 @@ def get_backtest_status():
         "commission_per_order": CONFIG["BACKTEST_COMMISSION_PER_ORDER"]
     }), 200
 
+@app.route('/api/connection-status')
+def connection_status():
+    """Returns real-time connection and system health status."""
+    import threading
+    import time
+    
+    now = time.time()
+    
+    # WebSocket thread status
+    ws_alive = False
+    if 'ws_thread' in globals() and ws_thread is not None:
+        ws_alive = ws_thread.is_alive()
+    
+    # SmartApi connection status (if available)
+    smartapi_connected = False
+    last_ws_message = 0
+    try:
+        if 'smartapi_ws' in globals() and smartapi_ws is not None:
+            smartapi_connected = getattr(smartapi_ws, 'is_connected', False)
+            last_ws_message = getattr(smartapi_ws, 'last_pong_time', 0)
+    except:
+        pass
+    
+    # Market hours check
+    from datetime import datetime, time as dt_time
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist)
+    market_open = dt_time(9, 15)
+    market_close = dt_time(15, 30)
+    is_market_hours = market_open <= now_ist.time() <= market_close and now_ist.weekday() < 5
+    
+    return jsonify({
+        "timestamp": now_ist.isoformat(),
+        "status": "OK",
+        "market": {
+            "is_open": is_market_hours,
+            "current_time_ist": now_ist.strftime("%H:%M:%S"),
+            "day": now_ist.strftime("%A")
+        },
+        "websocket": {
+            "thread_running": ws_alive,
+            "smartapi_connected": smartapi_connected,
+            "last_message_seconds_ago": round(now - last_ws_message, 1) if last_ws_message > 0 else None
+        },
+        "ml": {
+            "ready": getattr(ml_state, 'is_ready', False) if 'ml_state' in globals() else False,
+            "samples": getattr(ml_state, 'samples', 0) if 'ml_state' in globals() else 0
+        },
+        "data_pipeline": {
+            "ticks_received": getattr(signal_state, 'ticks_received', 0) if 'signal_state' in globals() else 0,
+            "last_tick_seconds_ago": round(now - getattr(signal_state, 'last_tick_time', 0), 1) if 'signal_state' in globals() and getattr(signal_state, 'last_tick_time', 0) > 0 else None
+        },
+        "environment": {
+            "python_version": sys.version.split()[0],
+            "sklearn_version": sklearn.__version__ if 'sklearn' in sys.modules else None
+        }
+    })
+
 if __name__ == "__main__":
     if not _init_completed:
         init_background_threads()
