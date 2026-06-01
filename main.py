@@ -7,7 +7,6 @@ import requests
 import pandas as pd
 import numpy as np
 import sqlite3
-import pickle
 import math
 from collections import deque
 from datetime import datetime, timedelta, time as dt_time
@@ -140,11 +139,11 @@ last_minute_snapshot = {"time": 0, "price": 0}
 
 # Professional Signal State Management
 signal_state = {
-    "current_action": "HOLD",          # Real active state: "HOLD", "BUY_CE", "BUY_PE"
-    "entry_price": 0.0,                # Filled entry premium price
-    "stop_loss": 0.0,                  # Trailing stop-loss baseline floor
-    "target": 0.0,                     # Target take-profit boundary
-    "highest_premium_seen": 0.0,       # Metrics checkpoint used to trail stops up
+    "current_action": "HOLD",
+    "entry_price": 0.0,
+    "stop_loss": 0.0,
+    "target": 0.0,
+    "highest_premium_seen": 0.0,
     "signal_grade": "D",
     "confidence": 0.0,
     "position_size_pct": 0,
@@ -183,12 +182,12 @@ CONFIG = {
     "SPOT_MACD_SLOW": 26,
     "SPOT_MACD_SIGNAL": 9,
     "SPOT_ATR_PERIOD": 14,
-    "BULLISH_TREND_RSI": 53,           # Lowered threshold to ensure clean slow-trend tracking
-    "BEARISH_TREND_RSI": 47,           # Lowered threshold to ensure clean slow-trend tracking
+    "BULLISH_TREND_RSI": 53,
+    "BEARISH_TREND_RSI": 47,
     "CONSIDER_THRESHOLD": 52,
-    "ENTRY_ATR_MULT": 1.5,             # Multiplier buffer targeting structural entry
-    "TRAILING_ATR_MULT": 1.8,          # Gives slow trends room to breathe without shaking out
-    "TARGET_ATR_MULT": 4.0,            # Expands upside target capacity for maximized risk-reward
+    "ENTRY_ATR_MULT": 1.5,
+    "TRAILING_ATR_MULT": 1.8,
+    "TARGET_ATR_MULT": 4.0,
     "COOLDOWN_SEC": 120,
 }
 
@@ -322,11 +321,11 @@ def run_signal_engine():
         return
 
     spot_history_list = list(spot_price_history)
-    if len(spot_history_list) < 30: return  # Guard rail ensuring indicator arrays are adequately armed
+    if len(spot_history_list) < 30: return
 
     # 1. Base Nifty Spot Trend Calculations
     spot_rsi = calculate_rsi(spot_history_list, CONFIG["SPOT_RSI_PERIOD"])
-    spot_macd, macd_signal = calculate_macd(spot_history_list, CONFIG["SPOT_MACAD_FAST" if "SPOT_MACAD_FAST" in CONFIG else "SPOT_MACD_FAST"], CONFIG["SPOT_MACD_SLOW"])
+    spot_macd, macd_signal = calculate_macd(spot_history_list, CONFIG["SPOT_MACD_FAST"], CONFIG["SPOT_MACD_SLOW"])
     spot_atr = calculate_atr(spot_history_list, CONFIG["SPOT_ATR_PERIOD"])
     pcr = get_nifty_pcr()
 
@@ -339,15 +338,10 @@ def run_signal_engine():
         active_side = signal_state["current_action"]
         current_premium = latest_ticks["ce_price"] if active_side == "BUY_CE" else latest_ticks["pe_price"]
         
-        # Guard condition: prevent updates on uninitialized premium ticks
         if current_premium == 0: return 
 
-        # Track the peak premium reached during the lifecycle of this trade
         if current_premium > signal_state["highest_premium_seen"]:
             signal_state["highest_premium_seen"] = current_premium
-            
-            # Dynamic Trailing trailing stop calculation: locks in profits during slow trends
-            # Pulls stop-loss upward, anchored to peak asset performance minus an ATR factor
             new_sl = current_premium - (spot_atr * CONFIG["TRAILING_ATR_MULT"])
             if new_sl > signal_state["stop_loss"]:
                 signal_state["stop_loss"] = new_sl
@@ -355,7 +349,7 @@ def run_signal_engine():
         # Exit Check 1: Trailing Stop Loss Breached
         if current_premium <= signal_state["stop_loss"]:
             pnl_points = current_premium - signal_state["entry_price"]
-            portfolio_state["equity"] += (pnl_points * 50)  # Standard Nifty 50 Unit Multiplier
+            portfolio_state["equity"] += (pnl_points * 50)
             send_telegram_alert(f"📉 <b>TRAILING SL HIT:</b> Out of {active_side} @ {current_premium} | PnL: {pnl_points:.2f} pts")
             reset_signal_state(current_time)
             return
@@ -451,39 +445,49 @@ def is_market_open():
     return dt_time(9, 15) <= now_ist.time() <= dt_time(15, 30)
 
 # ============================================================
-# WEBSOCKET SUBSCRIPTION STREAM DATA INTERFACES
+# WEBSOCKET SUBSCRIPTION STREAM DATA INTERFACES (SmartWebSocketV2)
 # ============================================================
-def on_ws_open(wsapp):
+def on_ws_open(wsapp, open_message):
     global sws
+    logger.info(f"WebSocket opened: {open_message}")
     if sws and CE_TOKEN and PE_TOKEN:
         try:
-            # Map streaming connection directly to Spot Index and Options Premium Tokens
+            # SmartWebSocketV2 subscribe signature: subscribe(correlation_id, mode, tokens)
+            # mode 1 = LTP, 2 = Quote, 3 = SnapQuote
             subscription_payload = [
-                {"exchangeType": 1, "tokens": [SPOT_TOKEN]}, # NSE Spot
-                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]} # NFO Premiums
+                {"exchangeType": 1, "tokens": [SPOT_TOKEN]},      # NSE Spot
+                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}  # NFO Options
             ]
             sws.subscribe("tradeguru_001", 1, subscription_payload)
             logger.info("Streaming pipeline verified online. Multi-token subscription confirmed.")
-        except Exception as e: logger.error(f"Subscription initialization failure: {e}")
+        except Exception as e: 
+            logger.error(f"Subscription initialization failure: {e}")
 
-def on_ws_error(wsapp, error): logger.error(f"WebSocket Error: {error}")
-def on_ws_close(wsapp, code, msg): global ws_running; ws_running = False
+def on_ws_error(wsapp, error): 
+    logger.error(f"WebSocket Error: {error}")
 
-def on_ws_data(wsapp, message, *args):
+def on_ws_close(wsapp, code, msg): 
+    global ws_running
+    ws_running = False
+    logger.warning(f"WebSocket closed: code={code}, msg={msg}")
+
+def on_ws_data(wsapp, message):
     global tick_counter, last_tick_time, latest_ticks, spot_price_history, ce_price_history, pe_price_history
     last_tick_time = time.time()
     try:
         if isinstance(message, bytes):
-            if sws is None: return
+            if sws is None: 
+                return
             tick = sws._parse_binary_data(message)
-            if not tick: return
+            if not tick: 
+                return
             ticks = [tick]
         else:
             data = json.loads(message) if isinstance(message, str) else message
             ticks = data if isinstance(data, list) else [data]
 
         for tick in ticks:
-            token = str(tick.get("token") or tick.get("tk"))
+            token = str(tick.get("token") or tick.get("tk", ""))
             ltp = tick.get("ltp") or tick.get("last_traded_price", 0)
             
             # Auto-correct float notation anomalies transmitted across NFO segments
@@ -514,19 +518,14 @@ def on_ws_data(wsapp, message, *args):
             if tick_counter % 3 == 0:
                 run_signal_engine()
                 
-    except Exception as e: logger.error(f"Callback data parser exception: {e}")
+    except Exception as e: 
+        logger.error(f"Callback data parser exception: {e}")
 
 # ============================================================
-# SUPERVISOR BACKGROUND LIFECYCLE DAEMON
+# SUPERVISOR BACKGROUND LIFECYCLE DAEMON (FIXED)
 # ============================================================
-import json
-from SmartApi.smartStream import SmartStream
-
 def start_angel_websocket():
-    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, market_signal
-    
-    # Nifty 50 Index Spot configuration constants
-    NIFTY_SPOT_TOKEN = "99926037"
+    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, sws, ws_running
     
     while True:
         try:
@@ -536,60 +535,44 @@ def start_angel_websocket():
                 continue
                 
             logger.info("Fetching authentic session and feed credentials...")
-            # Make sure you extract the explicit feed token from your login state
-            # Example assuming 'smart_api_client' holds your live wrapper session:
-            # feed_token = smart_api_client.feed_token
-            # client_code = smart_api_client.client_code
+            auth_token, feed_token, obj = get_auth_token()
+            
+            if not feed_token:
+                logger.error("Failed to get feed token. Retrying in 10s...")
+                time.sleep(10)
+                continue
             
             if not CE_TOKEN or not PE_TOKEN:
                 logger.info("Option tokens not resolved yet. Executing token lookup sequence...")
-                get_current_atm_tokens() # This updates CE_TOKEN, PE_TOKEN, and ATM_STRIKE
+                get_current_atm_tokens()
                 
-            if CE_TOKEN and PE_TOKEN:
-                logger.info(f"Initializing SmartStream Pipeline for ATM Strike {ATM_STRIKE}")
-                
-                # Instantiate SmartStream with the explicit FEED_TOKEN, not session token
-                ss = SmartStream(sessionToken=feed_token, clientCode=client_code)
-                
-                def on_tick(ws, msg):
-                    global market_signal
-                    # Log immediately to verify the data stream is alive in Render console
-                    logger.info(f"Incoming Tick Data Vector Received: {msg}")
-                    # Parse your msg packet here to update spot_price, ce_price, and pe_price
-                    
-                def on_connect(ws, response):
-                    logger.info("WebSocket Handshake Approved! Registering scrip tokens...")
-                    
-                    # Exact structural token payload required by Angel One SmartStream
-                    correlation_payload = [
-                        {"exchangeType": 1, "tokens": [str(CE_TOKEN), str(PE_TOKEN)]}, # Options
-                        {"exchangeType": 3, "tokens": [str(NIFTY_SPOT_TOKEN)]}        # Spot Index
-                    ]
-                    
-                    # Request regular snapquote or full ltp streaming data feeds
-                    ss.subscribe(action=1, exchange_tokens=correlation_payload)
-                    logger.info("Subscription payload successfully transmitted.")
-
-                def on_error(ws, error):
-                    logger.error(f"Streaming Pipeline Exception: {error}")
-
-                def on_close(ws, close_status_code, close_msg):
-                    logger.warning("Streaming connection terminated. Retrying pipeline connection...")
-
-                # Assign callbacks and kick off the connection loop
-                ss.on_tick = on_tick
-                ss.on_connect = on_connect
-                ss.on_error = on_error
-                ss.on_close = on_close
-                
-                ss.connect()
-                
+            if not CE_TOKEN or not PE_TOKEN:
+                logger.error("Could not resolve option tokens. Retrying in 10s...")
+                time.sleep(10)
+                continue
+            
+            logger.info(f"Initializing SmartWebSocketV2 for ATM Strike {ATM_STRIKE}")
+            
+            # SmartWebSocketV2: auth_token, feed_token, client_code
+            sws = SmartWebSocketV2(auth_token, feed_token, ANGEL_CLIENT_ID)
+            
+            # Assign callbacks
+            sws.on_open = on_ws_open
+            sws.on_data = on_ws_data
+            sws.on_error = on_ws_error
+            sws.on_close = on_ws_close
+            
+            ws_running = True
+            
+            # Connect starts the blocking loop
+            sws.connect()
+            
         except Exception as e:
             logger.error(f"Critical error in supervisor daemon loop: {str(e)}")
+            ws_running = False
+            sws = None
             time.sleep(10)
-# ============================================================
-# API FLASK SERVER ROUTING ENDPOINTS
-# ============================================================
+
 # ============================================================
 # INITIALIZATION RUNNER HOOK
 # ============================================================
