@@ -477,36 +477,35 @@ def generate_alert_message(action, strength, spot_price, premium, sl, target, fa
     factor_str = " | ".join(factors) if factors else "Basic"
     if action == "BUY_CE":
         if strength == "STRONG":
-            return f"🟢 <b>STRONG CE BUY</b>
-💰 Spot: {spot_price} | Premium: {premium}
-🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}
-📊 Confidence: {confidence:.1f}% | Factors: {factor_str}"
+            return ("🟢 <b>STRONG CE BUY</b>\n"
+                    f"💰 Spot: {spot_price} | Premium: {premium}\n"
+                    f"🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}\n"
+                    f"📊 Confidence: {confidence:.1f}% | Factors: {factor_str}")
         else:
-            return f"🟡 <b>CONSIDER CE BUY</b>
-💰 Spot: {spot_price} | Premium: {premium}
-🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}
-📊 Confidence: {confidence:.1f}% | Factors: {factor_str}"
+            return ("🟡 <b>CONSIDER CE BUY</b>\n"
+                    f"💰 Spot: {spot_price} | Premium: {premium}\n"
+                    f"🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}\n"
+                    f"📊 Confidence: {confidence:.1f}% | Factors: {factor_str}")
     elif action == "BUY_PE":
         if strength == "STRONG":
-            return f"🔴 <b>STRONG PE BUY</b>
-💰 Spot: {spot_price} | Premium: {premium}
-🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}
-📊 Confidence: {confidence:.1f}% | Factors: {factor_str}"
+            return ("🔴 <b>STRONG PE BUY</b>\n"
+                    f"💰 Spot: {spot_price} | Premium: {premium}\n"
+                    f"🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}\n"
+                    f"📊 Confidence: {confidence:.1f}% | Factors: {factor_str}")
         else:
-            return f"🟠 <b>CONSIDER PE BUY</b>
-💰 Spot: {spot_price} | Premium: {premium}
-🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}
-📊 Confidence: {confidence:.1f}% | Factors: {factor_str}"
+            return ("🟠 <b>CONSIDER PE BUY</b>\n"
+                    f"💰 Spot: {spot_price} | Premium: {premium}\n"
+                    f"🎯 Target: {target:.2f} | 🛡️ SL: {sl:.2f}\n"
+                    f"📊 Confidence: {confidence:.1f}% | Factors: {factor_str}")
     elif action == "EXIT":
-        return f"⚠️ <b>EXIT SIGNAL</b>
-💰 Spot: {spot_price} | Premium: {premium}
-📊 Reason: {factor_str}"
+        return ("⚠️ <b>EXIT SIGNAL</b>\n"
+                f"💰 Spot: {spot_price} | Premium: {premium}\n"
+                f"📊 Reason: {factor_str}")
     elif action == "HOLD":
-        return f"⏸️ <b>HOLD</b>
-💰 Spot: {spot_price}
-📊 Market: Ranging | Confidence: {confidence:.1f}%"
-    return f"📊 <b>WAITING</b>
-💰 Spot: {spot_price}"
+        return ("⏸️ <b>HOLD</b>\n"
+                f"💰 Spot: {spot_price}\n"
+                f"📊 Market: Ranging | Confidence: {confidence:.1f}%")
+    return f"📊 <b>WAITING</b>\n💰 Spot: {spot_price}"
 
 # ============================================================
 # GRADE 1 PRO SIGNAL EXECUTION ENGINE
@@ -586,16 +585,14 @@ def run_signal_engine():
                 old_sl = signal_state["stop_loss"]
                 signal_state["stop_loss"] = new_sl
                 if new_sl > signal_state["entry_price"] and old_sl <= signal_state["entry_price"]:
-                    send_telegram_alert(f"🔒 <b>SL MOVED TO BREAKEVEN</b>
-{active_side} @ {current_premium:.2f}")
+                    send_telegram_alert(f"🔒 <b>SL MOVED TO BREAKEVEN</b>\n{active_side} @ {current_premium:.2f}")
 
         if current_premium <= signal_state["stop_loss"]:
             pnl_points = current_premium - signal_state["entry_price"]
             portfolio_state["equity"] += (pnl_points * 50)
             daily_trade_count += 1
             exit_msg = generate_alert_message("EXIT", "STOP_LOSS", latest_ticks["spot_price"], current_premium, 0, 0, ["Trailing SL Hit"], 0)
-            send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+            send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
             reset_signal_state(current_time)
             return
 
@@ -604,8 +601,7 @@ def run_signal_engine():
             portfolio_state["equity"] += (pnl_points * 50)
             daily_trade_count += 1
             exit_msg = generate_alert_message("EXIT", "TARGET", latest_ticks["spot_price"], current_premium, 0, 0, ["Target Achieved"], 100)
-            send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+            send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
             reset_signal_state(current_time)
             return
 
@@ -616,8 +612,7 @@ def run_signal_engine():
                 portfolio_state["equity"] += (pnl_points * 50)
                 daily_trade_count += 1
                 exit_msg = generate_alert_message("EXIT", "PROFIT_LOCK", latest_ticks["spot_price"], current_premium, 0, 0, ["Profit Lock - 50% Drawdown from Peak"], 0)
-                send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+                send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
                 reset_signal_state(current_time)
                 return
 
@@ -627,8 +622,7 @@ def run_signal_engine():
             portfolio_state["equity"] += (pnl_points * 50)
             daily_trade_count += 1
             exit_msg = generate_alert_message("EXIT", "TIME", latest_ticks["spot_price"], current_premium, 0, 0, [f"Max Hold Time ({CONFIG['MAX_HOLD_TIME_MIN']}min)"], 0)
-            send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+            send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
             reset_signal_state(current_time)
             return
 
@@ -642,8 +636,7 @@ def run_signal_engine():
                 if macd_hist < -0.5: reasons.append("MACD reversal")
                 if not price_above_fast: reasons.append("Price<EMA20")
                 exit_msg = generate_alert_message("EXIT", "MOMENTUM", latest_ticks["spot_price"], current_premium, 0, 0, reasons, 0)
-                send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+                send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
                 reset_signal_state(current_time)
                 return
 
@@ -657,8 +650,7 @@ def run_signal_engine():
                 if macd_hist > 0.5: reasons.append("MACD reversal")
                 if price_above_fast: reasons.append("Price>EMA20")
                 exit_msg = generate_alert_message("EXIT", "MOMENTUM", latest_ticks["spot_price"], current_premium, 0, 0, reasons, 0)
-                send_telegram_alert(exit_msg + f"
-💵 PnL: {pnl_points:.2f} pts")
+                send_telegram_alert(exit_msg + f"\n💵 PnL: {pnl_points:.2f} pts")
                 reset_signal_state(current_time)
                 return
 
@@ -804,8 +796,7 @@ def run_signal_engine():
             else:
                 status = "Market ranging - no clear direction"
 
-            market_signal["alert_message"] = f"⏸️ HOLD | {status}
-RSI: {spot_rsi:.1f} | MACD: {macd_hist:.2f} | ADX: {adx:.1f}"
+            market_signal["alert_message"] = f"⏸️ HOLD | {status}\nRSI: {spot_rsi:.1f} | MACD: {macd_hist:.2f} | ADX: {adx:.1f}"
             market_signal["signal_strength"] = "HOLD"
 
     # ========== TIMEFRAME TREND CALCULATION ==========
