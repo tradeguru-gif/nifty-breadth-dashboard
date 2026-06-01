@@ -1,5 +1,13 @@
 # === ML Import Diagnostic (top of backend.py, after imports) ===
 try:
+    import subprocess
+import sys
+
+# Auto-install scikit-learn if missing
+try:
+    import sklearn
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn"])
     import sklearn
     print(f"[DIAG] sklearn version: {sklearn.__version__}")
 except Exception as e:
