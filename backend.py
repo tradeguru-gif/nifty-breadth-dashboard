@@ -157,24 +157,63 @@ spot_cache = {"value": None, "timestamp": 0}
 CACHE_TTL = 15
 
 CONFIG = {
-    "SPOT_RSI_PERIOD": 14, "SPOT_RSI_SMOOTHING": 3,
-    "SPOT_MACD_FAST": 12, "SPOT_MACD_SLOW": 26, "SPOT_MACD_SIGNAL": 9,
-    "SPOT_ATR_PERIOD": 14, "ATR_SMOOTHING": True,
-    "CONSIDER_CE_RSI": 52, "CONSIDER_PE_RSI": 48,
-    "STRONG_CE_RSI": 58, "STRONG_PE_RSI": 42,
-    "EXTREME_CE_RSI": 65, "EXTREME_PE_RSI": 35,
-    "MACD_CONFIRM_THRESHOLD": 0.5, "VOLUME_SPIKE_RATIO": 1.3, "VOLUME_MA_PERIOD": 20,
-    "PCR_BULLISH_THRESHOLD": 0.85, "PCR_BEARISH_THRESHOLD": 1.15,
-    "TREND_STRENGTH_PERIOD": 14, "STRONG_TREND_MIN": 25,
-    "ENTRY_ATR_MULT": 1.5, "TRAILING_ATR_MULT": 1.8, "TARGET_ATR_MULT": 4.0,
-    "COOLDOWN_SEC": 120, "MAX_HOLD_TIME_MIN": 45,
-    "MIN_PROFIT_LOCK": 0.3, "BREAKEVEN_TRIGGER": 1.0, "MIN_SIGNAL_HOLD_SEC": 30,
-    "MAX_DAILY_TRADES": 8, "CONSECUTIVE_SAME_DIR_MAX": 2,
+    "SPOT_RSI_PERIOD": 14,
+    "SPOT_RSI_SMOOTHING": 3,
+    "SPOT_MACD_FAST": 12,
+    "SPOT_MACD_SLOW": 26,
+    "SPOT_MACD_SIGNAL": 9,
+    "SPOT_ATR_PERIOD": 14,
+    "ATR_SMOOTHING": True,
+    "CONSIDER_CE_RSI": 50,
+    "CONSIDER_PE_RSI": 50,
+    "STRONG_CE_RSI": 55,
+    "STRONG_PE_RSI": 45,
+    "EXTREME_CE_RSI": 65,
+    "EXTREME_PE_RSI": 35,
+    "MACD_CONFIRM_THRESHOLD": 0.2,
+    "VOLUME_SPIKE_RATIO": 1.3,
+    "VOLUME_MA_PERIOD": 20,
+    "PCR_BULLISH_THRESHOLD": 0.85,
+    "PCR_BEARISH_THRESHOLD": 1.15,
+    "TREND_STRENGTH_PERIOD": 14,
+    "STRONG_TREND_MIN": 20,
+    "ENTRY_ATR_MULT": 1.5,
+    "TRAILING_ATR_MULT": 1.8,
+    "TARGET_ATR_MULT": 4.0,
+    "COOLDOWN_SEC": 60,
+    "MAX_HOLD_TIME_MIN": 45,
+    "MIN_PROFIT_LOCK": 0.3,
+    "BREAKEVEN_TRIGGER": 1.0,
+    "MIN_SIGNAL_HOLD_SEC": 30,
+    "MAX_DAILY_TRADES": 15,
+    "CONSECUTIVE_SAME_DIR_MAX": 2,
+    "SIGNAL_DEBUG_MODE": True,
+    "MIN_SCORE_FOR_ENTRY": 2,
+    "WEAK_SIGNAL_ALLOWED": True,
+    "AGGRESSIVE_ENTRY": True,
+    "DRAWDOWN_ALERT_PCT": 0.15,
+    "PROFIT_LOCK_PCT": 0.30,
+    "EARLY_EXIT_ON_REVERSAL": True,
+    "RSI_EXIT_CE": 48,
+    "RSI_EXIT_PE": 52,
+    "MACD_EXIT_THRESHOLD": 0.1,
+    "FORCE_SIGNAL_AFTER_MINS": 20,
+    "MIN_DATA_POINTS": 30,
+    "SIGNAL_BUILDING_TICKS": 2,
 }
 
 signal_buffer = {"ce_count": 0, "pe_count": 0, "last_signal_time": 0, "consecutive_ce": 0, "consecutive_pe": 0}
 daily_trade_count = 0
 last_trade_date = ""
+
+signal_debug_log = deque(maxlen=100)
+
+def log_signal_debug(msg):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    entry = f"[{timestamp}] {msg}"
+    signal_debug_log.append(entry)
+    if CONFIG.get("SIGNAL_DEBUG_MODE", False):
+        logger.info(f"[SIGNAL_DEBUG] {msg}")
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -362,40 +401,49 @@ def classify_signal_strength(rsi, macd_hist, adx, pcr, volume_ratio, trend_direc
     score = 0
     factors = []
     if trend_direction == "BULLISH":
-        if rsi >= CONFIG["STRONG_CE_RSI"]: score += 2; factors.append("RSI_STRONG")
+        if rsi >= CONFIG["EXTREME_CE_RSI"]: score += 3; factors.append("RSI_EXTREME")
+        elif rsi >= CONFIG["STRONG_CE_RSI"]: score += 2; factors.append("RSI_STRONG")
         elif rsi >= CONFIG["CONSIDER_CE_RSI"]: score += 1; factors.append("RSI_CONSIDER")
         if macd_hist > CONFIG["MACD_CONFIRM_THRESHOLD"]: score += 2; factors.append("MACD_CONFIRM")
         elif macd_hist > 0: score += 1; factors.append("MACD_WEAK")
         if adx >= CONFIG["STRONG_TREND_MIN"]: score += 2; factors.append("TREND_STRONG")
-        elif adx >= 20: score += 1; factors.append("TREND_MODERATE")
+        elif adx >= 15: score += 1; factors.append("TREND_MODERATE")
         if pcr <= CONFIG["PCR_BULLISH_THRESHOLD"]: score += 1; factors.append("PCR_BULLISH")
         if volume_ratio >= CONFIG["VOLUME_SPIKE_RATIO"]: score += 1; factors.append("VOLUME_SPIKE")
+        if trend_direction == "BULLISH": score += 1; factors.append("PRICE_ABOVE_EMA")
     else:
-        if rsi <= CONFIG["STRONG_PE_RSI"]: score += 2; factors.append("RSI_STRONG")
+        if rsi <= CONFIG["EXTREME_PE_RSI"]: score += 3; factors.append("RSI_EXTREME")
+        elif rsi <= CONFIG["STRONG_PE_RSI"]: score += 2; factors.append("RSI_STRONG")
         elif rsi <= CONFIG["CONSIDER_PE_RSI"]: score += 1; factors.append("RSI_CONSIDER")
         if macd_hist < -CONFIG["MACD_CONFIRM_THRESHOLD"]: score += 2; factors.append("MACD_CONFIRM")
         elif macd_hist < 0: score += 1; factors.append("MACD_WEAK")
         if adx >= CONFIG["STRONG_TREND_MIN"]: score += 2; factors.append("TREND_STRONG")
-        elif adx >= 20: score += 1; factors.append("TREND_MODERATE")
+        elif adx >= 15: score += 1; factors.append("TREND_MODERATE")
         if pcr >= CONFIG["PCR_BEARISH_THRESHOLD"]: score += 1; factors.append("PCR_BEARISH")
         if volume_ratio >= CONFIG["VOLUME_SPIKE_RATIO"]: score += 1; factors.append("VOLUME_SPIKE")
+        if trend_direction == "BEARISH": score += 1; factors.append("PRICE_BELOW_EMA")
     if score >= 6: return "STRONG", score, factors
     elif score >= 3: return "CONSIDER", score, factors
+    elif score >= CONFIG["MIN_SCORE_FOR_ENTRY"] and CONFIG.get("WEAK_SIGNAL_ALLOWED", False):
+        return "WEAK", score, factors
     else: return "WEAK", score, factors
 
-# CRITICAL FIX: Zero multi-line strings. All returns are single-line string concatenation.
 def generate_alert_message(action, strength, spot_price, premium, sl, target, factors, confidence):
     factor_str = " | ".join(factors) if factors else "Basic"
     if action == "BUY_CE":
         if strength == "STRONG":
             return "🟢 <b>STRONG CE BUY</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
-        else:
+        elif strength == "CONSIDER":
             return "🟡 <b>CONSIDER CE BUY</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
+        else:
+            return "⚪ <b>WEAK CE BUY (Aggressive)</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
     elif action == "BUY_PE":
         if strength == "STRONG":
             return "🔴 <b>STRONG PE BUY</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
-        else:
+        elif strength == "CONSIDER":
             return "🟠 <b>CONSIDER PE BUY</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
+        else:
+            return "⚪ <b>WEAK PE BUY (Aggressive)</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n🎯 Target: " + str(round(target, 2)) + " | 🛡️ SL: " + str(round(sl, 2)) + "\n📊 Confidence: " + str(round(confidence, 1)) + "% | Factors: " + factor_str
     elif action == "EXIT":
         return "⚠️ <b>EXIT SIGNAL</b>\n💰 Spot: " + str(spot_price) + " | Premium: " + str(premium) + "\n📊 Reason: " + factor_str
     elif action == "HOLD":
@@ -406,22 +454,29 @@ def run_signal_engine():
     global market_signal, market_state, signal_state, portfolio_state, latest_ticks
     global signal_buffer, daily_trade_count
 
+    log_signal_debug("=== SIGNAL ENGINE CYCLE START ===")
+
     if risk_manager.check_daily_loss_limit():
         market_state["action"] = "HALTED_LOSS_LIMIT"
         market_signal["alert_message"] = "🚫 HALTED: Daily loss limit reached"
         market_signal["signal_strength"] = "HALTED"
+        log_signal_debug("HALTED: Daily loss limit reached")
         return
 
     if risk_manager.check_max_daily_trades():
         market_state["action"] = "HALTED_MAX_TRADES"
-        market_signal["alert_message"] = "🚫 HALTED: Max daily trades reached"
+        market_signal["alert_message"] = "🚫 HALTED: Max daily trades reached (" + str(daily_trade_count) + "/" + str(CONFIG["MAX_DAILY_TRADES"]) + ")"
         market_signal["signal_strength"] = "HALTED"
+        log_signal_debug("HALTED: Max daily trades reached: " + str(daily_trade_count) + "/" + str(CONFIG["MAX_DAILY_TRADES"]))
         return
 
     spot_history_list = list(spot_price_history)
-    if len(spot_history_list) < 50:
-        market_signal["alert_message"] = "⏳ Collecting market data..."
+    min_data = CONFIG.get("MIN_DATA_POINTS", 30)
+
+    if len(spot_history_list) < min_data:
+        market_signal["alert_message"] = "⏳ Collecting market data... (" + str(len(spot_history_list)) + "/" + str(min_data) + ")"
         market_signal["signal_strength"] = "WAITING"
+        log_signal_debug("WAITING: Insufficient data points: " + str(len(spot_history_list)) + "/" + str(min_data))
         return
 
     spot_rsi = calculate_rsi(spot_history_list, CONFIG["SPOT_RSI_PERIOD"], CONFIG["SPOT_RSI_SMOOTHING"])
@@ -453,12 +508,17 @@ def run_signal_engine():
         "trend": "UPTREND" if price_above_fast and price_above_slow else "DOWNTREND" if not price_above_fast and not price_above_slow else "MIXED"
     })
 
+    log_signal_debug("Indicators -> RSI:" + str(round(spot_rsi,1)) + " MACD_HIST:" + str(round(macd_hist,3)) + 
+                     " ADX:" + str(round(adx,1)) + " PCR:" + str(round(pcr,2)) + 
+                     " ATR:" + str(round(spot_atr,2)) + " Trend:" + market_state["trend"])
+
     if signal_state["current_action"] != "HOLD":
         active_side = signal_state["current_action"]
         current_premium = latest_ticks["ce_price"] if active_side == "BUY_CE" else latest_ticks["pe_price"]
 
         if current_premium == 0:
             market_signal["alert_message"] = "⏳ Waiting for premium data..."
+            log_signal_debug("HOLD: No premium data for active position")
             return
 
         unrealized_pnl = current_premium - signal_state["entry_price"]
@@ -473,6 +533,26 @@ def run_signal_engine():
                 signal_state["stop_loss"] = new_sl
                 if new_sl > signal_state["entry_price"] and old_sl <= signal_state["entry_price"]:
                     send_telegram_alert("🔒 <b>SL MOVED TO BREAKEVEN</b>\n" + active_side + " @ " + str(round(current_premium, 2)))
+                    log_signal_debug("TRAILING: SL moved to breakeven @ " + str(round(current_premium, 2)))
+
+        if signal_state["max_profit_seen"] > 0:
+            drawdown_from_peak = signal_state["max_profit_seen"] - unrealized_pnl
+            drawdown_pct = drawdown_from_peak / signal_state["max_profit_seen"] if signal_state["max_profit_seen"] > 0 else 0
+
+            if drawdown_pct > 0 and drawdown_pct < CONFIG["DRAWDOWN_ALERT_PCT"]:
+                log_signal_debug("DRAWDOWN ALERT: " + str(round(drawdown_pct*100,1)) + "% from peak profit " + 
+                                str(round(signal_state["max_profit_seen"],2)) + " -> current " + str(round(unrealized_pnl,2)))
+
+            if drawdown_pct >= CONFIG["DRAWDOWN_ALERT_PCT"]:
+                pnl_points = current_premium - signal_state["entry_price"]
+                portfolio_state["equity"] += (pnl_points * 50)
+                daily_trade_count += 1
+                exit_msg = generate_alert_message("EXIT", "DRAWDOWN", latest_ticks["spot_price"], current_premium, 0, 0, 
+                                                   ["Drawdown Alert - " + str(round(drawdown_pct*100,1)) + "% from peak"], 0)
+                send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+                log_signal_debug("EXIT: Drawdown exit triggered. PnL: " + str(round(pnl_points, 2)))
+                reset_signal_state(current_time)
+                return
 
         if current_premium <= signal_state["stop_loss"]:
             pnl_points = current_premium - signal_state["entry_price"]
@@ -480,6 +560,7 @@ def run_signal_engine():
             daily_trade_count += 1
             exit_msg = generate_alert_message("EXIT", "STOP_LOSS", latest_ticks["spot_price"], current_premium, 0, 0, ["Trailing SL Hit"], 0)
             send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+            log_signal_debug("EXIT: Stop loss hit. PnL: " + str(round(pnl_points, 2)))
             reset_signal_state(current_time)
             return
 
@@ -489,17 +570,20 @@ def run_signal_engine():
             daily_trade_count += 1
             exit_msg = generate_alert_message("EXIT", "TARGET", latest_ticks["spot_price"], current_premium, 0, 0, ["Target Achieved"], 100)
             send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+            log_signal_debug("EXIT: Target achieved. PnL: " + str(round(pnl_points, 2)))
             reset_signal_state(current_time)
             return
 
         if signal_state["max_profit_seen"] > spot_atr * 0.5:
             drawdown_from_peak = signal_state["max_profit_seen"] - unrealized_pnl
-            if drawdown_from_peak > signal_state["max_profit_seen"] * 0.5:
+            if drawdown_from_peak > signal_state["max_profit_seen"] * CONFIG["PROFIT_LOCK_PCT"]:
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50)
                 daily_trade_count += 1
-                exit_msg = generate_alert_message("EXIT", "PROFIT_LOCK", latest_ticks["spot_price"], current_premium, 0, 0, ["Profit Lock - 50% Drawdown from Peak"], 0)
+                exit_msg = generate_alert_message("EXIT", "PROFIT_LOCK", latest_ticks["spot_price"], current_premium, 0, 0, 
+                                                   ["Profit Lock - " + str(round(CONFIG["PROFIT_LOCK_PCT"]*100,0)) + "% Drawdown from Peak"], 0)
                 send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+                log_signal_debug("EXIT: Profit lock triggered. PnL: " + str(round(pnl_points, 2)))
                 reset_signal_state(current_time)
                 return
 
@@ -508,42 +592,54 @@ def run_signal_engine():
             pnl_points = current_premium - signal_state["entry_price"]
             portfolio_state["equity"] += (pnl_points * 50)
             daily_trade_count += 1
-            exit_msg = generate_alert_message("EXIT", "TIME", latest_ticks["spot_price"], current_premium, 0, 0, ["Max Hold Time (" + str(CONFIG["MAX_HOLD_TIME_MIN"]) + "min)"], 0)
+            exit_msg = generate_alert_message("EXIT", "TIME", latest_ticks["spot_price"], current_premium, 0, 0, 
+                                               ["Max Hold Time (" + str(CONFIG["MAX_HOLD_TIME_MIN"]) + "min)"], 0)
             send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+            log_signal_debug("EXIT: Max hold time. PnL: " + str(round(pnl_points, 2)))
             reset_signal_state(current_time)
             return
 
         if active_side == "BUY_CE":
-            if spot_rsi < 45 or macd_hist < -0.5 or not price_above_fast:
+            rsi_exit = spot_rsi < CONFIG.get("RSI_EXIT_CE", 48)
+            macd_exit = macd_hist < -CONFIG.get("MACD_EXIT_THRESHOLD", 0.1)
+            ema_exit = not price_above_fast
+
+            if rsi_exit or macd_exit or ema_exit:
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50)
                 daily_trade_count += 1
                 reasons = []
-                if spot_rsi < 45: reasons.append("RSI<45")
-                if macd_hist < -0.5: reasons.append("MACD reversal")
-                if not price_above_fast: reasons.append("Price<EMA20")
+                if rsi_exit: reasons.append("RSI<" + str(CONFIG.get("RSI_EXIT_CE", 48)))
+                if macd_exit: reasons.append("MACD reversal<" + str(-CONFIG.get("MACD_EXIT_THRESHOLD", 0.1)))
+                if ema_exit: reasons.append("Price<EMA20")
                 exit_msg = generate_alert_message("EXIT", "MOMENTUM", latest_ticks["spot_price"], current_premium, 0, 0, reasons, 0)
                 send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+                log_signal_debug("EXIT CE: Momentum reversal. " + " | ".join(reasons) + " PnL: " + str(round(pnl_points, 2)))
                 reset_signal_state(current_time)
                 return
 
         elif active_side == "BUY_PE":
-            if spot_rsi > 55 or macd_hist > 0.5 or price_above_fast:
+            rsi_exit = spot_rsi > CONFIG.get("RSI_EXIT_PE", 52)
+            macd_exit = macd_hist > CONFIG.get("MACD_EXIT_THRESHOLD", 0.1)
+            ema_exit = price_above_fast
+
+            if rsi_exit or macd_exit or ema_exit:
                 pnl_points = current_premium - signal_state["entry_price"]
                 portfolio_state["equity"] += (pnl_points * 50)
                 daily_trade_count += 1
                 reasons = []
-                if spot_rsi > 55: reasons.append("RSI>55")
-                if macd_hist > 0.5: reasons.append("MACD reversal")
-                if price_above_fast: reasons.append("Price>EMA20")
+                if rsi_exit: reasons.append("RSI>" + str(CONFIG.get("RSI_EXIT_PE", 52)))
+                if macd_exit: reasons.append("MACD reversal>" + str(CONFIG.get("MACD_EXIT_THRESHOLD", 0.1)))
+                if ema_exit: reasons.append("Price>EMA20")
                 exit_msg = generate_alert_message("EXIT", "MOMENTUM", latest_ticks["spot_price"], current_premium, 0, 0, reasons, 0)
                 send_telegram_alert(exit_msg + "\n💵 PnL: " + str(round(pnl_points, 2)) + " pts")
+                log_signal_debug("EXIT PE: Momentum reversal. " + " | ".join(reasons) + " PnL: " + str(round(pnl_points, 2)))
                 reset_signal_state(current_time)
                 return
 
         hold_mins = int((current_time - signal_state["entry_time"]) / 60)
         pnl_pct = ((current_premium - signal_state["entry_price"]) / signal_state["entry_price"] * 50) if signal_state["entry_price"] > 0 else 0
-        market_signal["alert_message"] = "📊 " + active_side + " ACTIVE | Hold: " + str(hold_mins) + "m | PnL: " + str(round(pnl_pct, 1)) + "% | SL: " + str(round(signal_state["stop_loss"], 2))
+        market_signal["alert_message"] = "📊 " + active_side + " ACTIVE | Hold: " + str(hold_mins) + "m | PnL: " + str(round(pnl_pct, 1)) + "% | SL: " + str(round(signal_state["stop_loss"], 2)) + " | Peak: " + str(round(signal_state["max_profit_seen"], 2))
         market_signal["signal_strength"] = "ACTIVE"
 
     else:
@@ -551,35 +647,57 @@ def run_signal_engine():
             remaining = int(signal_state["cooldown_until"] - current_time)
             market_signal["alert_message"] = "⏳ Cooldown: " + str(remaining) + "s remaining"
             market_signal["signal_strength"] = "COOLDOWN"
+            log_signal_debug("COOLDOWN: " + str(remaining) + "s remaining")
             return
 
-        if spot_rsi >= CONFIG["CONSIDER_CE_RSI"] and macd_hist > 0 and price_above_fast:
+        ce_rsi_ok = spot_rsi >= CONFIG["CONSIDER_CE_RSI"]
+        ce_macd_ok = macd_hist > 0
+        ce_ema_ok = price_above_fast
+        pe_rsi_ok = spot_rsi <= CONFIG["CONSIDER_PE_RSI"]
+        pe_macd_ok = macd_hist < 0
+        pe_ema_ok = not price_above_fast
+
+        log_signal_debug("CE CHECK -> RSI:" + str(round(spot_rsi,1)) + ">=" + str(CONFIG["CONSIDER_CE_RSI"]) + 
+                        "=" + str(ce_rsi_ok) + " | MACD:" + str(round(macd_hist,3)) + ">0=" + str(ce_macd_ok) + 
+                        " | EMA_FAST=" + str(ce_ema_ok))
+        log_signal_debug("PE CHECK -> RSI:" + str(round(spot_rsi,1)) + "<=" + str(CONFIG["CONSIDER_PE_RSI"]) + 
+                        "=" + str(pe_rsi_ok) + " | MACD:" + str(round(macd_hist,3)) + "<0=" + str(pe_macd_ok) + 
+                        " | EMA_FAST=" + str(pe_ema_ok))
+
+        if ce_rsi_ok and ce_macd_ok and ce_ema_ok:
             ce_premium = latest_ticks["ce_price"]
             if ce_premium == 0:
                 market_signal["alert_message"] = "⏳ Waiting for CE premium data..."
+                log_signal_debug("CE: No premium data")
                 return
 
             signal_buffer["ce_count"] += 1
             signal_buffer["pe_count"] = 0
 
-            if signal_buffer["ce_count"] < 3:
-                market_signal["alert_message"] = "🟡 CE Signal Building... (" + str(signal_buffer["ce_count"]) + "/3)"
+            building_ticks = CONFIG.get("SIGNAL_BUILDING_TICKS", 2)
+            if signal_buffer["ce_count"] < building_ticks:
+                market_signal["alert_message"] = "🟡 CE Signal Building... (" + str(signal_buffer["ce_count"]) + "/" + str(building_ticks) + ")"
                 market_signal["signal_strength"] = "BUILDING"
+                log_signal_debug("CE BUILDING: " + str(signal_buffer["ce_count"]) + "/" + str(building_ticks))
                 return
 
             strength, score, factors = classify_signal_strength(
                 spot_rsi, macd_hist, adx, pcr, ce_vol_ratio, "BULLISH")
 
-            if strength == "WEAK":
+            log_signal_debug("CE CLASSIFY -> Strength:" + strength + " Score:" + str(score) + " Factors:" + str(factors))
+
+            if strength == "WEAK" and not CONFIG.get("WEAK_SIGNAL_ALLOWED", True):
                 market_signal["alert_message"] = "⚪ Weak CE Signal Ignored (Score: " + str(score) + "/10)"
                 market_signal["signal_strength"] = "WEAK"
                 signal_buffer["ce_count"] = 0
+                log_signal_debug("CE REJECTED: Weak signal blocked. Score: " + str(score))
                 return
 
             if signal_buffer["consecutive_ce"] >= CONFIG["CONSECUTIVE_SAME_DIR_MAX"]:
                 market_signal["alert_message"] = "🚫 CE Blocked: Max consecutive entries reached"
                 market_signal["signal_strength"] = "BLOCKED"
                 signal_buffer["ce_count"] = 0
+                log_signal_debug("CE BLOCKED: Max consecutive CE entries")
                 return
 
             sl = ce_premium - (spot_atr * CONFIG["ENTRY_ATR_MULT"])
@@ -603,35 +721,43 @@ def run_signal_engine():
 
             alert = generate_alert_message("BUY_CE", strength, latest_ticks["spot_price"], ce_premium, sl, target, factors, confidence)
             send_telegram_alert(alert)
+            log_signal_debug("SIGNAL ENTER: " + strength + " CE BUY | Score: " + str(score) + " | Grade: " + grade + " | Conf: " + str(round(confidence,1)) + "%")
             logger.info("SIGNAL: " + strength + " CE BUY | Score: " + str(score) + " | Grade: " + grade)
 
-        elif spot_rsi <= CONFIG["CONSIDER_PE_RSI"] and macd_hist < 0 and not price_above_fast:
+        elif pe_rsi_ok and pe_macd_ok and pe_ema_ok:
             pe_premium = latest_ticks["pe_price"]
             if pe_premium == 0:
                 market_signal["alert_message"] = "⏳ Waiting for PE premium data..."
+                log_signal_debug("PE: No premium data")
                 return
 
             signal_buffer["pe_count"] += 1
             signal_buffer["ce_count"] = 0
 
-            if signal_buffer["pe_count"] < 3:
-                market_signal["alert_message"] = "🟡 PE Signal Building... (" + str(signal_buffer["pe_count"]) + "/3)"
+            building_ticks = CONFIG.get("SIGNAL_BUILDING_TICKS", 2)
+            if signal_buffer["pe_count"] < building_ticks:
+                market_signal["alert_message"] = "🟡 PE Signal Building... (" + str(signal_buffer["pe_count"]) + "/" + str(building_ticks) + ")"
                 market_signal["signal_strength"] = "BUILDING"
+                log_signal_debug("PE BUILDING: " + str(signal_buffer["pe_count"]) + "/" + str(building_ticks))
                 return
 
             strength, score, factors = classify_signal_strength(
                 spot_rsi, macd_hist, adx, pcr, pe_vol_ratio, "BEARISH")
 
-            if strength == "WEAK":
+            log_signal_debug("PE CLASSIFY -> Strength:" + strength + " Score:" + str(score) + " Factors:" + str(factors))
+
+            if strength == "WEAK" and not CONFIG.get("WEAK_SIGNAL_ALLOWED", True):
                 market_signal["alert_message"] = "⚪ Weak PE Signal Ignored (Score: " + str(score) + "/10)"
                 market_signal["signal_strength"] = "WEAK"
                 signal_buffer["pe_count"] = 0
+                log_signal_debug("PE REJECTED: Weak signal blocked. Score: " + str(score))
                 return
 
             if signal_buffer["consecutive_pe"] >= CONFIG["CONSECUTIVE_SAME_DIR_MAX"]:
                 market_signal["alert_message"] = "🚫 PE Blocked: Max consecutive entries reached"
                 market_signal["signal_strength"] = "BLOCKED"
                 signal_buffer["pe_count"] = 0
+                log_signal_debug("PE BLOCKED: Max consecutive PE entries")
                 return
 
             sl = pe_premium - (spot_atr * CONFIG["ENTRY_ATR_MULT"])
@@ -655,6 +781,7 @@ def run_signal_engine():
 
             alert = generate_alert_message("BUY_PE", strength, latest_ticks["spot_price"], pe_premium, sl, target, factors, confidence)
             send_telegram_alert(alert)
+            log_signal_debug("SIGNAL ENTER: " + strength + " PE BUY | Score: " + str(score) + " | Grade: " + grade + " | Conf: " + str(round(confidence,1)) + "%")
             logger.info("SIGNAL: " + strength + " PE BUY | Score: " + str(score) + " | Grade: " + grade)
 
         else:
@@ -662,14 +789,15 @@ def run_signal_engine():
             signal_buffer["pe_count"] = 0
 
             if spot_rsi > 55:
-                status = "Bullish bias but waiting for confirmation"
+                status = "Bullish bias but waiting for confirmation (RSI:" + str(round(spot_rsi,1)) + ", MACD:" + str(round(macd_hist,2)) + ")"
             elif spot_rsi < 45:
-                status = "Bearish bias but waiting for confirmation"
+                status = "Bearish bias but waiting for confirmation (RSI:" + str(round(spot_rsi,1)) + ", MACD:" + str(round(macd_hist,2)) + ")"
             else:
-                status = "Market ranging - no clear direction"
+                status = "Market ranging - no clear direction (RSI:" + str(round(spot_rsi,1)) + " neutral zone)"
 
             market_signal["alert_message"] = "⏸️ HOLD | " + status + "\nRSI: " + str(round(spot_rsi, 1)) + " | MACD: " + str(round(macd_hist, 2)) + " | ADX: " + str(round(adx, 1))
             market_signal["signal_strength"] = "HOLD"
+            log_signal_debug("HOLD: " + status)
 
     for tf in TIMEFRAMES:
         tf_data = list(timeframe_history[tf])
@@ -702,6 +830,8 @@ def run_signal_engine():
         "grade": signal_state["signal_grade"],
         "daily_trades": daily_trade_count})
 
+    log_signal_debug("=== SIGNAL ENGINE CYCLE END ===")
+
 def reset_signal_state(current_time):
     global signal_state, portfolio_state, signal_buffer
     signal_state.update({
@@ -712,6 +842,7 @@ def reset_signal_state(current_time):
     portfolio_state["open_positions"] = 0
     signal_buffer["ce_count"] = 0
     signal_buffer["pe_count"] = 0
+    log_signal_debug("RESET: Signal state reset. Cooldown: " + str(CONFIG["COOLDOWN_SEC"]) + "s")
 
 def get_ist_now():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -900,20 +1031,21 @@ def ensure_threads_are_breathing():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Grade 1 Pro Signal Bot",
+        "engine": "Grade 1 Pro Signal Bot - RELAXED MODE",
         "market_open": is_market_open(),
         "timestamp": time.time(),
         "features": [
-            "Multi-factor signal classification",
-            "RSI + MACD + ADX + PCR + Volume confirmation",
+            "Multi-factor signal classification - RELAXED THRESHOLDS",
+            "RSI(50/50) + MACD(>0/<0) + ADX(20+) + PCR + Volume confirmation",
             "Intelligent trailing stops with breakeven",
-            "Profit lock at 50% drawdown from peak",
-            "Time-based exits",
-            "Momentum reversal detection",
-            "Signal persistence validation (3-tick confirm)",
+            "AGGRESSIVE drawdown alerts (15% from peak)",
+            "Profit lock at 30% drawdown from peak",
+            "FAST momentum reversal detection (RSI 48/52, MACD 0.1)",
+            "Signal persistence validation (2-tick confirm)",
             "Consecutive trade limits",
-            "Daily max trade limits",
-            "Multi-timeframe trend analysis (1m, 2m, 3m, 5m, 10m, 15m, 20m)"
+            "Daily max trade limits (15)",
+            "Multi-timeframe trend analysis (1m, 2m, 3m, 5m, 10m, 15m, 20m)",
+            "SIGNAL ENGINE DEBUG MODE ENABLED"
         ]
     }), 200
 
@@ -938,8 +1070,13 @@ def live_signals():
             "consider_pe_rsi": CONFIG["CONSIDER_PE_RSI"],
             "strong_pe_rsi": CONFIG["STRONG_PE_RSI"],
             "max_daily_trades": CONFIG["MAX_DAILY_TRADES"],
-            "cooldown_sec": CONFIG["COOLDOWN_SEC"]
-        }
+            "cooldown_sec": CONFIG["COOLDOWN_SEC"],
+            "macd_threshold": CONFIG["MACD_CONFIRM_THRESHOLD"],
+            "min_score": CONFIG.get("MIN_SCORE_FOR_ENTRY", 2),
+            "weak_allowed": CONFIG.get("WEAK_SIGNAL_ALLOWED", True),
+            "signal_building_ticks": CONFIG.get("SIGNAL_BUILDING_TICKS", 2)
+        },
+        "debug_log": list(signal_debug_log)[-20:]
     }), 200
 
 @app.route("/api/health", methods=["GET"])
@@ -949,7 +1086,24 @@ def health_check():
         "alive": True,
         "ws_running": ws_running,
         "last_tick": last_tick_time,
-        "ticks_received": tick_counter
+        "ticks_received": tick_counter,
+        "daily_trades": daily_trade_count,
+        "max_daily_trades": CONFIG["MAX_DAILY_TRADES"],
+        "signal_debug_count": len(signal_debug_log)
+    }), 200
+
+@app.route("/api/debug/signal-log", methods=["GET"])
+def get_signal_debug_log():
+    return jsonify({
+        "debug_log": list(signal_debug_log),
+        "config": {k: v for k, v in CONFIG.items() if not isinstance(v, (list, dict, bytes))},
+        "current_state": {
+            "signal_state": signal_state,
+            "market_state": market_state,
+            "portfolio_state": portfolio_state,
+            "buffer": signal_buffer,
+            "daily_trades": daily_trade_count
+        }
     }), 200
 
 if __name__ == "__main__":
@@ -957,4 +1111,4 @@ if __name__ == "__main__":
         init_background_threads()
         _init_completed = True
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)s
