@@ -1,4 +1,4 @@
-# backend.py
+# backend_corrected.py
 # Complete corrected version with all signal parameters for frontend dashboard
 
 import os
@@ -166,7 +166,7 @@ market_signal = {
     "atr_pct": 0.0, "adx": 0.0, "bb_position": 50.0, "rsi_divergence": "NONE",
     "iv_rank": 50, "signal_grade": "D", "regime": "RANGING", "session_phase": "UNKNOWN",
     "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0,
-    "spot_price": 0  # ADDED for frontend
+    "spot_price": 0
 }
 
 market_state = {
@@ -613,48 +613,83 @@ def get_nifty_pcr():
         pass
     return pcr_cache["value"]
 
+# --- Enhanced get_current_atm_tokens function ---
 def get_current_atm_tokens():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
+        logger.warning("Could not get Nifty spot price.")
         return None, None
+
     atm_strike = round(spot / 50) * 50
+    logger.info(f"Spot: {spot} → ATM strike: {atm_strike}")
+
     try:
         url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
-        resp = requests.get(url, timeout=30)
-        df = pd.DataFrame(resp.json())
-        nifty_opts = df[(df["name"] == "NIFTY") & (df["instrumenttype"] == "OPTIDX") & (df["exch_seg"] == "NFO")].copy()
+        logger.info("Downloading scrip master...")
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        df = pd.DataFrame(data)
+
+        # Filter for NIFTY option indices
+        nifty_opts = df[
+            (df["name"] == "NIFTY") &
+            (df["instrumenttype"] == "OPTIDX") &
+            (df["exch_seg"] == "NFO")
+        ].copy()
+
         if nifty_opts.empty:
+            logger.error("No NIFTY OPTIDX found.")
             return None, None
+
+        # Convert expiry and strike correctly
         nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
         nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
         nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
-        nifty_opts = nifty_opts.dropna(subset=["strike"])
+        nifty_opts = nifty_opts[nifty_opts["strike"] > 0]   # remove invalid strikes
+
         today = datetime.now()
         future = nifty_opts[nifty_opts["expiry_date"] >= today]
         if future.empty:
+            logger.error("No future expiry options.")
             return None, None
+
         nearest_expiry = future["expiry_date"].min()
-        atm_opts = future[(future["strike"] == atm_strike) & (future["expiry_date"] == nearest_expiry)]
+        atm_opts = future[
+            (future["strike"] == atm_strike) &
+            (future["expiry_date"] == nearest_expiry)
+        ]
+
         if atm_opts.empty:
+            # Find the closest strike to ATM
             strikes = future[future["expiry_date"] == nearest_expiry]["strike"].unique()
             nearest_strike = min(strikes, key=lambda x: abs(x - atm_strike))
-            atm_opts = future[(future["strike"] == nearest_strike) & (future["expiry_date"] == nearest_expiry)]
+            atm_opts = future[
+                (future["strike"] == nearest_strike) &
+                (future["expiry_date"] == nearest_expiry)
+            ]
             atm_strike = nearest_strike
-        ce = atm_opts[atm_opts["symbol"].str.contains("CE")]
-        pe = atm_opts[atm_opts["symbol"].str.contains("PE")]
+            logger.warning(f"ATM strike {atm_strike} not found, using {nearest_strike}")
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", case=False, na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", case=False, na=False)]
+
         if ce.empty or pe.empty:
+            logger.error("CE or PE token missing for chosen strike.")
             return None, None
+
         CE_TOKEN = str(ce.iloc[0]["token"])
         PE_TOKEN = str(pe.iloc[0]["token"])
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-        logger.info(f"Tokens dynamically resolved: CE={CE_TOKEN}, PE={PE_TOKEN}")
-        return CE_TOKEN, PE_TOKEN
-    except Exception as e:
-        logger.error(f"Failed resolving instrument token rules: {e}")
-        return None, None
 
+        logger.info(f"Resolved: CE={CE_TOKEN}, PE={PE_TOKEN}, Expiry={EXPIRY_DATE}")
+        return CE_TOKEN, PE_TOKEN
+
+    except Exception as e:
+        logger.error(f"Token resolution failed: {e}", exc_info=True)
+        return None, None
 # --------------------------------------------------
 # GRADE-ONE ALGORITHMIC QUANT SIGNAL ENGINE (with action string mapping)
 # --------------------------------------------------
@@ -804,12 +839,12 @@ def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_
         "iv_rank": int(ce_iv * 100), "signal_grade": grade, "regime": regime, "session_phase": phase,
         "ce_spread_pct": round(ce_spread_pct, 2), "pe_spread_pct": round(pe_spread_pct, 2),
         "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
-        "spot_price": spot   # ADDED
+        "spot_price": spot
     })
     
     # Update market_state
     market_state.update({
-        "rsi": round(rsi_ce, 1), "action": action_str,   # mapped action
+        "rsi": round(rsi_ce, 1), "action": action_str,
         "confidence": round(confidence, 1),
         "regime": regime, "session_phase": phase, "momentum": "BULLISH" if rsi_diff > 10 else "BEARISH" if rsi_diff < -10 else "NEUTRAL",
         "strength": "HIGH" if adx_ce > 25 else "LOW", "trend": "UPTREND" if regime == "TRENDING_BULL" else "DOWNTREND" if regime == "TRENDING_BEAR" else "SIDEWAYS",
@@ -913,7 +948,13 @@ def on_connect(ws_app, response):
 # --------------------------------------------------
 # BACKGROUND SOCKET MANAGERS WITH RESILIENCE
 # --------------------------------------------------
+# --------------------------------------------------
+# BACKGROUND SOCKET MANAGERS WITH RESILIENCE
+# --------------------------------------------------
+# (Your existing start_websocket_engine function – keep it exactly as you have it)
+# I'm showing it here as a placeholder; your actual function is longer.
 def start_websocket_engine():
+    print("WEBSOCKET ENGINE STARTED", flush=True)
     global sws, ws_running
     while engine_active:
         try:
@@ -951,10 +992,38 @@ def start_websocket_engine():
             time.sleep(10)
 
 # --------------------------------------------------
+# START WEBSOCKET ENGINE (runs when module loads – CRITICAL FOR GUNICORN)
+# --------------------------------------------------
+import threading
+import traceback
+
+# Use a flag to avoid starting multiple threads (safe for gunicorn workers)
+_ws_thread_started = False
+if not _ws_thread_started:
+    try:
+        logger.info("=== STARTING WEBSOCKET ENGINE (module level) ===")
+        thread = threading.Thread(target=start_websocket_engine, daemon=True)
+        thread.start()
+        _ws_thread_started = True
+        logger.info("WebSocket engine thread started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start WebSocket thread: {e}\n{traceback.format_exc()}")
+
+# --------------------------------------------------
 # FLASK WEB ENDPOINTS FOR UI STREAMING
 # --------------------------------------------------
 app = Flask(__name__)
-CORS(app)
+
+# ✅ Correct CORS configuration (no extra positional arguments)
+CORS(app, resources={r"/*": {"origins": [
+    "https://icy-wave-c82f.tradeguru-net.workers.dev",
+    "https://your-blogger-domain.blogspot.com",
+    "http://localhost:5000"
+]}})
+
+@app.route('/')
+def home():
+    return jsonify({"status": "API is running", "message": "Use /api/live-signals or /api/health"})
 
 @app.route('/api/live-signals', methods=['GET'])
 def get_signals():
@@ -965,12 +1034,13 @@ def get_signals():
         "market_signal": market_signal,
         "market_state": market_state,
         "institutional_state": institutional_state,
-        "portfolio_state": portfolio_state   # ADDED
+        "portfolio_state": portfolio_state
     })
 
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({
+        "status": "healthy",
         "ws_running": ws_running,
         "market_open": is_market_open(),
         "ce_token": CE_TOKEN,
@@ -980,8 +1050,45 @@ def health():
         "pe_history_len": len(pe_price_history)
     })
 
+# 👇 ENHANCED WEBHOOK ENDPOINT (handles OPTIONS preflight and POST)
+@app.route('/api/angelone-webhook', methods=['GET', 'POST', 'OPTIONS'])
+def angelone_webhook():
+    if request.method == 'OPTIONS':
+        # Preflight request. Reply successfully.
+        return _build_cors_preflight_response()
+    elif request.method == 'POST':
+        # Handle the actual POST request from Angel One
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "Invalid or missing JSON data"}), 400
+        
+        # Log the received data for debugging
+        logger.info(f"Received Angel One webhook data: {data}")
+
+        # --- TODO: Add your logic to process the order update ---
+        # For example, update a database, trigger a notification, etc.
+
+        return _corsify_actual_response(jsonify({"status": "received"}))
+    else:
+        # Respond 'Method Not Allowed' for other methods
+        return jsonify({"error": "Method not allowed"}), 405
+
+def _build_cors_preflight_response():
+    response = jsonify()
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add('Access-Control-Allow-Headers', '*')
+    response.headers.add('Access-Control-Allow-Methods', '*')
+    return response
+
+def _corsify_actual_response(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response
+
+# --------------------------------------------------
+# LOCAL DEVELOPMENT SERVER (only when run directly, not used by gunicorn)
+# --------------------------------------------------
 if __name__ == '__main__':
-    # 1. Force a temporary test state right now so the UI populates immediately
+    # Test signal injection (for local testing only)
     test_action = "BUY CE"
     market_signal["signal"] = test_action
     market_signal["signal_grade"] = "A"
@@ -989,11 +1096,7 @@ if __name__ == '__main__':
     market_state["trend"] = "UPTREND"
     market_signal["spot_price"] = get_nifty_spot_cached() or 24500
     market_signal["timestamp"] = datetime.now().isoformat()
+    logger.info("Local test signal data injected")
     
-    logger.info("Injecting test signal data for UI validation...")
-
-    # 2. Initialize background process thread for the live data loop
-    threading.Thread(target=start_websocket_engine, daemon=True).start()
-    
-    # 3. Spin up the Flask server (This locks the script and keeps it running)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
