@@ -1,3 +1,15 @@
+import sys
+import os
+
+# Manually insert the Render virtual environment path into Python's search memory
+sys.path.append(os.path.abspath("./.venv/lib/python3.11/site-packages"))
+
+# Now your standard imports will work flawlessly
+import datetime
+import time
+import pyotp
+from smartapi import SmartConnect
+import requests
 import datetime
 import time
 import os  
