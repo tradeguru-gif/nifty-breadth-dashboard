@@ -460,6 +460,7 @@ def on_ws_open(wsapp, open_message):
             logger.info("Streaming pipeline verified online. Multi-token subscription confirmed.")
         except Exception as e: 
             logger.error(f"Subscription initialization failure: {e}")
+
 def on_ws_error(wsapp, error): 
     logger.error(f"WebSocket Error: {error}")
 
@@ -521,6 +522,9 @@ def on_ws_data(wsapp, message):
 # ============================================================
 # SUPERVISOR BACKGROUND LIFECYCLE DAEMON (FIXED)
 # ============================================================
+# ============================================================
+# SUPERVISOR BACKGROUND LIFECYCLE DAEMON (FIXED)
+# ============================================================
 def start_angel_websocket():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, sws, ws_running
     
@@ -539,6 +543,8 @@ def start_angel_websocket():
                 time.sleep(10)
                 continue
             
+            logger.info(f"Auth OK. Token: {auth_token[:10]}... Feed: {feed_token[:10]}...")
+            
             if not CE_TOKEN or not PE_TOKEN:
                 logger.info("Option tokens not resolved yet. Executing token lookup sequence...")
                 get_current_atm_tokens()
@@ -549,6 +555,7 @@ def start_angel_websocket():
                 continue
             
             logger.info(f"Initializing SmartWebSocketV2 for ATM Strike {ATM_STRIKE}")
+            logger.info(f"Subscribing to: Spot={SPOT_TOKEN}, CE={CE_TOKEN}, PE={PE_TOKEN}")
             
             # CORRECT constructor: (auth_token, api_key, client_code, feed_token)
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
@@ -566,6 +573,8 @@ def start_angel_websocket():
             
         except Exception as e:
             logger.error(f"Critical error in supervisor daemon loop: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())  # Full stack trace for debugging
             ws_running = False
             sws = None
             time.sleep(10)
