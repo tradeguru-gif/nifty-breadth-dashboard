@@ -101,31 +101,32 @@ init_db()
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
+# Binary parse patch - handles Angel One's binary tick format
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
     try:
-        result = _original_parse(self, binary_data)
-    except:
+        result = _original_parse(self, binary_data) if _original_parse else {}
+    except Exception:
+        result = {}
+    if not isinstance(result, dict):
         result = {}
     try:
-        token_bytes = binary_data[2:26]
-        token_int = int.from_bytes(token_bytes, byteorder="little")
-        result["token"] = str(token_int)
-        ltp = int.from_bytes(binary_data[26:34], byteorder="little") / 100
-        result["ltp"] = ltp
-        volume = int.from_bytes(binary_data[34:42], byteorder="little")
-        result["v"] = volume
+        if len(binary_data) >= 42:
+            token_bytes = binary_data[2:26]
+            token_int = int.from_bytes(token_bytes, byteorder="little")
+            result["token"] = str(token_int)
+            ltp = int.from_bytes(binary_data[26:34], byteorder="little") / 100
+            result["ltp"] = ltp
+            volume = int.from_bytes(binary_data[34:42], byteorder="little")
+            result["v"] = volume
     except Exception as e:
         logging.getLogger(__name__).error(f"Binary parse error: {e}")
     return result
 
 SmartWebSocketV2._parse_binary_data = _patched_parse
 
-_original_on_close = SmartWebSocketV2._on_close
-def _patched_on_close(self, wsapp, *args):
-    try: _original_on_close(self, wsapp)
-    except: pass
-SmartWebSocketV2._on_close = _patched_on_close
+# _on_close patch removed - let SmartWebSocketV2 handle its own retry logic
+# The library manages reconnections internally; our custom patch was causing conflicts
 
 # ═══════════════════════════════════════════════════════════════
 # GLOBAL STATE
@@ -1944,9 +1945,9 @@ def reset_signal_state(current_time):
 # ═══════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
 # ═══════════════════════════════════════════════════════════════
-def on_ws_open(wsapp, open_message):
+def on_ws_open(wsapp):
     global sws
-    logger.info(f"WebSocket opened: {open_message}")
+    logger.info("WebSocket opened successfully")
     if sws and CE_TOKEN and PE_TOKEN:
         try:
             subscription_payload = [
@@ -1961,150 +1962,100 @@ def on_ws_open(wsapp, open_message):
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
 
-def on_ws_close(wsapp, code, msg):
+def on_ws_close(wsapp, close_status_code=None, close_msg=None):
     global ws_running
     ws_running = False
-    logger.warning(f"WebSocket closed: code={code}, msg={msg}")
+    logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")
 
+def on_ws_data(wsapp, message):
+    global tick_counter, last_tick_time, latest_ticks
+    global spot_price_history, ce_price_history, pe_price_history
+    global last_timeframe_update, timeframe_candles, timeframe_history
+    global vix_history, banknifty_history
 
-# Read the current patched file
-with open('/mnt/agents/output/backend_patched_grade1_pro.py', 'r') as f:
-    code = f.read()
+    last_tick_time = time.time()
 
-# Fix 1: on_ws_open signature - SmartWebSocketV2 calls it with NO arguments
-old_open = '''def on_ws_open(wsapp, open_message):
-    global sws
-    logger.info(f"WebSocket opened: {open_message}")
-    if sws and CE_TOKEN and PE_TOKEN:
-        try:
-            subscription_payload = [
-                {"exchangeType": 1, "tokens": [SPOT_TOKEN, VIX_TOKEN, BANKNIFTY_TOKEN]},
-                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}
-            ]
-            sws.subscribe("tradeguru_001", 1, subscription_payload)
-            logger.info("Streaming pipeline verified. Multi-token subscription confirmed.")
-        except Exception as e:
-            logger.error(f"Subscription initialization failure: {e}")'''
-
-new_open = '''def on_ws_open(wsapp):
-    global sws
-    logger.info("WebSocket opened successfully")
-    if sws and CE_TOKEN and PE_TOKEN:
-        try:
-            subscription_payload = [
-                {"exchangeType": 1, "tokens": [SPOT_TOKEN, VIX_TOKEN, BANKNIFTY_TOKEN]},
-                {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]}
-            ]
-            sws.subscribe("tradeguru_001", 1, subscription_payload)
-            logger.info("Streaming pipeline verified. Multi-token subscription confirmed.")
-        except Exception as e:
-            logger.error(f"Subscription initialization failure: {e}")'''
-
-code = code.replace(old_open, new_open)
-print("✅ Fix 1: Fixed on_ws_open signature (removed open_message param)")
-
-# Fix 2: on_ws_close signature - SmartWebSocketV2 calls it with (wsapp, close_status, close_msg)
-# Your current code has: def on_ws_close(wsapp, code, msg) which is actually correct
-# But let's verify and also patch the SmartWebSocketV2._on_close patch to be safer
-
-# Check current on_ws_close
-old_close = '''def on_ws_close(wsapp, code, msg):
-    global ws_running
-    ws_running = False
-    logger.warning(f"WebSocket closed: code={code}, msg={msg}")'''
-
-new_close = '''def on_ws_close(wsapp, close_status_code=None, close_msg=None):
-    global ws_running
-    ws_running = False
-    logger.warning(f"WebSocket closed: code={close_status_code}, msg={close_msg}")'''
-
-code = code.replace(old_close, new_close)
-print("✅ Fix 2: Fixed on_ws_close signature (made params optional)")
-
-# Fix 3: on_ws_error signature - SmartWebSocketV2 calls it with (wsapp, error)
-# Your current: def on_ws_error(wsapp, error) - this is correct, keep it
-
-# Fix 4: on_ws_data signature - SmartWebSocketV2 calls it with (wsapp, message)
-# Your current: def on_ws_data(wsapp, message) - this is correct, keep it
-
-# Fix 5: The SmartWebSocketV2._on_close patch might be interfering
-# Let's remove the custom _on_close patch since it may conflict with the library's retry logic
-old_patch = '''_original_on_close = SmartWebSocketV2._on_close
-def _patched_on_close(self, wsapp, *args):
-    try: _original_on_close(self, wsapp)
-    except: pass
-SmartWebSocketV2._on_close = _patched_on_close'''
-
-new_patch = '''# _on_close patch removed - let SmartWebSocketV2 handle its own retry logic
-# The library manages reconnections internally; our custom patch was causing conflicts'''
-
-code = code.replace(old_patch, new_patch)
-print("✅ Fix 3: Removed conflicting _on_close patch")
-
-# Fix 6: Also remove the _parse_binary_data patch if it's causing issues
-# Actually let's keep it but make it safer
-old_parse = '''_original_parse = SmartWebSocketV2._parse_binary_data
-def _patched_parse(self, binary_data):
     try:
-        result = _original_parse(self, binary_data)
-    except:
-        result = {}
-    try:
-        token_bytes = binary_data[2:26]
-        token_int = int.from_bytes(token_bytes, byteorder="little")
-        result["token"] = str(token_int)
-        ltp = int.from_bytes(binary_data[26:34], byteorder="little") / 100
-        result["ltp"] = ltp
-        volume = int.from_bytes(binary_data[34:42], byteorder="little")
-        result["v"] = volume
+        if isinstance(message, bytes):
+            if sws is None:
+                return
+            try:
+                tick = sws._parse_binary_data(message)
+            except Exception as e:
+                logger.error(f"Binary parse error in callback: {e}")
+                return
+            if not tick:
+                return
+            ticks = [tick]
+        else:
+            data = json.loads(message) if isinstance(message, str) else message
+            ticks = data if isinstance(data, list) else [data]
+
+        for tick in ticks:
+            token = str(tick.get("token") or tick.get("tk", ""))
+            ltp = tick.get("ltp") or tick.get("last_traded_price", 0)
+
+            if isinstance(ltp, (int, float)) and ltp > 50000 and token != SPOT_TOKEN and token != VIX_TOKEN:
+                ltp = ltp / 100
+
+            vol = tick.get("v") or tick.get("volume_trade_for_the_day", 0)
+            oi = tick.get("oi") or tick.get("open_interest", 0)
+
+            if token == SPOT_TOKEN:
+                latest_ticks["spot_price"] = ltp
+                spot_price_history.append(ltp)
+                tick_counter += 1
+
+                current_time = time.time()
+                for tf, interval_sec in [
+                    ("1min", 60), ("2min", 120), ("3min", 180),
+                    ("5min", 300), ("10min", 600), ("15min", 900), ("20min", 1200)
+                ]:
+                    candle = timeframe_candles[tf]
+                    if current_time - last_timeframe_update[tf] >= interval_sec:
+                        if candle["active"]:
+                            timeframe_history[tf].append({
+                                "open": candle["open"], "high": candle["high"],
+                                "low": candle["low"], "close": candle["close"],
+                                "volume": candle["volume"], "timestamp": last_timeframe_update[tf]
+                            })
+                        candle.update({"open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": vol, "active": True})
+                        last_timeframe_update[tf] = current_time
+                    else:
+                        if not candle["active"]:
+                            candle.update({"open": ltp, "low": ltp, "active": True})
+                        candle["high"] = max(candle["high"], ltp)
+                        candle["low"] = min(candle["low"], ltp)
+                        candle["close"] = ltp
+                        candle["volume"] += vol
+
+            elif token == VIX_TOKEN:
+                latest_ticks["vix"] = ltp
+                vix_history.append(ltp)
+
+            elif token == BANKNIFTY_TOKEN:
+                latest_ticks["banknifty"] = ltp
+                banknifty_history.append(ltp)
+
+            elif token == CE_TOKEN:
+                latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
+                ce_price_history.append(ltp)
+                ce_volume_history.append(vol)
+                ce_oi_history.append(oi)
+                tick_counter += 1
+
+            elif token == PE_TOKEN:
+                latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
+                pe_price_history.append(ltp)
+                pe_volume_history.append(vol)
+                pe_oi_history.append(oi)
+                tick_counter += 1
+
+            if tick_counter % 3 == 0:
+                run_signal_engine()
+
     except Exception as e:
-        logging.getLogger(__name__).error(f"Binary parse error: {e}")
-    return result
-
-SmartWebSocketV2._parse_binary_data = _patched_parse'''
-
-new_parse = '''# Binary parse patch - handles Angel One's binary tick format
-_original_parse = SmartWebSocketV2._parse_binary_data
-def _patched_parse(self, binary_data):
-    try:
-        result = _original_parse(self, binary_data) if _original_parse else {}
-    except Exception:
-        result = {}
-    if not isinstance(result, dict):
-        result = {}
-    try:
-        if len(binary_data) >= 42:
-            token_bytes = binary_data[2:26]
-            token_int = int.from_bytes(token_bytes, byteorder="little")
-            result["token"] = str(token_int)
-            ltp = int.from_bytes(binary_data[26:34], byteorder="little") / 100
-            result["ltp"] = ltp
-            volume = int.from_bytes(binary_data[34:42], byteorder="little")
-            result["v"] = volume
-    except Exception as e:
-        logging.getLogger(__name__).error(f"Binary parse error: {e}")
-    return result
-
-SmartWebSocketV2._parse_binary_data = _patched_parse'''
-
-code = code.replace(old_parse, new_parse)
-print("✅ Fix 4: Hardened _parse_binary_data patch")
-
-# Save the fixed file
-output_path = '/mnt/agents/output/backend_patched_grade1_pro_v2.py'
-with open(output_path, 'w') as f:
-    f.write(code)
-
-print(f"\n✅ File saved: {output_path}")
-print(f"📊 Size: {len(code):,} chars | {len(code.splitlines()):,} lines")
-
-# Verify syntax
-import ast
-try:
-    ast.parse(code)
-    print("✅ Syntax check PASSED")
-except SyntaxError as e:
-    print(f"❌ Syntax error: {e}")
+        logger.error(f"Callback data parser exception: {e}")
 
 def start_angel_websocket():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, sws, ws_running
