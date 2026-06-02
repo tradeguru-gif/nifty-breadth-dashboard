@@ -2036,8 +2036,8 @@ def on_ws_data(wsapp, message):
                 except: oi = 0
 
             # Log first few ticks for debugging
-            if tick_counter < 10 and token:
-                logger.info(f"TICK DEBUG: token={token} ltp={ltp} vol={vol} oi={oi} | CE={CE_TOKEN} PE={PE_TOKEN} SPOT={SPOT_TOKEN}")
+            if tick_counter < 20 and token:
+                logger.info(f"TICK DEBUG: token={token} ltp={ltp} vol={vol} oi={oi} | CE={CE_TOKEN} PE={PE_TOKEN} SPOT={SPOT_TOKEN} | match={token in [CE_TOKEN, PE_TOKEN, SPOT_TOKEN, VIX_TOKEN, BANKNIFTY_TOKEN]}")
 
             if token == SPOT_TOKEN:
                 if ltp > 0:
@@ -2191,9 +2191,13 @@ def start_rest_api_poller():
                 # Fetch spot
                 spot = get_nifty_spot()
                 if spot and spot > 0:
-                    spot_price_history.append(spot)
-                    latest_ticks["spot_price"] = spot
-                    logger.info(f"REST POLLER: Spot fetched: {spot}")
+                    # Sanity check: Nifty spot should be 15000-30000
+                    if 15000 < spot < 30000:
+                        spot_price_history.append(spot)
+                        latest_ticks["spot_price"] = spot
+                        logger.info(f"REST POLLER: Spot fetched: {spot}")
+                    else:
+                        logger.warning(f"REST POLLER: Spot price {spot} out of range, ignoring")
 
                 # Fetch VIX
                 vix = get_vix_value()
@@ -2215,10 +2219,14 @@ def start_rest_api_poller():
                             ce_resp = obj.ltpData("NFO", CE_SYMBOL if CE_SYMBOL else f"NIFTY{ATM_STRIKE}CE", CE_TOKEN)
                             if ce_resp.get("status") and ce_resp.get("data"):
                                 ce_ltp = float(ce_resp["data"].get("ltp", 0))
-                                if ce_ltp > 0:
+                                # Angel One sends option prices in rupees (not paise)
+                                # But if value seems like spot price, something is wrong
+                                if ce_ltp > 0 and ce_ltp < 10000:  # Sanity check: option premium should be < 10k
                                     ce_price_history.append(ce_ltp)
                                     latest_ticks["ce_price"] = ce_ltp
                                     logger.info(f"REST POLLER: CE fetched: {ce_ltp}")
+                                elif ce_ltp > 0:
+                                    logger.warning(f"REST POLLER: CE price {ce_ltp} seems like spot price, not option premium. Token/Symbol mismatch?")
                         except Exception as e:
                             logger.debug(f"REST CE fetch error: {e}")
 
@@ -2226,10 +2234,12 @@ def start_rest_api_poller():
                             pe_resp = obj.ltpData("NFO", PE_SYMBOL if PE_SYMBOL else f"NIFTY{ATM_STRIKE}PE", PE_TOKEN)
                             if pe_resp.get("status") and pe_resp.get("data"):
                                 pe_ltp = float(pe_resp["data"].get("ltp", 0))
-                                if pe_ltp > 0:
+                                if pe_ltp > 0 and pe_ltp < 10000:
                                     pe_price_history.append(pe_ltp)
                                     latest_ticks["pe_price"] = pe_ltp
                                     logger.info(f"REST POLLER: PE fetched: {pe_ltp}")
+                                elif pe_ltp > 0:
+                                    logger.warning(f"REST POLLER: PE price {pe_ltp} seems like spot price. Token/Symbol mismatch?")
                         except Exception as e:
                             logger.debug(f"REST PE fetch error: {e}")
 
