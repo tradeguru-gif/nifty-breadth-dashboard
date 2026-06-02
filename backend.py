@@ -522,15 +522,17 @@ def check_premium_safety(premium, side):
     if premium > max_prem:
         return False, f"Premium {premium} > max {max_prem}"
 
-    # Check volume
+    # Check volume - skip if data comes from REST (no volume in REST response)
     vol = latest_ticks.get("ce_volume" if side == "CE" else "pe_volume", 0)
-    if vol < CONFIG.get("MIN_VOLUME_FOR_TRADE", 100):
+    if vol > 0 and vol < CONFIG.get("MIN_VOLUME_FOR_TRADE", 100):
         return False, f"Volume {vol} < min {CONFIG.get('MIN_VOLUME_FOR_TRADE', 100)}"
+    # If vol is 0, it means data came from REST API which doesn't provide volume - allow it
 
-    # Check OI
+    # Check OI - skip if data comes from REST (no OI in REST response)
     oi = latest_ticks.get("ce_oi" if side == "CE" else "pe_oi", 0)
-    if oi < CONFIG.get("MIN_OI_FOR_TRADE", 500):
+    if oi > 0 and oi < CONFIG.get("MIN_OI_FOR_TRADE", 500):
         return False, f"OI {oi} < min {CONFIG.get('MIN_OI_FOR_TRADE', 500)}"
+    # If oi is 0, it means data came from REST API - allow it
 
     return True, ""
 
@@ -866,16 +868,22 @@ def update_greeks_approx():
 
 def check_greeks_filter():
     iv = greeks_state["iv"]
-    if iv > CONFIG["MAX_GREEKS_IV"]:
-        log_signal_debug(f"GREEKS FILTER: IV too high ({iv:.2%} > {CONFIG['MAX_GREEKS_IV']:.2%})")
-        return False, "IV_TOO_HIGH"
-    if iv < CONFIG["MIN_GREEKS_IV"]:
-        log_signal_debug(f"GREEKS FILTER: IV too low ({iv:.2%} < {CONFIG['MIN_GREEKS_IV']:.2%})")
-        return False, "IV_TOO_LOW"
-    if abs(greeks_state["theta"]) > CONFIG["THETA_DECAY_THRESHOLD"]:
-        log_signal_debug(f"GREEKS FILTER: Theta decay too high ({abs(greeks_state['theta']):.2f})")
-        return False, "THETA_TOO_HIGH"
+    # TEMPORARY: Disable IV filter since data source is unreliable
+    # The IV calculation depends on accurate CE+PE prices which we don't have consistently
+    log_signal_debug(f"GREEKS FILTER: IV={iv:.2%} (filter temporarily disabled for data reliability)")
     return True, "PASS"
+
+    # Original code (re-enable when data is stable):
+    # if iv > CONFIG["MAX_GREEKS_IV"]:
+    #     log_signal_debug(f"GREEKS FILTER: IV too high ({iv:.2%} > {CONFIG['MAX_GREEKS_IV']:.2%})")
+    #     return False, "IV_TOO_HIGH"
+    # if iv < CONFIG["MIN_GREEKS_IV"]:
+    #     log_signal_debug(f"GREEKS FILTER: IV too low ({iv:.2%} < {CONFIG['MIN_GREEKS_IV']:.2%})")
+    #     return False, "IV_TOO_LOW"
+    # if abs(greeks_state["theta"]) > CONFIG["THETA_DECAY_THRESHOLD"]:
+    #     log_signal_debug(f"GREEKS FILTER: Theta decay too high ({abs(greeks_state['theta']):.2f})")
+    #     return False, "THETA_TOO_HIGH"
+    # return True, "PASS"
 
 # ═══════════════════════════════════════════════════════════════
 # VIX ANALYSIS
@@ -1197,37 +1205,66 @@ def get_nifty_pcr():
     return pcr_cache["value"]
 
 def get_current_atm_tokens():
-    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
+    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE, CE_SYMBOL, PE_SYMBOL
     spot = get_nifty_spot()
     if not spot: return None, None
     atm_strike = round(spot / 50) * 50
+
+    # Try method 1: Scrip Master JSON
     try:
         url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
         resp = requests.get(url, timeout=15)
         df = pd.DataFrame(resp.json())
         nifty_opts = df[(df["name"] == "NIFTY") & (df["instrumenttype"] == "OPTIDX") & (df["exch_seg"] == "NFO")].copy()
-        if nifty_opts.empty: return None, None
-        nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
-        nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
-        nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
-        today = datetime.now()
-        future = nifty_opts[nifty_opts["expiry_date"] >= today]
-        nearest_expiry = future["expiry_date"].min()
-        atm_opts = future[(future["strike"] == atm_strike) & (future["expiry_date"] == nearest_expiry)]
-        ce = atm_opts[atm_opts["symbol"].str.contains("CE")]
-        pe = atm_opts[atm_opts["symbol"].str.contains("PE")]
-        if ce.empty or pe.empty: return None, None
-        CE_TOKEN = str(ce.iloc[0]["token"])
-        PE_TOKEN = str(pe.iloc[0]["token"])
-        CE_SYMBOL = str(ce.iloc[0]["symbol"])
-        PE_SYMBOL = str(pe.iloc[0]["symbol"])
-        ATM_STRIKE = atm_strike
-        EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-        logger.info(f"Scrip Resolved -> CE: {CE_TOKEN} ({CE_SYMBOL}) | PE: {PE_TOKEN} ({PE_SYMBOL}) | Strike: {ATM_STRIKE}")
-        return CE_TOKEN, PE_TOKEN
+        if not nifty_opts.empty:
+            nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
+            nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
+            nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
+            today = datetime.now()
+            future = nifty_opts[nifty_opts["expiry_date"] >= today]
+            nearest_expiry = future["expiry_date"].min()
+            atm_opts = future[(future["strike"] == atm_strike) & (future["expiry_date"] == nearest_expiry)]
+            ce = atm_opts[atm_opts["symbol"].str.contains("CE")]
+            pe = atm_opts[atm_opts["symbol"].str.contains("PE")]
+            if not ce.empty and not pe.empty:
+                CE_TOKEN = str(ce.iloc[0]["token"])
+                PE_TOKEN = str(pe.iloc[0]["token"])
+                CE_SYMBOL = str(ce.iloc[0]["symbol"])
+                PE_SYMBOL = str(pe.iloc[0]["symbol"])
+                ATM_STRIKE = atm_strike
+                EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
+                logger.info(f"Scrip Resolved -> CE: {CE_TOKEN} ({CE_SYMBOL}) | PE: {PE_TOKEN} ({PE_SYMBOL}) | Strike: {ATM_STRIKE}")
+                return CE_TOKEN, PE_TOKEN
     except Exception as e:
-        logger.error(f"Error building Option Chain: {e}")
-        return None, None
+        logger.error(f"Scrip Master lookup failed: {e}")
+
+    # Try method 2: Use SmartApi search (more reliable)
+    try:
+        _, _, obj = get_auth_token()
+        if obj:
+            # Search for Nifty CE option
+            ce_search = obj.searchScrip("NFO", f"NIFTY{atm_strike}CE")
+            if ce_search and ce_search.get("data"):
+                ce_data = ce_search["data"][0] if isinstance(ce_search["data"], list) else ce_search["data"]
+                CE_TOKEN = str(ce_data.get("symboltoken", ""))
+                CE_SYMBOL = str(ce_data.get("tradingsymbol", f"NIFTY{atm_strike}CE"))
+
+            # Search for Nifty PE option  
+            pe_search = obj.searchScrip("NFO", f"NIFTY{atm_strike}PE")
+            if pe_search and pe_search.get("data"):
+                pe_data = pe_search["data"][0] if isinstance(pe_search["data"], list) else pe_search["data"]
+                PE_TOKEN = str(pe_data.get("symboltoken", ""))
+                PE_SYMBOL = str(pe_data.get("tradingsymbol", f"NIFTY{atm_strike}PE"))
+
+            if CE_TOKEN and PE_TOKEN:
+                ATM_STRIKE = atm_strike
+                logger.info(f"Search Resolved -> CE: {CE_TOKEN} ({CE_SYMBOL}) | PE: {PE_TOKEN} ({PE_SYMBOL}) | Strike: {ATM_STRIKE}")
+                return CE_TOKEN, PE_TOKEN
+    except Exception as e:
+        logger.error(f"Search lookup failed: {e}")
+
+    logger.error("All token resolution methods failed")
+    return None, None
 
 # ═══════════════════════════════════════════════════════════════
 # RISK MANAGER
@@ -2087,30 +2124,32 @@ def on_ws_data(wsapp, message):
                     banknifty_history.append(ltp)
 
             elif token == CE_TOKEN:
-                if ltp > 0:
-                    spot = latest_ticks.get("spot_price", 0)
-                    # VALIDATION: CE premium should NEVER be > 80% of spot
-                    if spot > 0 and ltp > spot * 0.8:
-                        logger.warning(f"TOKEN ERROR: CE token {CE_TOKEN} returned {ltp} which is >80% of spot {spot}. This is NOT an option. Skipping.")
-                    else:
-                        latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
-                        ce_price_history.append(ltp)
-                        ce_volume_history.append(vol)
-                        ce_oi_history.append(oi)
-                        tick_counter += 1
+                # DISABLED: WebSocket CE token is wrong, use REST API only
+                # if ltp > 0:
+                #     spot = latest_ticks.get("spot_price", 0)
+                #     if spot > 0 and ltp > spot * 0.8:
+                #         logger.warning(f"TOKEN ERROR: CE token {CE_TOKEN} returned {ltp} which is >80% of spot {spot}. Skipping.")
+                #     else:
+                #         latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
+                #         ce_price_history.append(ltp)
+                #         ce_volume_history.append(vol)
+                #         ce_oi_history.append(oi)
+                #         tick_counter += 1
+                pass
 
             elif token == PE_TOKEN:
-                if ltp > 0:
-                    spot = latest_ticks.get("spot_price", 0)
-                    # VALIDATION: PE premium should NEVER be > 80% of spot
-                    if spot > 0 and ltp > spot * 0.8:
-                        logger.warning(f"TOKEN ERROR: PE token {PE_TOKEN} returned {ltp} which is >80% of spot {spot}. This is NOT an option. Skipping.")
-                    else:
-                        latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
-                        pe_price_history.append(ltp)
-                        pe_volume_history.append(vol)
-                        pe_oi_history.append(oi)
-                        tick_counter += 1
+                # DISABLED: WebSocket PE token is wrong, use REST API only
+                # if ltp > 0:
+                #     spot = latest_ticks.get("spot_price", 0)
+                #     if spot > 0 and ltp > spot * 0.8:
+                #         logger.warning(f"TOKEN ERROR: PE token {PE_TOKEN} returned {ltp} which is >80% of spot {spot}. Skipping.")
+                #     else:
+                #         latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
+                #         pe_price_history.append(ltp)
+                #         pe_volume_history.append(vol)
+                #         pe_oi_history.append(oi)
+                #         tick_counter += 1
+                pass
 
             if tick_counter % 3 == 0:
                 run_signal_engine()
@@ -2209,6 +2248,11 @@ def start_rest_api_poller():
                 # Fetch spot
                 spot = get_nifty_spot()
                 if spot and spot > 0:
+                    # Validate spot price
+                    if not (15000 < spot < 30000):
+                        logger.warning(f"REST POLLER: Spot price {spot} out of valid range, skipping cycle")
+                        time.sleep(10)
+                        continue
                     # Fix 100x scaling issue
                     if spot > 100000:
                         spot = spot / 100
@@ -2247,9 +2291,13 @@ def start_rest_api_poller():
                                     ce_ltp = ce_ltp / 100
                                 # Sanity check
                                 if ce_ltp > 0 and ce_ltp < 10000:
-                                    ce_price_history.append(ce_ltp)
-                                    latest_ticks["ce_price"] = ce_ltp
-                                    logger.info(f"REST POLLER: CE fetched: {ce_ltp}")
+                                    # Validate it looks like an option premium
+                                    if is_valid_option_premium(ce_ltp, spot, "CE"):
+                                        ce_price_history.append(ce_ltp)
+                                        latest_ticks["ce_price"] = ce_ltp
+                                        logger.info(f"REST POLLER: CE fetched: {ce_ltp}")
+                                    else:
+                                        logger.warning(f"REST POLLER: CE price {ce_ltp} doesn't look like option premium (spot={spot}). Skipping.")
                                 else:
                                     logger.warning(f"REST POLLER: CE price {ce_ltp} invalid. Trying symbol fallback...")
                                     # Fallback: try without token, just symbol
@@ -2259,9 +2307,12 @@ def start_rest_api_poller():
                                         ce_ltp2 = float(ce_resp2["data"].get("ltp", 0))
                                         if ce_ltp2 > 100000: ce_ltp2 = ce_ltp2 / 100
                                         if ce_ltp2 > 0 and ce_ltp2 < 10000:
-                                            ce_price_history.append(ce_ltp2)
-                                            latest_ticks["ce_price"] = ce_ltp2
-                                            logger.info(f"REST POLLER: CE fetched via symbol: {ce_ltp2}")
+                                            if is_valid_option_premium(ce_ltp2, spot, "CE"):
+                                                ce_price_history.append(ce_ltp2)
+                                                latest_ticks["ce_price"] = ce_ltp2
+                                                logger.info(f"REST POLLER: CE fetched via symbol: {ce_ltp2}")
+                                            else:
+                                                logger.warning(f"REST POLLER: CE symbol fallback price {ce_ltp2} invalid. Spot={spot}")
                             else:
                                 logger.warning(f"REST POLLER: CE fetch failed: {ce_resp.get('message', 'unknown')}")
                         except Exception as e:
@@ -2275,9 +2326,12 @@ def start_rest_api_poller():
                                 if pe_ltp > 100000:
                                     pe_ltp = pe_ltp / 100
                                 if pe_ltp > 0 and pe_ltp < 10000:
-                                    pe_price_history.append(pe_ltp)
-                                    latest_ticks["pe_price"] = pe_ltp
-                                    logger.info(f"REST POLLER: PE fetched: {pe_ltp}")
+                                    if is_valid_option_premium(pe_ltp, spot, "PE"):
+                                        pe_price_history.append(pe_ltp)
+                                        latest_ticks["pe_price"] = pe_ltp
+                                        logger.info(f"REST POLLER: PE fetched: {pe_ltp}")
+                                    else:
+                                        logger.warning(f"REST POLLER: PE price {pe_ltp} doesn't look like option premium (spot={spot}). Skipping.")
                                 else:
                                     logger.warning(f"REST POLLER: PE price {pe_ltp} invalid. Trying symbol fallback...")
                                     pe_sym = PE_SYMBOL if PE_SYMBOL else f"NIFTY{ATM_STRIKE}PE"
@@ -2286,9 +2340,12 @@ def start_rest_api_poller():
                                         pe_ltp2 = float(pe_resp2["data"].get("ltp", 0))
                                         if pe_ltp2 > 100000: pe_ltp2 = pe_ltp2 / 100
                                         if pe_ltp2 > 0 and pe_ltp2 < 10000:
-                                            pe_price_history.append(pe_ltp2)
-                                            latest_ticks["pe_price"] = pe_ltp2
-                                            logger.info(f"REST POLLER: PE fetched via symbol: {pe_ltp2}")
+                                            if is_valid_option_premium(pe_ltp2, spot, "PE"):
+                                                pe_price_history.append(pe_ltp2)
+                                                latest_ticks["pe_price"] = pe_ltp2
+                                                logger.info(f"REST POLLER: PE fetched via symbol: {pe_ltp2}")
+                                            else:
+                                                logger.warning(f"REST POLLER: PE symbol fallback price {pe_ltp2} invalid. Spot={spot}")
                             else:
                                 logger.warning(f"REST POLLER: PE fetch failed: {pe_resp.get('message', 'unknown')}")
                         except Exception as e:
