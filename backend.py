@@ -1,4 +1,4 @@
-# === VERSION 9 - MULTI-INDEX SENTIMENT ENGINE (PRESERVES ORIGINAL SOCKET LOGIC) ===
+# === VERSION 9.1 - STABLE MULTI-INDEX BOT (NIFTY/BANKNIFTY/FINNIFTY ONLY) ===
 import sys
 import logging
 import os
@@ -16,12 +16,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-# -------------------------------
-#  INITIAL LOGGING
-# -------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.info(f"Python version: {sys.version}")
 
 for pkg in ['numpy', 'pandas', 'flask', 'requests']:
     try:
@@ -34,7 +30,6 @@ app = Flask(__name__)
 CORS(app)
 application = app
 
-# ML imports (optional)
 try:
     from sklearn.ensemble import RandomForestClassifier
     SKLEARN_AVAILABLE = True
@@ -47,9 +42,6 @@ try:
 except ImportError:
     TELEGRAM_AVAILABLE = False
 
-# -------------------------------
-#  ENVIRONMENT VARIABLES
-# -------------------------------
 ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
 ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
 ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
@@ -62,9 +54,6 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 
 DB_PATH = "trading_data.db"
 
-# -------------------------------
-#  DATABASE INIT (unchanged)
-# -------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -82,15 +71,11 @@ def init_db():
 
 init_db()
 
-# -------------------------------
-#  ANGEL ONE API SETUP (ORIGINAL)
-# -------------------------------
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
-# -------------------------------
-#  MULTI-INDEX CONFIGURATION
-# -------------------------------
+# ================== INDEX CONFIGURATION ==================
+# Only indices that resolved successfully are active
 INDEX_CONFIG = {
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
@@ -110,16 +95,16 @@ INDEX_CONFIG = {
         "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
         "option_exchange": "NFO"
     },
+    # MIDCPNIFTY and SENSEX are disabled until symbol format is confirmed
     "MIDCPNIFTY": {
         "token": "99926031", "exchange": "NSE", "symbol": "MIDCPNIFTY",
-        "lot_size": 75, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,   # changed from 25
+        "lot_size": 75, "expiry_weekday": 4, "active": False,
+        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
         "option_exchange": "NFO"
     },
     "SENSEX": {
-        "token": None,   # resolved dynamically
-        "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": True,
+        "token": None, "exchange": "BSE", "symbol": "SENSEX",
+        "lot_size": 15, "expiry_weekday": 4, "active": False,
         "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
         "option_exchange": "BFO"
     }
@@ -127,12 +112,8 @@ INDEX_CONFIG = {
 
 ACTIVE_INDEX = "NIFTY"
 
-# -------------------------------
-#  GLOBAL STATE (PER INDEX)
-# -------------------------------
+# Global state (per active index)
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_CONFIG}
-
-# Price histories
 price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
@@ -142,11 +123,10 @@ ce_oi_histories = {idx: deque(maxlen=200) for idx in INDEX_CONFIG}
 pe_oi_histories = {idx: deque(maxlen=200) for idx in INDEX_CONFIG}
 
 vix_history = deque(maxlen=200)
-banknifty_history = deque(maxlen=1000)   # kept for correlation
+banknifty_history = deque(maxlen=1000)
 
 latest_ticks = {idx: {"spot_price": 0.0, "ce_price": 0.0, "pe_price": 0.0,
-                      "ce_volume": 0, "pe_volume": 0, "ce_oi": 0, "pe_oi": 0}
-                for idx in INDEX_CONFIG}
+                      "ce_volume": 0, "pe_volume": 0, "ce_oi": 0, "pe_oi": 0} for idx in INDEX_CONFIG}
 latest_ticks["VIX"] = {"vix": 15.0}
 
 tick_counter = 0
@@ -154,9 +134,7 @@ ws_running = False
 sws = None
 last_tick_time = time.time()
 
-# -------------------------------
-#  SENTIMENT ENGINE CONFIG
-# -------------------------------
+# ================== SENTIMENT ENGINE ==================
 TIMEFRAMES = ["1min", "5min", "15min"]
 TIMEFRAME_WEIGHTS = {"1min": 30, "5min": 40, "15min": 30}
 EMA_SHORT, EMA_MEDIUM, EMA_LONG = 9, 21, 50
@@ -172,7 +150,7 @@ SENTIMENT_SCORES = {
 }
 
 market_sentiment = {idx: {"score": 50, "label": "NEUTRAL", "trend_1m": "NEUTRAL", "trend_5m": "NEUTRAL", "trend_15m": "NEUTRAL"} for idx in INDEX_CONFIG}
-signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "confidence": 0} for idx in INDEX_CONFIG}
+signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "confidence": 0, "entry_time": 0, "highest": 0} for idx in INDEX_CONFIG}
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_trades": 0} for idx in INDEX_CONFIG}
 market_signal = {idx: {"signal": "WAITING", "sentiment_score": 50, "alert_message": ""} for idx in INDEX_CONFIG}
 safety_state = {idx: {"consecutive_sl": 0, "circuit_breaker": False} for idx in INDEX_CONFIG}
@@ -180,9 +158,6 @@ signal_buffer = {idx: {"ce_count": 0, "pe_count": 0, "consecutive_ce": 0, "conse
 daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
 last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 
-# -------------------------------
-#  TECHNICAL INDICATORS (identical to original)
-# -------------------------------
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
     gains, losses = [], []
@@ -243,24 +218,6 @@ def calculate_atr(prices, period=14):
     tr = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
     return sum(tr[-period:]) / period
 
-def calculate_adx(prices, period=14):
-    if len(prices) < period * 2 + 1: return 20.0
-    plus_dm, minus_dm, tr = [], [], []
-    for i in range(1, len(prices)):
-        up = prices[i] - prices[i-1]
-        down = prices[i-1] - prices[i]
-        plus_dm.append(max(up, 0) if up > down else 0)
-        minus_dm.append(max(down, 0) if down > up else 0)
-        tr.append(abs(prices[i] - prices[i-1]))
-    atr = sum(tr[-period:]) / period
-    plus_di = 100 * sum(plus_dm[-period:]) / period / atr if atr > 0 else 0
-    minus_di = 100 * sum(minus_dm[-period:]) / period / atr if atr > 0 else 0
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
-    return dx
-
-# -------------------------------
-#  TREND & SENTIMENT (Level 1 & 2)
-# -------------------------------
 def get_trend_score(prices, tf_name):
     if len(prices) < 60: return "NEUTRAL", 0
     w = TIMEFRAME_WEIGHTS[tf_name]
@@ -268,7 +225,6 @@ def get_trend_score(prices, tf_name):
     ema21 = calculate_ema(prices, EMA_MEDIUM)
     ema50 = calculate_ema(prices, EMA_LONG)
     price = prices[-1]
-
     if tf_name == "1min":
         if ema9 > ema21 and price > ema9: return "BULLISH", w
         if ema9 < ema21 and price < ema9: return "BEARISH", -w
@@ -279,7 +235,7 @@ def get_trend_score(prices, tf_name):
         if ema9 > ema21 and price > ema9: return "BULLISH", w - 10
         if ema9 < ema21 and price < ema9: return "BEARISH", -(w - 10)
         return "NEUTRAL", 0
-    else:  # 15min – HH/HL structure
+    else:
         if len(prices) >= 20:
             highs = [max(prices[-i-5:-i]) for i in range(0, 15, 5) if i+5 <= len(prices)]
             lows  = [min(prices[-i-5:-i]) for i in range(0, 15, 5) if i+5 <= len(prices)]
@@ -312,15 +268,12 @@ def compute_sentiment(index_name):
 def get_signal_from_sentiment(index_name, sentiment):
     for k, (low, high, label, action) in SENTIMENT_SCORES.items():
         if low <= sentiment <= high:
-            # Rule: reject LOW signals if 15m strongly opposite
             if "LOW" in action and market_sentiment[index_name]["trend_15m"] in ["BULLISH" if "PE" in action else "BEARISH"]:
                 return "NO_TRADE", label, sentiment
             return action, label, sentiment
     return "NO_TRADE", "UNKNOWN", sentiment
 
-# -------------------------------
-#  AUTH & TOKEN FUNCTIONS (ORIGINAL STYLE)
-# -------------------------------
+# ================== AUTH & TOKEN (with rate limit protection) ==================
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
 
@@ -337,47 +290,23 @@ def get_auth_token():
             auth_token = session["data"]["jwtToken"]
             feed_token = obj.getfeedToken()
             auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-            logger.info("Auth token refreshed successfully")
+            logger.info("Auth token refreshed")
             return auth_token, feed_token, obj
         except Exception as e:
-            logger.error(f"Auth loop fail: {e}")
+            logger.error(f"Auth fail: {e}")
             return None, None, None
 
 def get_index_spot(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config: return None
+    if not INDEX_CONFIG[index_name].get("active"):
+        return None
+    config = INDEX_CONFIG[index_name]
     _, _, obj = get_auth_token()
     if not obj: return None
-    # SENSEX special handling
-    if index_name == "SENSEX":
-        try:
-            resp = obj.searchScrip("BSE", "SENSEX")
-            if resp and resp.get("status") and resp.get("data"):
-                token = str(resp["data"][0].get("symboltoken"))
-                ltp_resp = obj.ltpData("BSE", "SENSEX", token)
-                if ltp_resp.get("status") and ltp_resp.get("data"):
-                    ltp = float(ltp_resp["data"]["ltp"])
-                    if ltp > 100000: ltp /= 100
-                    return ltp
-        except Exception as e:
-            logger.error(f"SENSEX spot error: {e}")
-        return None
-    # Normal indices
     try:
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
         if resp.get("status") and resp.get("data"):
             ltp = float(resp["data"]["ltp"])
             if ltp > 100000: ltp /= 100
-            # MIDCPNIFTY sanity
-            if index_name == "MIDCPNIFTY" and (ltp < 5000 or ltp > 25000):
-                # fallback via search
-                search = obj.searchScrip("NSE", "MIDCPNIFTY")
-                if search and search.get("status") and search.get("data"):
-                    token = str(search["data"][0].get("symboltoken"))
-                    ltp2 = obj.ltpData("NSE", "MIDCPNIFTY", token)
-                    if ltp2.get("status") and ltp2.get("data"):
-                        ltp = float(ltp2["data"]["ltp"])
-                        if ltp > 100000: ltp /= 100
             return ltp
     except Exception as e:
         logger.error(f"Spot fetch {index_name}: {e}")
@@ -394,7 +323,6 @@ def get_vix_value():
         pass
     return 15.0
 
-# Scrip Master cache (daily)
 _scrip_cache = {"data": None, "timestamp": 0}
 def get_scrip_master():
     now = time.time()
@@ -412,22 +340,21 @@ def get_scrip_master():
         return _scrip_cache["data"] or []
 
 def get_current_atm_tokens(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("active"): return None, None
+    if not INDEX_CONFIG[index_name].get("active"):
+        return None, None
+    config = INDEX_CONFIG[index_name]
     spot = get_index_spot(index_name)
     if not spot or spot <= 0:
         logger.warning(f"{index_name} spot unavailable")
         return None, None
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
-
-    # Expiry
     today = datetime.now()
     days = (config["expiry_weekday"] - today.weekday()) % 7
     if days == 0: days = 7
     expiry = (today + timedelta(days=days)).strftime("%d%b%Y").upper()
 
-    # Try scrip master first
+    # Try scrip master
     scrip = get_scrip_master()
     if scrip:
         df = pd.DataFrame(scrip)
@@ -443,7 +370,6 @@ def get_current_atm_tokens(index_name):
                 nearest = future["expiry_date"].min()
                 atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
                 if atm_opts.empty:
-                    # nearest strike
                     same_exp = future[future["expiry_date"] == nearest]
                     if not same_exp.empty:
                         idx = (same_exp["strike"] - atm).abs().idxmin()
@@ -460,16 +386,14 @@ def get_current_atm_tokens(index_name):
                     })
                     logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token}")
                     return ce_token, pe_token
-
-    # Fallback searchScrip
+    # Fallback search (only once per index, avoid rate limit)
     _, _, obj = get_auth_token()
     if obj:
-        ce_token = pe_token = None
         try:
             ce_resp = obj.searchScrip(config["option_exchange"], f"{config['symbol']}{atm}CE")
+            pe_resp = obj.searchScrip(config["option_exchange"], f"{config['symbol']}{atm}PE")
             if ce_resp and ce_resp.get("status") and ce_resp.get("data"):
                 ce_token = str(ce_resp["data"][0].get("symboltoken"))
-            pe_resp = obj.searchScrip(config["option_exchange"], f"{config['symbol']}{atm}PE")
             if pe_resp and pe_resp.get("status") and pe_resp.get("data"):
                 pe_token = str(pe_resp["data"][0].get("symboltoken"))
             if ce_token and pe_token:
@@ -488,9 +412,7 @@ def refresh_all_tokens():
         if INDEX_CONFIG[idx].get("active"):
             get_current_atm_tokens(idx)
 
-# -------------------------------
-#  POSITION SIZING & RISK (kept simple)
-# -------------------------------
+# ================== RISK & EXITS ==================
 def calculate_position_size(index_name, signal_strength, atr, vix):
     config = INDEX_CONFIG[index_name]
     base_risk = 1.0
@@ -514,7 +436,7 @@ def calculate_position_size(index_name, signal_strength, atr, vix):
 def reset_signal_state(index_name, current_time):
     signal_state[index_name].update({
         "action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0,
-        "lots": 1, "cooldown": current_time + 60, "confidence": 0
+        "lots": 1, "cooldown": current_time + 60, "confidence": 0, "entry_time": 0, "highest": 0
     })
     portfolio_state[index_name]["open_positions"] = 0
 
@@ -526,21 +448,18 @@ def send_telegram_alert(msg):
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
-# -------------------------------
-#  MAIN SIGNAL ENGINE (per index)
-# -------------------------------
+# ================== SIGNAL ENGINE (per index) ==================
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"): return
     prices = list(price_histories[index_name])
     if len(prices) < 30:
-        market_signal[index_name]["alert_message"] = f"Collecting data ({len(prices)}/30)"
+        market_signal[index_name]["alert_message"] = f"Collecting ({len(prices)}/30)"
         return
     now = time.time()
     spot = prices[-1]
     sentiment = compute_sentiment(index_name)
     action, label, conf = get_signal_from_sentiment(index_name, sentiment)
 
-    # Technicals for exits
     rsi = calculate_rsi(prices)
     _, _, macd_hist = calculate_macd(prices)
     atr = calculate_atr(prices)
@@ -552,13 +471,11 @@ def run_signal_engine_for_index(index_name):
         prem = latest_ticks[index_name]["ce_price"] if "CE" in active else latest_ticks[index_name]["pe_price"]
         if prem > 0:
             pnl = prem - signal_state[index_name]["entry_price"]
-            # Trailing stop
             if prem > signal_state[index_name].get("highest", 0):
                 signal_state[index_name]["highest"] = prem
                 new_sl = prem - (atr * 1.8)
                 if new_sl > signal_state[index_name]["stop_loss"]:
                     signal_state[index_name]["stop_loss"] = new_sl
-            # Stop loss
             if prem <= signal_state[index_name]["stop_loss"]:
                 pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                 portfolio_state[index_name]["equity"] += pnl_total
@@ -566,7 +483,6 @@ def run_signal_engine_for_index(index_name):
                 send_telegram_alert(f"⚠️ EXIT {index_name} | SL | PnL: {pnl:.2f} pts")
                 reset_signal_state(index_name, now)
                 return
-            # Target
             if prem >= signal_state[index_name]["target"]:
                 pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                 portfolio_state[index_name]["equity"] += pnl_total
@@ -574,7 +490,6 @@ def run_signal_engine_for_index(index_name):
                 send_telegram_alert(f"🎯 TARGET {index_name} | PnL: {pnl:.2f} pts")
                 reset_signal_state(index_name, now)
                 return
-            # Max hold time (45 min)
             if (now - signal_state[index_name]["entry_time"]) / 60 >= 45:
                 pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                 portfolio_state[index_name]["equity"] += pnl_total
@@ -582,29 +497,24 @@ def run_signal_engine_for_index(index_name):
                 send_telegram_alert(f"⏰ TIME EXIT {index_name} | PnL: {pnl:.2f} pts")
                 reset_signal_state(index_name, now)
                 return
-        # Update market display
         market_signal[index_name]["alert_message"] = f"ACTIVE {active} {index_name}"
         market_signal[index_name]["signal"] = "ACTIVE"
     else:
-        # --- ENTRY CHECKS ---
         if now < signal_state[index_name]["cooldown"]:
             market_signal[index_name]["alert_message"] = f"Cooldown {int(signal_state[index_name]['cooldown']-now)}s"
             return
-        # Daily trade limit
         today = datetime.now().strftime("%Y-%m-%d")
         if last_trade_date[index_name] != today:
             daily_trade_count[index_name] = 0
             last_trade_date[index_name] = today
         if daily_trade_count[index_name] >= 10:
-            market_signal[index_name]["alert_message"] = "Max daily trades reached"
+            market_signal[index_name]["alert_message"] = "Max daily trades"
             return
-        # Premium safety
         prem = latest_ticks[index_name]["ce_price"] if "CE" in action else latest_ticks[index_name]["pe_price"] if "PE" in action else 0
         min_prem = INDEX_CONFIG[index_name].get("min_premium", 10)
         if prem <= 0 or prem < min_prem:
             market_signal[index_name]["alert_message"] = f"Premium invalid ₹{prem}"
             return
-        # Signal building ticks (2 ticks)
         buf = signal_buffer[index_name]
         if "CE" in action:
             buf["ce_count"] += 1
@@ -621,7 +531,6 @@ def run_signal_engine_for_index(index_name):
         else:
             buf["ce_count"] = buf["pe_count"] = 0
 
-        # Enter trade
         lots, risk = calculate_position_size(index_name, action, atr, vix)
         sl = prem - (atr * 1.5) if "CE" in action else prem - (atr * 1.5)
         target = prem + (atr * 3.5) if "CE" in action else prem + (atr * 3.5)
@@ -640,13 +549,11 @@ def run_signal_engine_for_index(index_name):
             buf["consecutive_pe"] += 1
             buf["consecutive_ce"] = 0
         daily_trade_count[index_name] += 1
-        # Telegram alert
         emoji = "🟢" if "STRONG" in action and "CE" in action else "🔴" if "STRONG" in action and "PE" in action else "🟡" if "LOW" in action else "⚪"
         msg = f"{emoji} {action} {index_name}\nSpot: {spot:.2f} | Prem: ₹{prem:.2f}\nSL: {sl:.2f} Tgt: {target:.2f}\nSentiment: {sentiment:.1f} ({label})\nLots: {lots}"
         send_telegram_alert(msg)
         logger.info(f"ENTRY {index_name} {action}")
 
-    # Update global market_signal
     market_signal[index_name].update({
         "spot_price": spot, "ce_price": latest_ticks[index_name]["ce_price"], "pe_price": latest_ticks[index_name]["pe_price"],
         "sentiment_score": sentiment, "sentiment": label, "signal": signal_state[index_name]["action"],
@@ -660,13 +567,10 @@ def run_all_signals():
         if INDEX_CONFIG[idx].get("active"):
             run_signal_engine_for_index(idx)
 
-# -------------------------------
-#  ORIGINAL WEBSOCKET HANDLERS (PRESERVED)
-# -------------------------------
+# ================== WEBSOCKET (ORIGINAL STYLE) ==================
 def on_ws_open(wsapp):
     global sws
     logger.info("WebSocket opened")
-    # Build subscription list for all active indices and their option tokens
     tokens = []
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
@@ -675,14 +579,14 @@ def on_ws_open(wsapp):
                 tokens.append(INDEX_TOKENS[idx]["ce_token"])
             if INDEX_TOKENS[idx].get("pe_token"):
                 tokens.append(INDEX_TOKENS[idx]["pe_token"])
-    tokens.append("99919017")  # VIX
+    tokens.append("99919017")
     tokens = list(set([t for t in tokens if t]))
     if sws and tokens:
         try:
             sws.subscribe("tradeguru_001", 1, [{"exchangeType": 1, "tokens": tokens}])
             logger.info(f"Subscribed to {len(tokens)} tokens")
         except Exception as e:
-            logger.error(f"Subscription failed: {e}")
+            logger.error(f"Subscribe failed: {e}")
 
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
@@ -722,7 +626,6 @@ def on_ws_data(wsapp, message):
             vol = tick.get("v") or tick.get("volume") or 0
             oi = tick.get("oi") or tick.get("open_interest") or 0
 
-            # Match token to index
             idx = None
             for i, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
@@ -784,34 +687,30 @@ def start_angel_websocket():
             sws = None
             time.sleep(10)
 
-# -------------------------------
-#  ORIGINAL REST API POLLER (PRESERVED & EXTENDED)
-# -------------------------------
+# ================== REST API POLLER (BACKUP) ==================
 def is_market_open():
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     return now_ist.weekday() < 5 and dt_time(9,15) <= now_ist.time() <= dt_time(15,30)
 
 def start_rest_api_poller():
-    """Backup REST poller - fetches spot, VIX, and option prices for all indices"""
     logger.info("REST API poller started (backup data source)")
     while True:
         try:
             if not is_market_open():
                 time.sleep(30)
                 continue
-            # Fetch spot for all indices
             for idx in INDEX_CONFIG:
+                if not INDEX_CONFIG[idx].get("active"): continue
                 spot = get_index_spot(idx)
-                if spot and 15000 < spot < 30000 if idx=="NIFTY" else True:   # loose check
+                if spot and spot > 0:
                     price_histories[idx].append(spot)
                     latest_ticks[idx]["spot_price"] = spot
-            # VIX
             vix = get_vix_value()
             if vix:
                 latest_ticks["VIX"]["vix"] = vix
                 vix_history.append(vix)
-            # Option prices for each index
             for idx, tokens in INDEX_TOKENS.items():
+                if not INDEX_CONFIG[idx].get("active"): continue
                 if tokens["ce_token"] and tokens["pe_token"]:
                     _, _, obj = get_auth_token()
                     if obj:
@@ -830,16 +729,13 @@ def start_rest_api_poller():
                                 pe_price_histories[idx].append(pe)
                         except Exception as e:
                             logger.debug(f"REST {idx} option fetch error: {e}")
-            # Run signal engine
             run_all_signals()
             time.sleep(10)
         except Exception as e:
             logger.error(f"REST poller error: {e}")
             time.sleep(10)
 
-# -------------------------------
-#  BACKGROUND THREADS
-# -------------------------------
+# ================== BACKGROUND THREADS ==================
 _init_completed = False
 
 @app.before_request
@@ -850,15 +746,13 @@ def start_backgrounds():
         threading.Thread(target=start_rest_api_poller, daemon=True).start()
         _init_completed = True
 
-# -------------------------------
-#  FLASK ROUTES (original plus extra)
-# -------------------------------
+# ================== FLASK ROUTES ==================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v9 (Preserved Socket)",
-        "indices": list(INDEX_CONFIG.keys()),
+        "engine": "Multi-Index Bot (NIFTY/BANKNIFTY/FINNIFTY Active)",
+        "indices": [idx for idx, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "timestamp": time.time()
     })
