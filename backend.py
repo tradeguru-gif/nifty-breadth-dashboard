@@ -1,3 +1,4 @@
+# === VERSION 6 - Lunch filter removed, auth rate limit fixed ===
 # === ML Import Diagnostic (top of backend.py, after imports) ===
 # === TOP OF backend.py ===
 import sys
@@ -336,7 +337,7 @@ CONFIG = {
 
     # --- Liquidity Filters ---
     "MIN_PREMIUM_FOR_TRADE": 10.0,               # Min premium Rs 10
-    "MAX_PREMIUM_FOR_TRADE": 2000.0,             # Max premium Rs 2000
+    "MAX_PREMIUM_FOR_TRADE": 5000.0,             # Max premium Rs 2000
     "MIN_VOLUME_FOR_TRADE": 100,                 # Min 100 contracts volume
     "MIN_OI_FOR_TRADE": 500,                     # Min 500 OI
 
@@ -498,15 +499,14 @@ def check_time_filters():
         if now.time() >= dt_time(15, 0) and now.time() <= dt_time(15, 30):
             return False, "Closing volatility - no trades after 15:00"
 
-    # No trade lunch
-    if CONFIG.get("NO_TRADE_LUNCH_12_30_13_30", True):
-        if now.time() >= dt_time(12, 30) and now.time() < dt_time(13, 30):
-            return False, "Lunch hour low volume - no trades 12:30-13:30"
+    # LUNCH FILTER REMOVED FOR TESTING - was blocking signals during lunch
+    # if CONFIG.get("NO_TRADE_LUNCH_12_30_13_30", False):
+    #     if now.time() >= dt_time(12, 30) and now.time() < dt_time(13, 30):
+    #         return False, "Lunch hour low volume - no trades 12:30-13:30"
 
     # Wednesday expiry caution
     if CONFIG.get("NO_TRADE_WEDNESDAY_EXPIRY", True):
         if now.weekday() == 2:  # Wednesday
-            # More strict on expiry day
             if now.time() >= dt_time(14, 0):
                 return False, "Expiry day - no trades after 14:00"
 
@@ -1124,23 +1124,26 @@ def apply_ml_filter(signal_strength, score, ml_score):
 # AUTH & DATA FETCHING
 # ═══════════════════════════════════════════════════════════════
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
+_auth_lock = threading.Lock()
 
 def get_auth_token():
-    now = time.time()
-    if auth_cache["token"] and (now - auth_cache["timestamp"] < 3600):
-        return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
-    try:
-        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-        obj = SmartConnect(api_key=ANGEL_API_KEY)
-        session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-        if not session.get("status"): return None, None, None
-        auth_token = session["data"]["jwtToken"]
-        feed_token = obj.getfeedToken()
-        auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-        return auth_token, feed_token, obj
-    except Exception as e:
-        logger.error(f"Auth loop fail: {e}")
-        return None, None, None
+    with _auth_lock:
+        now = time.time()
+        if auth_cache["token"] and (now - auth_cache["timestamp"] < 3300):  # 55 min cache
+            return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
+        try:
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            obj = SmartConnect(api_key=ANGEL_API_KEY)
+            session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not session.get("status"): return None, None, None
+            auth_token = session["data"]["jwtToken"]
+            feed_token = obj.getfeedToken()
+            auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
+            logger.info("Auth token refreshed successfully")
+            return auth_token, feed_token, obj
+        except Exception as e:
+            logger.error(f"Auth loop fail: {e}")
+            return None, None, None
 
 def get_nifty_spot():
     _, _, obj = get_auth_token()
@@ -1161,8 +1164,12 @@ def get_vix_value():
         if response.get("status") and response.get("data"):
             return float(response["data"].get("ltp", 15))
     except Exception as e:
-        logger.error(f"Error reading VIX: {e}")
-    return None
+        err_msg = str(e)
+        if "scrip master cache" in err_msg:
+            logger.debug(f"VIX token not in scrip master, using default 15")
+        else:
+            logger.error(f"Error reading VIX: {e}")
+    return 15.0
 
 def get_banknifty_spot():
     _, _, obj = get_auth_token()
@@ -1656,9 +1663,9 @@ def run_signal_engine():
             # GRADE 1 PRO: Premium safety check
             prem_ok, prem_reason = check_premium_safety(ce_premium, "CE")
             if not prem_ok:
-                market_signal["alert_message"] = f"🚫 CE BLOCKED: {prem_reason}"
+                market_signal["alert_message"] = f"🚫 CE BLOCKED: {prem_reason} | Premium: ₹{ce_premium:.2f} | Spot: {latest_ticks['spot_price']:.2f}"
                 market_signal["signal_strength"] = "PREMIUM_FILTER"
-                log_signal_debug(f"CE PREMIUM FILTER: {prem_reason}")
+                log_signal_debug(f"CE PREMIUM FILTER: {prem_reason} | Premium: ₹{ce_premium:.2f} | Spot: {latest_ticks['spot_price']:.2f} | CE_TOKEN: {CE_TOKEN}")
                 signal_buffer["ce_count"] = 0
                 return
 
@@ -1679,8 +1686,9 @@ def run_signal_engine():
             strength, score, ml_score = apply_ml_filter(strength, score, ml_score)
 
             if strength == "BLOCKED":
-                market_signal["alert_message"] = f"🚫 CE BLOCKED by ML Filter (Score: {ml_score:.2f})"
+                market_signal["alert_message"] = f"🚫 CE BLOCKED by ML Filter (ML: {ml_score:.2f} < {CONFIG['ML_CONFIDENCE_THRESHOLD']}) | Score: {score} | Factors: {len(factors)}"
                 market_signal["signal_strength"] = "ML_BLOCKED"
+                log_signal_debug(f"CE ML BLOCK: ml={ml_score:.2f} threshold={CONFIG['ML_CONFIDENCE_THRESHOLD']} score={score} factors={factors}")
                 signal_buffer["ce_count"] = 0
                 return
 
@@ -1704,10 +1712,10 @@ def run_signal_engine():
                 return
 
             if signal_buffer["consecutive_ce"] >= CONFIG["CONSECUTIVE_SAME_DIR_MAX"]:
-                market_signal["alert_message"] = "🚫 CE Blocked: Max consecutive entries reached"
+                market_signal["alert_message"] = f"🚫 CE Blocked: Max consecutive ({signal_buffer['consecutive_ce']}/{CONFIG['CONSECUTIVE_SAME_DIR_MAX']})"
                 market_signal["signal_strength"] = "BLOCKED"
+                log_signal_debug(f"CE BLOCKED: Max consecutive entries {signal_buffer['consecutive_ce']}/{CONFIG['CONSECUTIVE_SAME_DIR_MAX']}")
                 signal_buffer["ce_count"] = 0
-                log_signal_debug("CE BLOCKED: Max consecutive CE entries")
                 return
 
             # Dynamic position sizing
@@ -1760,9 +1768,9 @@ def run_signal_engine():
             # GRADE 1 PRO: Premium safety check
             prem_ok, prem_reason = check_premium_safety(pe_premium, "PE")
             if not prem_ok:
-                market_signal["alert_message"] = f"🚫 PE BLOCKED: {prem_reason}"
+                market_signal["alert_message"] = f"🚫 PE BLOCKED: {prem_reason} | Premium: ₹{pe_premium:.2f} | Spot: {latest_ticks['spot_price']:.2f}"
                 market_signal["signal_strength"] = "PREMIUM_FILTER"
-                log_signal_debug(f"PE PREMIUM FILTER: {prem_reason}")
+                log_signal_debug(f"PE PREMIUM FILTER: {prem_reason} | Premium: ₹{pe_premium:.2f} | Spot: {latest_ticks['spot_price']:.2f} | PE_TOKEN: {PE_TOKEN}")
                 signal_buffer["pe_count"] = 0
                 return
 
@@ -1783,8 +1791,9 @@ def run_signal_engine():
             strength, score, ml_score = apply_ml_filter(strength, score, ml_score)
 
             if strength == "BLOCKED":
-                market_signal["alert_message"] = f"🚫 PE BLOCKED by ML Filter (Score: {ml_score:.2f})"
+                market_signal["alert_message"] = f"🚫 PE BLOCKED by ML Filter (ML: {ml_score:.2f} < {CONFIG['ML_CONFIDENCE_THRESHOLD']}) | Score: {score} | Factors: {len(factors)}"
                 market_signal["signal_strength"] = "ML_BLOCKED"
+                log_signal_debug(f"PE ML BLOCK: ml={ml_score:.2f} threshold={CONFIG['ML_CONFIDENCE_THRESHOLD']} score={score} factors={factors}")
                 signal_buffer["pe_count"] = 0
                 return
 
@@ -1808,10 +1817,10 @@ def run_signal_engine():
                 return
 
             if signal_buffer["consecutive_pe"] >= CONFIG["CONSECUTIVE_SAME_DIR_MAX"]:
-                market_signal["alert_message"] = "🚫 PE Blocked: Max consecutive entries reached"
+                market_signal["alert_message"] = f"🚫 PE Blocked: Max consecutive ({signal_buffer['consecutive_pe']}/{CONFIG['CONSECUTIVE_SAME_DIR_MAX']})"
                 market_signal["signal_strength"] = "BLOCKED"
+                log_signal_debug(f"PE BLOCKED: Max consecutive entries {signal_buffer['consecutive_pe']}/{CONFIG['CONSECUTIVE_SAME_DIR_MAX']}")
                 signal_buffer["pe_count"] = 0
-                log_signal_debug("PE BLOCKED: Max consecutive PE entries")
                 return
 
             # Dynamic position sizing
@@ -2228,7 +2237,7 @@ def start_rest_api_poller():
                 if len(spot_price_history) >= 3:
                     run_signal_engine()
 
-            time.sleep(5)
+            time.sleep(10)
 
         except Exception as e:
             logger.error(f"REST poller error: {e}")
