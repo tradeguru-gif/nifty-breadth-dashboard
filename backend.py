@@ -1956,81 +1956,134 @@ def on_ws_data(wsapp, message):
     last_tick_time = time.time()
 
     try:
+        ticks = []
+
+        # Angel One sends data in multiple formats
         if isinstance(message, bytes):
-            # Let the library's internal handler process binary data
-            # SmartWebSocketV2 calls _on_data internally which then calls our on_ws_data
-            # with parsed dict, so we shouldn't get raw bytes here normally
-            logger.warning(f"Received raw bytes in on_ws_data (unexpected): {len(message)} bytes")
-            return
+            # Binary format - try to parse using the library's method
+            if sws is not None and hasattr(sws, '_parse_binary_data'):
+                try:
+                    parsed = sws._parse_binary_data(message)
+                    if parsed and isinstance(parsed, dict):
+                        ticks = [parsed]
+                except Exception as e:
+                    logger.debug(f"Binary parse failed: {e}")
+                    return
+            else:
+                return
+        elif isinstance(message, str):
+            try:
+                data = json.loads(message)
+                ticks = data if isinstance(data, list) else [data]
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON: {message[:100]}")
+                return
+        elif isinstance(message, dict):
+            ticks = [message]
+        elif isinstance(message, list):
+            ticks = message
         else:
-            data = json.loads(message) if isinstance(message, str) else message
-            ticks = data if isinstance(data, list) else [data]
+            logger.warning(f"Unknown message type: {type(message)}")
+            return
 
         for tick in ticks:
-            token = str(tick.get("token") or tick.get("tk", ""))
-            ltp = tick.get("ltp") or tick.get("last_traded_price", 0)
+            if not isinstance(tick, dict):
+                continue
 
-            if isinstance(ltp, (int, float)) and ltp > 50000 and token != SPOT_TOKEN and token != VIX_TOKEN:
+            # Extract token - Angel One uses multiple field names
+            token = str(tick.get("token") or tick.get("tk") or tick.get("symbol") or "")
+
+            # Extract LTP - multiple possible field names
+            ltp = tick.get("ltp") or tick.get("last_traded_price") or tick.get("lp") or tick.get("close") or 0
+            if isinstance(ltp, str):
+                try:
+                    ltp = float(ltp)
+                except:
+                    ltp = 0
+
+            # Angel One sends prices in paise for some tokens (multiply by 100)
+            # But for NIFTY spot and options, they're already in rupees
+            # Only divide if value looks like paise (very large)
+            if isinstance(ltp, (int, float)) and ltp > 50000 and token not in [SPOT_TOKEN, VIX_TOKEN, BANKNIFTY_TOKEN]:
                 ltp = ltp / 100
 
-            vol = tick.get("v") or tick.get("volume_trade_for_the_day", 0)
-            oi = tick.get("oi") or tick.get("open_interest", 0)
+            # Extract volume and OI
+            vol = tick.get("v") or tick.get("volume") or tick.get("volume_trade_for_the_day") or tick.get("vol") or 0
+            oi = tick.get("oi") or tick.get("open_interest") or tick.get("oi_day_high") or 0
+
+            if isinstance(vol, str):
+                try: vol = int(float(vol))
+                except: vol = 0
+            if isinstance(oi, str):
+                try: oi = int(float(oi))
+                except: oi = 0
+
+            # Log first few ticks for debugging
+            if tick_counter < 10 and token:
+                logger.info(f"TICK DEBUG: token={token} ltp={ltp} vol={vol} oi={oi} | CE={CE_TOKEN} PE={PE_TOKEN} SPOT={SPOT_TOKEN}")
 
             if token == SPOT_TOKEN:
-                latest_ticks["spot_price"] = ltp
-                spot_price_history.append(ltp)
-                tick_counter += 1
+                if ltp > 0:
+                    latest_ticks["spot_price"] = ltp
+                    spot_price_history.append(ltp)
+                    tick_counter += 1
 
-                current_time = time.time()
-                for tf, interval_sec in [
-                    ("1min", 60), ("2min", 120), ("3min", 180),
-                    ("5min", 300), ("10min", 600), ("15min", 900), ("20min", 1200)
-                ]:
-                    candle = timeframe_candles[tf]
-                    if current_time - last_timeframe_update[tf] >= interval_sec:
-                        if candle["active"]:
-                            timeframe_history[tf].append({
-                                "open": candle["open"], "high": candle["high"],
-                                "low": candle["low"], "close": candle["close"],
-                                "volume": candle["volume"], "timestamp": last_timeframe_update[tf]
-                            })
-                        candle.update({"open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": vol, "active": True})
-                        last_timeframe_update[tf] = current_time
-                    else:
-                        if not candle["active"]:
-                            candle.update({"open": ltp, "low": ltp, "active": True})
-                        candle["high"] = max(candle["high"], ltp)
-                        candle["low"] = min(candle["low"], ltp)
-                        candle["close"] = ltp
-                        candle["volume"] += vol
+                    current_time = time.time()
+                    for tf, interval_sec in [
+                        ("1min", 60), ("2min", 120), ("3min", 180),
+                        ("5min", 300), ("10min", 600), ("15min", 900), ("20min", 1200)
+                    ]:
+                        candle = timeframe_candles[tf]
+                        if current_time - last_timeframe_update[tf] >= interval_sec:
+                            if candle["active"]:
+                                timeframe_history[tf].append({
+                                    "open": candle["open"], "high": candle["high"],
+                                    "low": candle["low"], "close": candle["close"],
+                                    "volume": candle["volume"], "timestamp": last_timeframe_update[tf]
+                                })
+                            candle.update({"open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": vol, "active": True})
+                            last_timeframe_update[tf] = current_time
+                        else:
+                            if not candle["active"]:
+                                candle.update({"open": ltp, "low": ltp, "active": True})
+                            candle["high"] = max(candle["high"], ltp)
+                            candle["low"] = min(candle["low"], ltp)
+                            candle["close"] = ltp
+                            candle["volume"] += vol
 
             elif token == VIX_TOKEN:
-                latest_ticks["vix"] = ltp
-                vix_history.append(ltp)
+                if ltp > 0:
+                    latest_ticks["vix"] = ltp
+                    vix_history.append(ltp)
 
             elif token == BANKNIFTY_TOKEN:
-                latest_ticks["banknifty"] = ltp
-                banknifty_history.append(ltp)
+                if ltp > 0:
+                    latest_ticks["banknifty"] = ltp
+                    banknifty_history.append(ltp)
 
             elif token == CE_TOKEN:
-                latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
-                ce_price_history.append(ltp)
-                ce_volume_history.append(vol)
-                ce_oi_history.append(oi)
-                tick_counter += 1
+                if ltp > 0:
+                    latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
+                    ce_price_history.append(ltp)
+                    ce_volume_history.append(vol)
+                    ce_oi_history.append(oi)
+                    tick_counter += 1
 
             elif token == PE_TOKEN:
-                latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
-                pe_price_history.append(ltp)
-                pe_volume_history.append(vol)
-                pe_oi_history.append(oi)
-                tick_counter += 1
+                if ltp > 0:
+                    latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
+                    pe_price_history.append(ltp)
+                    pe_volume_history.append(vol)
+                    pe_oi_history.append(oi)
+                    tick_counter += 1
 
             if tick_counter % 3 == 0:
                 run_signal_engine()
 
     except Exception as e:
         logger.error(f"Callback data parser exception: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 def start_angel_websocket():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, sws, ws_running
