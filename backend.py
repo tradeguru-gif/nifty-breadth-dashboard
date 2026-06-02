@@ -1153,7 +1153,11 @@ def get_nifty_spot():
     try:
         response = obj.ltpData("NSE", "NIFTY", SPOT_TOKEN)
         if response.get("status") and response.get("data"):
-            return float(response["data"].get("ltp", 0))
+            ltp = float(response["data"].get("ltp", 0))
+            # Fix 100x scaling if needed
+            if ltp > 100000:
+                ltp = ltp / 100
+            return ltp
     except Exception as e:
         logger.error(f"Error reading Spot Nifty: {e}")
     return None
@@ -2084,19 +2088,29 @@ def on_ws_data(wsapp, message):
 
             elif token == CE_TOKEN:
                 if ltp > 0:
-                    latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
-                    ce_price_history.append(ltp)
-                    ce_volume_history.append(vol)
-                    ce_oi_history.append(oi)
-                    tick_counter += 1
+                    spot = latest_ticks.get("spot_price", 0)
+                    # VALIDATION: CE premium should NEVER be > 80% of spot
+                    if spot > 0 and ltp > spot * 0.8:
+                        logger.warning(f"TOKEN ERROR: CE token {CE_TOKEN} returned {ltp} which is >80% of spot {spot}. This is NOT an option. Skipping.")
+                    else:
+                        latest_ticks.update({"ce_price": ltp, "ce_volume": vol, "ce_oi": oi})
+                        ce_price_history.append(ltp)
+                        ce_volume_history.append(vol)
+                        ce_oi_history.append(oi)
+                        tick_counter += 1
 
             elif token == PE_TOKEN:
                 if ltp > 0:
-                    latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
-                    pe_price_history.append(ltp)
-                    pe_volume_history.append(vol)
-                    pe_oi_history.append(oi)
-                    tick_counter += 1
+                    spot = latest_ticks.get("spot_price", 0)
+                    # VALIDATION: PE premium should NEVER be > 80% of spot
+                    if spot > 0 and ltp > spot * 0.8:
+                        logger.warning(f"TOKEN ERROR: PE token {PE_TOKEN} returned {ltp} which is >80% of spot {spot}. This is NOT an option. Skipping.")
+                    else:
+                        latest_ticks.update({"pe_price": ltp, "pe_volume": vol, "pe_oi": oi})
+                        pe_price_history.append(ltp)
+                        pe_volume_history.append(vol)
+                        pe_oi_history.append(oi)
+                        tick_counter += 1
 
             if tick_counter % 3 == 0:
                 run_signal_engine()
@@ -2176,11 +2190,11 @@ def init_background_threads():
 
 # Backup REST API poller - fetches spot price every 5 seconds via REST
 def start_rest_api_poller():
-    """Backup data source using REST API LTP calls."""
+    """Primary data source using REST API LTP calls - WS tokens seem wrong."""
     global spot_price_history, ce_price_history, pe_price_history
     global vix_history, banknifty_history
 
-    logger.info("REST API poller started")
+    logger.info("REST API poller started - PRIMARY DATA SOURCE")
 
     while True:
         try:
@@ -2188,9 +2202,9 @@ def start_rest_api_poller():
                 time.sleep(30)
                 continue
 
-            # Only poll if we have few data points (WS not working)
-            if len(spot_price_history) < 10:
-                logger.info("REST POLLER: Low data points, fetching via REST API...")
+            # Always poll - WebSocket tokens are giving wrong data
+            if True:  # Removed the < 10 check - always use REST
+                logger.debug("REST POLLER: Fetching data via REST API...")
 
                 # Fetch spot
                 spot = get_nifty_spot()
@@ -2224,20 +2238,32 @@ def start_rest_api_poller():
                     _, _, obj = get_auth_token()
                     if obj:
                         try:
+                            # Try by token first
                             ce_resp = obj.ltpData("NFO", CE_SYMBOL if CE_SYMBOL else f"NIFTY{ATM_STRIKE}CE", CE_TOKEN)
                             if ce_resp.get("status") and ce_resp.get("data"):
                                 ce_ltp = float(ce_resp["data"].get("ltp", 0))
                                 # Fix 100x scaling
                                 if ce_ltp > 100000:
                                     ce_ltp = ce_ltp / 100
-                                # Angel One sends option prices in rupees (not paise)
-                                # But if value seems like spot price, something is wrong
-                                if ce_ltp > 0 and ce_ltp < 10000:  # Sanity check: option premium should be < 10k
+                                # Sanity check
+                                if ce_ltp > 0 and ce_ltp < 10000:
                                     ce_price_history.append(ce_ltp)
                                     latest_ticks["ce_price"] = ce_ltp
                                     logger.info(f"REST POLLER: CE fetched: {ce_ltp}")
-                                elif ce_ltp > 0:
-                                    logger.warning(f"REST POLLER: CE price {ce_ltp} seems like spot price, not option premium. Token/Symbol mismatch?")
+                                else:
+                                    logger.warning(f"REST POLLER: CE price {ce_ltp} invalid. Trying symbol fallback...")
+                                    # Fallback: try without token, just symbol
+                                    ce_sym = CE_SYMBOL if CE_SYMBOL else f"NIFTY{ATM_STRIKE}CE"
+                                    ce_resp2 = obj.ltpData("NFO", ce_sym, "")
+                                    if ce_resp2.get("status") and ce_resp2.get("data"):
+                                        ce_ltp2 = float(ce_resp2["data"].get("ltp", 0))
+                                        if ce_ltp2 > 100000: ce_ltp2 = ce_ltp2 / 100
+                                        if ce_ltp2 > 0 and ce_ltp2 < 10000:
+                                            ce_price_history.append(ce_ltp2)
+                                            latest_ticks["ce_price"] = ce_ltp2
+                                            logger.info(f"REST POLLER: CE fetched via symbol: {ce_ltp2}")
+                            else:
+                                logger.warning(f"REST POLLER: CE fetch failed: {ce_resp.get('message', 'unknown')}")
                         except Exception as e:
                             logger.debug(f"REST CE fetch error: {e}")
 
@@ -2252,8 +2278,19 @@ def start_rest_api_poller():
                                     pe_price_history.append(pe_ltp)
                                     latest_ticks["pe_price"] = pe_ltp
                                     logger.info(f"REST POLLER: PE fetched: {pe_ltp}")
-                                elif pe_ltp > 0:
-                                    logger.warning(f"REST POLLER: PE price {pe_ltp} seems like spot price. Token/Symbol mismatch?")
+                                else:
+                                    logger.warning(f"REST POLLER: PE price {pe_ltp} invalid. Trying symbol fallback...")
+                                    pe_sym = PE_SYMBOL if PE_SYMBOL else f"NIFTY{ATM_STRIKE}PE"
+                                    pe_resp2 = obj.ltpData("NFO", pe_sym, "")
+                                    if pe_resp2.get("status") and pe_resp2.get("data"):
+                                        pe_ltp2 = float(pe_resp2["data"].get("ltp", 0))
+                                        if pe_ltp2 > 100000: pe_ltp2 = pe_ltp2 / 100
+                                        if pe_ltp2 > 0 and pe_ltp2 < 10000:
+                                            pe_price_history.append(pe_ltp2)
+                                            latest_ticks["pe_price"] = pe_ltp2
+                                            logger.info(f"REST POLLER: PE fetched via symbol: {pe_ltp2}")
+                            else:
+                                logger.warning(f"REST POLLER: PE fetch failed: {pe_resp.get('message', 'unknown')}")
                         except Exception as e:
                             logger.debug(f"REST PE fetch error: {e}")
 
