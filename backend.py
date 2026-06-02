@@ -1,4 +1,4 @@
-# === VERSION 10.1 - MULTI-INDEX SENTIMENT ENGINE (DEPLOYMENT FIXED) ===
+# === VERSION 10.2 - MULTI-INDEX SENTIMENT ENGINE (V6 WORKING LOGIC MERGED) ===
 import sys
 import logging
 import os
@@ -63,7 +63,7 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 DB_PATH = "trading_data.db"
 
 # -------------------------------
-#  DATABASE INIT (enhanced with equity persistence)
+#  DATABASE INIT
 # -------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -120,7 +120,7 @@ INDEX_CONFIG = {
     "SENSEX": {
         "token": None,
         "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": False,  # DISABLED until fixed
+        "lot_size": 15, "expiry_weekday": 4, "active": False,
         "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
         "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4
     }
@@ -153,10 +153,32 @@ tick_counter = 0
 ws_running = False
 sws = None
 last_tick_time = time.time()
-startup_complete = False  # NEW: for health checks
+startup_complete = False
 
 _signal_lock = threading.Lock()
 _portfolio_lock = threading.Lock()
+
+# -------------------------------
+#  RATE LIMITING (from v6 working pattern)
+# -------------------------------
+_api_last_call = 0
+_api_min_interval = 0.5
+_api_lock = threading.Lock()
+
+def rate_limited_api_call(func, *args, **kwargs):
+    """Wrapper to enforce rate limiting on API calls"""
+    global _api_last_call
+    with _api_lock:
+        elapsed = time.time() - _api_last_call
+        if elapsed < _api_min_interval:
+            time.sleep(_api_min_interval - elapsed)
+        try:
+            result = func(*args, **kwargs)
+            _api_last_call = time.time()
+            return result
+        except Exception as e:
+            _api_last_call = time.time()
+            raise e
 
 # -------------------------------
 #  SENTIMENT ENGINE CONFIG
@@ -200,26 +222,15 @@ daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
 last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 
 # -------------------------------
-#  RATE LIMITING
+#  VALIDATION HELPERS (from v6)
 # -------------------------------
-_api_last_call = 0
-_api_min_interval = 0.5  # minimum 500ms between API calls
-_api_lock = threading.Lock()
-
-def rate_limited_api_call(func, *args, **kwargs):
-    """Wrapper to enforce rate limiting on API calls"""
-    global _api_last_call
-    with _api_lock:
-        elapsed = time.time() - _api_last_call
-        if elapsed < _api_min_interval:
-            time.sleep(_api_min_interval - elapsed)
-        try:
-            result = func(*args, **kwargs)
-            _api_last_call = time.time()
-            return result
-        except Exception as e:
-            _api_last_call = time.time()
-            raise e
+def is_valid_option_premium(premium, spot_price, side):
+    """Validate if the premium looks like a real option price."""
+    if premium <= 0 or spot_price <= 0:
+        return False
+    premium_pct = premium / spot_price
+    # ATM options typically 1-5% of spot, OTM can be 0.1-2%
+    return 0.001 < premium_pct < 0.15  # 0.1% to 15% of spot
 
 # -------------------------------
 #  TECHNICAL INDICATORS
@@ -384,6 +395,7 @@ def get_auth_token():
             return None, None, None
 
 def safe_ltp(resp):
+    """Handle both old and new SmartAPI response formats"""
     if not resp or not resp.get("status"):
         return None
     data = resp.get("data", {})
@@ -599,7 +611,7 @@ def send_telegram_alert(msg):
         logger.error(f"Telegram error: {e}")
 
 # -------------------------------
-#  MAIN SIGNAL ENGINE
+#  MAIN SIGNAL ENGINE (per index)
 # -------------------------------
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"): return
@@ -620,6 +632,7 @@ def run_signal_engine_for_index(index_name):
         atr = calculate_atr(prices)
         vix = latest_ticks["VIX"]["vix"]
 
+        # Circuit breaker check
         if safety_state[index_name]["circuit_breaker"]:
             if now < safety_state[index_name]["circuit_breaker_until"]:
                 market_signal[index_name]["alert_message"] = "Circuit breaker active"
@@ -630,6 +643,7 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["consecutive_sl"] = 0
                 logger.info(f"{index_name}: Circuit breaker released")
 
+        # EXIT CHECKS
         if signal_state[index_name]["action"] != "HOLD":
             active = signal_state[index_name]["action"]
             prem = latest_ticks[index_name]["ce_price"] if "CE" in active else latest_ticks[index_name]["pe_price"]
@@ -677,6 +691,7 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["alert_message"] = f"ACTIVE {active} {index_name}"
             market_signal[index_name]["signal"] = "ACTIVE"
         else:
+            # ENTRY CHECKS
             if now < signal_state[index_name]["cooldown"]:
                 market_signal[index_name]["alert_message"] = f"Cooldown {int(signal_state[index_name]['cooldown']-now)}s"
                 return
@@ -692,6 +707,8 @@ def run_signal_engine_for_index(index_name):
             if prem <= 0 or prem < min_prem:
                 market_signal[index_name]["alert_message"] = f"Premium invalid ₹{prem}"
                 return
+
+            # Signal building ticks
             buf = signal_buffer[index_name]
             if "CE" in action:
                 buf["ce_count"] += 1
@@ -708,6 +725,7 @@ def run_signal_engine_for_index(index_name):
             else:
                 buf["ce_count"] = buf["pe_count"] = 0
 
+            # Enter trade
             lots, risk = calculate_position_size(index_name, action, atr, vix)
             sl_pct = 0.3 if "LOW" in action else 0.45
             sl = max(prem * (1 - sl_pct), prem - (atr * 1.5))
@@ -749,11 +767,11 @@ def run_all_signals():
             run_signal_engine_for_index(idx)
 
 # -------------------------------
-#  WEBSOCKET HANDLERS
+#  WEBSOCKET HANDLERS (V6 WORKING PATTERN - binary + dict fallback)
 # -------------------------------
 def on_ws_open(wsapp):
     global sws
-    logger.info("WebSocket opened")
+    logger.info("WebSocket opened successfully")
     tokens_by_exchange = {1: [], 2: [], 3: [], 4: []}
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
@@ -793,13 +811,30 @@ def on_ws_data(wsapp, message):
     last_tick_time = time.time()
     try:
         ticks = []
-        if isinstance(message, dict):
+        # V6 WORKING PATTERN: Handle bytes via _parse_binary_data (library internal)
+        # AND dict fallback for when library already parsed it
+        if isinstance(message, bytes):
+            if sws is not None and hasattr(sws, '_parse_binary_data'):
+                try:
+                    parsed = sws._parse_binary_data(message)
+                    if parsed and isinstance(parsed, dict):
+                        ticks = [parsed]
+                except Exception as e:
+                    logger.debug(f"Binary parse failed: {e}")
+                    return
+            else:
+                return
+        elif isinstance(message, str):
+            try:
+                data = json.loads(message)
+                ticks = data if isinstance(data, list) else [data]
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON: {message[:100]}")
+                return
+        elif isinstance(message, dict):
             ticks = [message]
         elif isinstance(message, list):
             ticks = message
-        elif isinstance(message, str):
-            data = json.loads(message)
-            ticks = data if isinstance(data, list) else [data]
         else:
             logger.debug(f"Unexpected message type: {type(message)}")
             return
@@ -816,6 +851,7 @@ def on_ws_data(wsapp, message):
             vol = tick.get("volume") or tick.get("v") or 0
             oi = tick.get("open_interest") or tick.get("oi") or 0
 
+            # Match token to index
             idx = None
             for i, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
@@ -833,27 +869,33 @@ def on_ws_data(wsapp, message):
                         price_histories[idx].append(ltp)
                         tick_counter += 1
                 elif token == INDEX_TOKENS[idx].get("ce_token"):
-                    if ltp > 0:
-                        latest_ticks[idx]["ce_price"] = ltp
-                        ce_price_histories[idx].append(ltp)
-                        ce_volume_histories[idx].append(vol)
-                        ce_oi_histories[idx].append(oi)
+                    # V6 PATTERN: DISABLED - WebSocket CE token often gives wrong data
+                    # Use REST API as primary source for option prices
+                    pass
                 elif token == INDEX_TOKENS[idx].get("pe_token"):
-                    if ltp > 0:
-                        latest_ticks[idx]["pe_price"] = ltp
-                        pe_price_histories[idx].append(ltp)
-                        pe_volume_histories[idx].append(vol)
-                        pe_oi_histories[idx].append(oi)
+                    # V6 PATTERN: DISABLED - WebSocket PE token often gives wrong data
+                    # Use REST API as primary source for option prices
+                    pass
             elif token == "99919017":
                 if ltp > 0:
                     latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
+
+        # V6 PATTERN: Run signal engine every 3 ticks (not every tick)
+        if tick_counter % 3 == 0:
+            run_all_signals()
+
     except Exception as e:
         logger.error(f"WS data error: {e}")
 
 def start_angel_websocket():
     global sws, ws_running
-    logger.info("WebSocket thread started (multi-index)")
+    logger.info("="*60)
+    logger.info("WEBSOCKET THREAD STARTED")
+    logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Market open check: {is_market_open()}")
+    logger.info("="*60)
+
     refresh_all_tokens()
     while True:
         try:
@@ -878,19 +920,19 @@ def start_angel_websocket():
             time.sleep(10)
 
 # -------------------------------
-#  REST API POLLER (CORRECTED)
+#  REST API POLLER (V6 WORKING PATTERN - PRIMARY DATA SOURCE)
 # -------------------------------
 def is_market_open():
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     return now_ist.weekday() < 5 and dt_time(9,15) <= now_ist.time() <= dt_time(15,30)
 
 def start_rest_api_poller():
-    logger.info("REST API poller started (backup data source)")
+    """PRIMARY DATA SOURCE using REST API LTP calls - WS option tokens often give wrong data."""
+    logger.info("REST API poller started - PRIMARY DATA SOURCE")
     auth_obj = None
     auth_time = 0
-    # Cache spot prices to reduce API calls
     spot_cache = {idx: {"price": 0, "time": 0} for idx in INDEX_CONFIG}
-    spot_cache_ttl = 5  # seconds
+    spot_cache_ttl = 5
 
     while True:
         try:
@@ -911,33 +953,66 @@ def start_rest_api_poller():
                 if now - spot_cache[idx]["time"] > spot_cache_ttl:
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
+                        # V6 VALIDATION: Nifty spot should be in valid range
+                        if idx == "NIFTY" and not (15000 < spot < 30000):
+                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
+                            continue
+                        if idx == "BANKNIFTY" and not (30000 < spot < 70000):
+                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
+                            continue
+                        if idx == "FINNIFTY" and not (15000 < spot < 30000):
+                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
+                            continue
+                        if idx == "MIDCPNIFTY" and not (8000 < spot < 18000):
+                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
+                            continue
                         price_histories[idx].append(spot)
                         latest_ticks[idx]["spot_price"] = spot
                         spot_cache[idx] = {"price": spot, "time": now}
+                        logger.info(f"REST POLLER: {idx} spot fetched: {spot}")
 
-            # VIX - fetch less frequently
-            if now % 30 < 10:  # every ~30s
+            # VIX - fetch every 30s
+            if int(now) % 30 < 10:
                 vix = get_vix_value()
                 if vix:
                     latest_ticks["VIX"]["vix"] = vix
                     vix_history.append(vix)
 
-            # Option prices - only if we have tokens
+            # Option prices via REST (PRIMARY source - WS tokens unreliable)
             for idx, tokens in INDEX_TOKENS.items():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
+                        spot = latest_ticks[idx]["spot_price"]
+                        # CE via REST
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
                             if ce > 100000: ce /= 100
-                            latest_ticks[idx]["ce_price"] = ce
-                            ce_price_histories[idx].append(ce)
+                            # V6 VALIDATION: Option premium should be < 10000 and valid % of spot
+                            if ce > 0 and ce < 10000:
+                                if is_valid_option_premium(ce, spot, "CE"):
+                                    ce_price_histories[idx].append(ce)
+                                    latest_ticks[idx]["ce_price"] = ce
+                                    logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
+                                else:
+                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
+                            else:
+                                logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
+
+                        # PE via REST
                         pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
                         pe = safe_ltp(pe_resp)
                         if pe is not None:
                             if pe > 100000: pe /= 100
-                            latest_ticks[idx]["pe_price"] = pe
-                            pe_price_histories[idx].append(pe)
+                            if pe > 0 and pe < 10000:
+                                if is_valid_option_premium(pe, spot, "PE"):
+                                    pe_price_histories[idx].append(pe)
+                                    latest_ticks[idx]["pe_price"] = pe
+                                    logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
+                                else:
+                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
+                            else:
+                                logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
                     except Exception as e:
                         logger.debug(f"REST {idx} option fetch error: {e}")
 
@@ -949,7 +1024,7 @@ def start_rest_api_poller():
             time.sleep(10)
 
 # -------------------------------
-#  BACKGROUND THREADS (FIXED)
+#  BACKGROUND THREADS
 # -------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -974,7 +1049,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v10.1 (Deployment Fixed)",
+        "engine": "Multi-Index Options Bot v10.2 (V6 Logic Merged)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time()
@@ -998,9 +1073,6 @@ def live_signals():
 def health():
     return jsonify({"status": "OK", "ws_running": ws_running, "ticks_received": tick_counter})
 
-# -------------------------------
-#  MAIN
-# -------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     _start_background_threads()
