@@ -752,6 +752,8 @@ def calculate_bollinger_bands(prices, period=20, mult=2.0):
 def update_vwap_and_profile():
     global market_profile_data
     spot_list = list(spot_price_history)
+    # Fix any 100x scaled values in history
+    spot_list = [s/100 if s > 100000 else s for s in spot_list]
     vol_list = list(ce_volume_history) if ce_volume_history else [1] * len(spot_list)
 
     if len(spot_list) < 20: return
@@ -2021,8 +2023,10 @@ def on_ws_data(wsapp, message):
             # Angel One sends prices in paise for some tokens (multiply by 100)
             # But for NIFTY spot and options, they're already in rupees
             # Only divide if value looks like paise (very large)
-            if isinstance(ltp, (int, float)) and ltp > 50000 and token not in [SPOT_TOKEN, VIX_TOKEN, BANKNIFTY_TOKEN]:
+            # Fix 100x scaling for all tokens
+            if isinstance(ltp, (int, float)) and ltp > 100000:
                 ltp = ltp / 100
+                logger.debug(f"Scaled ltp for token {token}: {ltp*100} -> {ltp}")
 
             # Extract volume and OI
             vol = tick.get("v") or tick.get("volume") or tick.get("volume_trade_for_the_day") or tick.get("vol") or 0
@@ -2191,6 +2195,10 @@ def start_rest_api_poller():
                 # Fetch spot
                 spot = get_nifty_spot()
                 if spot and spot > 0:
+                    # Fix 100x scaling issue
+                    if spot > 100000:
+                        spot = spot / 100
+                        logger.info(f"REST POLLER: Spot scaled from {spot*100} to {spot}")
                     # Sanity check: Nifty spot should be 15000-30000
                     if 15000 < spot < 30000:
                         spot_price_history.append(spot)
@@ -2219,6 +2227,9 @@ def start_rest_api_poller():
                             ce_resp = obj.ltpData("NFO", CE_SYMBOL if CE_SYMBOL else f"NIFTY{ATM_STRIKE}CE", CE_TOKEN)
                             if ce_resp.get("status") and ce_resp.get("data"):
                                 ce_ltp = float(ce_resp["data"].get("ltp", 0))
+                                # Fix 100x scaling
+                                if ce_ltp > 100000:
+                                    ce_ltp = ce_ltp / 100
                                 # Angel One sends option prices in rupees (not paise)
                                 # But if value seems like spot price, something is wrong
                                 if ce_ltp > 0 and ce_ltp < 10000:  # Sanity check: option premium should be < 10k
@@ -2234,6 +2245,9 @@ def start_rest_api_poller():
                             pe_resp = obj.ltpData("NFO", PE_SYMBOL if PE_SYMBOL else f"NIFTY{ATM_STRIKE}PE", PE_TOKEN)
                             if pe_resp.get("status") and pe_resp.get("data"):
                                 pe_ltp = float(pe_resp["data"].get("ltp", 0))
+                                # Fix 100x scaling
+                                if pe_ltp > 100000:
+                                    pe_ltp = pe_ltp / 100
                                 if pe_ltp > 0 and pe_ltp < 10000:
                                     pe_price_history.append(pe_ltp)
                                     latest_ticks["pe_price"] = pe_ltp
