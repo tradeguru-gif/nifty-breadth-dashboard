@@ -343,7 +343,7 @@ CONFIG = {
     # --- Time-Based Filters ---
     "NO_TRADE_FIRST_15_MIN": True,               # No trades 9:15-9:30 (opening vol)
     "NO_TRADE_LAST_30_MIN": True,                # No trades 15:00-15:30 (closing vol)
-    "NO_TRADE_LUNCH_12_30_13_30": True,          # No trades 12:30-13:30 (low vol)
+    "NO_TRADE_LUNCH_12_30_13_30": False,          # No trades 12:30-13:30 (low vol)
     "NO_TRADE_WEDNESDAY_EXPIRY": True,           # Extra caution on expiry day
 
     # --- Signal Quality Gates ---
@@ -618,8 +618,14 @@ def get_ist_now():
 
 def is_market_open():
     now_ist = get_ist_now()
-    if now_ist.weekday() >= 5: return False
-    return dt_time(9, 15) <= now_ist.time() <= dt_time(15, 30)
+    is_weekday = now_ist.weekday() < 5
+    is_time_ok = dt_time(9, 15) <= now_ist.time() <= dt_time(15, 30)
+    result = is_weekday and is_time_ok
+    # Log once per minute to avoid spam
+    if not hasattr(is_market_open, '_last_log') or time.time() - is_market_open._last_log > 60:
+        logger.info(f"MARKET CHECK: {now_ist.strftime('%A %H:%M:%S')} IST | weekday={is_weekday} | time_ok={is_time_ok} | open={result}")
+        is_market_open._last_log = time.time()
+    return result
 
 def get_time_features():
     now = get_ist_now()
@@ -1200,9 +1206,11 @@ def get_current_atm_tokens():
         if ce.empty or pe.empty: return None, None
         CE_TOKEN = str(ce.iloc[0]["token"])
         PE_TOKEN = str(pe.iloc[0]["token"])
+        CE_SYMBOL = str(ce.iloc[0]["symbol"])
+        PE_SYMBOL = str(pe.iloc[0]["symbol"])
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
-        logger.info(f"Scrip Resolved -> CE: {CE_TOKEN} | PE: {PE_TOKEN} | Strike: {ATM_STRIKE}")
+        logger.info(f"Scrip Resolved -> CE: {CE_TOKEN} ({CE_SYMBOL}) | PE: {PE_TOKEN} ({PE_SYMBOL}) | Strike: {ATM_STRIKE}")
         return CE_TOKEN, PE_TOKEN
     except Exception as e:
         logger.error(f"Error building Option Chain: {e}")
@@ -2088,6 +2096,12 @@ def on_ws_data(wsapp, message):
 def start_angel_websocket():
     global CE_TOKEN, PE_TOKEN, ATM_STRIKE, sws, ws_running
 
+    logger.info("="*60)
+    logger.info("WEBSOCKET THREAD STARTED")
+    logger.info(f"Current IST time: {get_ist_now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Market open check: {is_market_open()}")
+    logger.info("="*60)
+
     while True:
         try:
             if not is_market_open():
@@ -2139,7 +2153,86 @@ def init_background_threads():
     logger.info("Initializing framework-bound background pipelines...")
     ws_thread = threading.Thread(target=start_angel_websocket, daemon=True, name="angel_websocket_thread")
     ws_thread.start()
+
+    # Start a backup REST API poller for spot price (in case WS fails)
+    rest_thread = threading.Thread(target=start_rest_api_poller, daemon=True, name="rest_api_poller")
+    rest_thread.start()
+
     logger.info("Background streaming thread successfully bound and deployed.")
+    logger.info("Backup REST API poller started.")
+
+# Backup REST API poller - fetches spot price every 5 seconds via REST
+def start_rest_api_poller():
+    """Backup data source using REST API LTP calls."""
+    global spot_price_history, ce_price_history, pe_price_history
+    global vix_history, banknifty_history
+
+    logger.info("REST API poller started")
+
+    while True:
+        try:
+            if not is_market_open():
+                time.sleep(30)
+                continue
+
+            # Only poll if we have few data points (WS not working)
+            if len(spot_price_history) < 10:
+                logger.info("REST POLLER: Low data points, fetching via REST API...")
+
+                # Fetch spot
+                spot = get_nifty_spot()
+                if spot and spot > 0:
+                    spot_price_history.append(spot)
+                    latest_ticks["spot_price"] = spot
+                    logger.info(f"REST POLLER: Spot fetched: {spot}")
+
+                # Fetch VIX
+                vix = get_vix_value()
+                if vix and vix > 0:
+                    vix_history.append(vix)
+                    latest_ticks["vix"] = vix
+
+                # Fetch BankNifty
+                bn = get_banknifty_spot()
+                if bn and bn > 0:
+                    banknifty_history.append(bn)
+                    latest_ticks["banknifty"] = bn
+
+                # Fetch option prices if tokens resolved
+                if CE_TOKEN and PE_TOKEN:
+                    _, _, obj = get_auth_token()
+                    if obj:
+                        try:
+                            ce_resp = obj.ltpData("NFO", CE_SYMBOL if CE_SYMBOL else f"NIFTY{ATM_STRIKE}CE", CE_TOKEN)
+                            if ce_resp.get("status") and ce_resp.get("data"):
+                                ce_ltp = float(ce_resp["data"].get("ltp", 0))
+                                if ce_ltp > 0:
+                                    ce_price_history.append(ce_ltp)
+                                    latest_ticks["ce_price"] = ce_ltp
+                                    logger.info(f"REST POLLER: CE fetched: {ce_ltp}")
+                        except Exception as e:
+                            logger.debug(f"REST CE fetch error: {e}")
+
+                        try:
+                            pe_resp = obj.ltpData("NFO", PE_SYMBOL if PE_SYMBOL else f"NIFTY{ATM_STRIKE}PE", PE_TOKEN)
+                            if pe_resp.get("status") and pe_resp.get("data"):
+                                pe_ltp = float(pe_resp["data"].get("ltp", 0))
+                                if pe_ltp > 0:
+                                    pe_price_history.append(pe_ltp)
+                                    latest_ticks["pe_price"] = pe_ltp
+                                    logger.info(f"REST POLLER: PE fetched: {pe_ltp}")
+                        except Exception as e:
+                            logger.debug(f"REST PE fetch error: {e}")
+
+                # Trigger signal engine if we got data
+                if len(spot_price_history) >= 3:
+                    run_signal_engine()
+
+            time.sleep(5)
+
+        except Exception as e:
+            logger.error(f"REST poller error: {e}")
+            time.sleep(10)
 
 _init_completed = False
 
