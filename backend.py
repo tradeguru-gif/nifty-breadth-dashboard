@@ -101,29 +101,9 @@ init_db()
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
-# Binary parse patch - handles Angel One's binary tick format
-_original_parse = SmartWebSocketV2._parse_binary_data
-def _patched_parse(self, binary_data):
-    try:
-        result = _original_parse(self, binary_data) if _original_parse else {}
-    except Exception:
-        result = {}
-    if not isinstance(result, dict):
-        result = {}
-    try:
-        if len(binary_data) >= 42:
-            token_bytes = binary_data[2:26]
-            token_int = int.from_bytes(token_bytes, byteorder="little")
-            result["token"] = str(token_int)
-            ltp = int.from_bytes(binary_data[26:34], byteorder="little") / 100
-            result["ltp"] = ltp
-            volume = int.from_bytes(binary_data[34:42], byteorder="little")
-            result["v"] = volume
-    except Exception as e:
-        logging.getLogger(__name__).error(f"Binary parse error: {e}")
-    return result
-
-SmartWebSocketV2._parse_binary_data = _patched_parse
+# Let SmartWebSocketV2 handle binary parsing natively
+# The library's internal _parse_binary_data knows the exact byte format
+# We only handle JSON messages in on_ws_data
 
 # _on_close patch removed - let SmartWebSocketV2 handle its own retry logic
 # The library manages reconnections internally; our custom patch was causing conflicts
@@ -1977,16 +1957,11 @@ def on_ws_data(wsapp, message):
 
     try:
         if isinstance(message, bytes):
-            if sws is None:
-                return
-            try:
-                tick = sws._parse_binary_data(message)
-            except Exception as e:
-                logger.error(f"Binary parse error in callback: {e}")
-                return
-            if not tick:
-                return
-            ticks = [tick]
+            # Let the library's internal handler process binary data
+            # SmartWebSocketV2 calls _on_data internally which then calls our on_ws_data
+            # with parsed dict, so we shouldn't get raw bytes here normally
+            logger.warning(f"Received raw bytes in on_ws_data (unexpected): {len(message)} bytes")
+            return
         else:
             data = json.loads(message) if isinstance(message, str) else message
             ticks = data if isinstance(data, list) else [data]
