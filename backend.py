@@ -922,9 +922,27 @@ def start_angel_websocket():
 # -------------------------------
 #  REST API POLLER (V6 WORKING PATTERN - PRIMARY DATA SOURCE)
 # -------------------------------
+#-------------------------------------------------
+#-------------------------------------------------------
+from datetime import datetime, time as dt_time
+
 def is_market_open():
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    return now_ist.weekday() < 5 and dt_time(9,15) <= now_ist.time() <= dt_time(15,30)
+    now_utc = datetime.utcnow()
+    current_time = now_utc.time()
+    
+    # 1. Check if it is a weekday (Monday to Friday)
+    # Note: Because the Indian market closes well before midnight, 
+    # the weekday in UTC matches the weekday in IST during trading hours.
+    is_weekday = now_utc.weekday() < 5
+    
+    # 2. Check if current UTC time falls between 03:45 and 10:00
+    is_trading_hours = dt_time(3, 45) <= current_time <= dt_time(10, 0)
+    
+    return is_weekday and is_trading_hours
+
+# -------------------------------
+#-------------------------------------------------
+#------------------------------------------------------
 
 def start_rest_api_poller():
     """PRIMARY DATA SOURCE using REST API LTP calls - WS option tokens often give wrong data."""
