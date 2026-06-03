@@ -1,4 +1,4 @@
-# === VERSION 10.3 - FIXED: max() empty sequence + Render health checks ===
+# === VERSION 10.5 - COMPLETE FIX: market_open + all previous fixes ===
 import sys
 import logging
 import os
@@ -154,20 +154,19 @@ ws_running = False
 sws = None
 last_tick_time = time.time()
 startup_complete = False
-last_heartbeat = time.time()  # RENDER FIX: Track heartbeat
+last_heartbeat = time.time()
 
 _signal_lock = threading.Lock()
 _portfolio_lock = threading.Lock()
 
 # -------------------------------
-#  RATE LIMITING (from v6 working pattern)
+#  RATE LIMITING
 # -------------------------------
 _api_last_call = 0
 _api_min_interval = 0.5
 _api_lock = threading.Lock()
 
 def rate_limited_api_call(func, *args, **kwargs):
-    """Wrapper to enforce rate limiting on API calls"""
     global _api_last_call
     with _api_lock:
         elapsed = time.time() - _api_last_call
@@ -223,10 +222,9 @@ daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
 last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 
 # -------------------------------
-#  VALIDATION HELPERS (from v6)
+#  VALIDATION HELPERS
 # -------------------------------
 def is_valid_option_premium(premium, spot_price, side):
-    """Validate if the premium looks like a real option price."""
     if premium <= 0 or spot_price <= 0:
         return False
     premium_pct = premium / spot_price
@@ -242,7 +240,6 @@ def calculate_rsi(prices, period=14, smoothing=3):
         diff = prices[i] - prices[i-1]
         gains.append(max(diff, 0))
         losses.append(max(-diff, 0))
-    # FIX: Ensure we have enough data
     if len(gains) < period or len(losses) < period:
         return 50.0
     avg_gain = sum(gains[-period:]) / period
@@ -267,7 +264,7 @@ def calculate_rsi(prices, period=14, smoothing=3):
     return rsi_raw
 
 def calculate_ema(prices, period):
-    if not prices:  # FIX: Guard against empty
+    if not prices:
         return 0
     if len(prices) < period: 
         return sum(prices) / len(prices) if prices else 0
@@ -280,7 +277,7 @@ def calculate_ema(prices, period):
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow + signal: return 0.0, 0.0, 0.0
     def ema(arr, p):
-        if not arr:  # FIX: Guard against empty
+        if not arr:
             return 0
         alpha = 2 / (p + 1)
         val = arr[0]
@@ -302,7 +299,7 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
 def calculate_atr(prices, period=14):
     if len(prices) < period + 1: return 5.0
     tr = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    if not tr:  # FIX: Guard against empty
+    if not tr:
         return 5.0
     return sum(tr[-period:]) / period
 
@@ -315,7 +312,7 @@ def calculate_adx(prices, period=14):
         plus_dm.append(max(up, 0) if up > down else 0)
         minus_dm.append(max(down, 0) if down > up else 0)
         tr.append(abs(prices[i] - prices[i-1]))
-    if not tr or not plus_dm or not minus_dm:  # FIX: Guard against empty
+    if not tr or not plus_dm or not minus_dm:
         return 20.0
     atr = sum(tr[-period:]) / period
     plus_di = 100 * sum(plus_dm[-period:]) / period / atr if atr > 0 else 0
@@ -333,7 +330,7 @@ def get_trend_score(prices, tf_name):
     ema9 = calculate_ema(prices, EMA_SHORT)
     ema21 = calculate_ema(prices, EMA_MEDIUM)
     ema50 = calculate_ema(prices, EMA_LONG)
-    price = prices[-1]
+    price = prices[-1] if prices else 0
 
     if tf_name == "1min":
         if ema9 > ema21 and price > ema9: return "BULLISH", w
@@ -347,13 +344,12 @@ def get_trend_score(prices, tf_name):
         return "NEUTRAL", 0
     else:
         if len(prices) >= 20:
-            # FIX: Ensure slices are non-empty before max()/min()
             highs = []
             lows = []
             for i in range(0, 15, 5):
                 if i + 5 <= len(prices):
                     slice_prices = prices[-i-5:-i]
-                    if slice_prices:  # Only process non-empty slices
+                    if slice_prices:
                         highs.append(max(slice_prices))
                         lows.append(min(slice_prices))
             if len(highs) >= 2 and len(lows) >= 2:
@@ -416,7 +412,6 @@ def get_auth_token():
             return None, None, None
 
 def safe_ltp(resp):
-    """Handle both old and new SmartAPI response formats"""
     if not resp or not resp.get("status"):
         return None
     data = resp.get("data", {})
@@ -469,8 +464,7 @@ def get_vix_value():
     _, _, obj = get_auth_token()
     if not obj: return 15.0
     try:
-        # FIX: Try multiple VIX token sources
-        vix_tokens = ["99919017", "99919011"]  # Primary and fallback
+        vix_tokens = ["99919017", "99919011"]
         for token in vix_tokens:
             try:
                 resp = rate_limited_api_call(obj.ltpData, "NSE", "INDIAVIX", token)
@@ -479,7 +473,6 @@ def get_vix_value():
                     return ltp
             except Exception:
                 continue
-        # Fallback: search for VIX token
         try:
             search = rate_limited_api_call(obj.searchScrip, "NSE", "INDIAVIX")
             if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
@@ -521,7 +514,6 @@ def is_expiry_day(index_name):
     return weekday == config["expiry_weekday"]
 
 def get_current_atm_tokens(index_name):
-    """FIXED: Added comprehensive empty DataFrame guards"""
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"): 
         return None, None
@@ -539,7 +531,6 @@ def get_current_atm_tokens(index_name):
     if days == 0: days = 7
     expiry = (today + timedelta(days=days)).strftime("%d%b%Y").upper()
 
-    # Try scrip master first
     scrip = get_scrip_master()
     if scrip:
         try:
@@ -584,7 +575,6 @@ def get_current_atm_tokens(index_name):
                 if same_exp.empty:
                     logger.warning(f"{index_name}: No options for nearest expiry {nearest}")
                     raise ValueError("No nearest expiry options")
-                # FIX: Use iloc for safe indexing instead of idxmin which can fail
                 strike_diffs = (same_exp["strike"] - atm).abs()
                 min_idx = strike_diffs.idxmin()
                 if pd.isna(min_idx):
@@ -612,7 +602,6 @@ def get_current_atm_tokens(index_name):
         except Exception as e:
             logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
 
-    # API fallback
     _, _, obj = get_auth_token()
     if obj:
         ce_token = pe_token = None
@@ -695,7 +684,7 @@ def send_telegram_alert(msg):
         logger.error(f"Telegram error: {e}")
 
 # -------------------------------
-#  MAIN SIGNAL ENGINE (per index) - FIXED: empty sequence guards
+#  MAIN SIGNAL ENGINE (per index)
 # -------------------------------
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"): 
@@ -717,7 +706,6 @@ def run_signal_engine_for_index(index_name):
         atr = calculate_atr(prices)
         vix = latest_ticks["VIX"]["vix"]
 
-        # Circuit breaker check
         if safety_state[index_name]["circuit_breaker"]:
             if now < safety_state[index_name]["circuit_breaker_until"]:
                 market_signal[index_name]["alert_message"] = "Circuit breaker active"
@@ -728,7 +716,6 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["consecutive_sl"] = 0
                 logger.info(f"{index_name}: Circuit breaker released")
 
-        # EXIT CHECKS
         if signal_state[index_name]["action"] != "HOLD":
             active = signal_state[index_name]["action"]
             prem = latest_ticks[index_name]["ce_price"] if "CE" in active else latest_ticks[index_name]["pe_price"]
@@ -776,7 +763,6 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["alert_message"] = f"ACTIVE {active} {index_name}"
             market_signal[index_name]["signal"] = "ACTIVE"
         else:
-            # ENTRY CHECKS
             if now < signal_state[index_name]["cooldown"]:
                 market_signal[index_name]["alert_message"] = f"Cooldown {int(signal_state[index_name]['cooldown']-now)}s"
                 return
@@ -793,7 +779,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["alert_message"] = f"Premium invalid ₹{prem}"
                 return
 
-            # Signal building ticks
             buf = signal_buffer[index_name]
             if "CE" in action:
                 buf["ce_count"] += 1
@@ -810,7 +795,6 @@ def run_signal_engine_for_index(index_name):
             else:
                 buf["ce_count"] = buf["pe_count"] = 0
 
-            # Enter trade
             lots, risk = calculate_position_size(index_name, action, atr, vix)
             sl_pct = 0.3 if "LOW" in action else 0.45
             sl = max(prem * (1 - sl_pct), prem - (atr * 1.5))
@@ -855,7 +839,7 @@ def run_all_signals():
                 logger.error(f"Signal engine error for {idx}: {e}")
 
 # -------------------------------
-#  WEBSOCKET HANDLERS (FIXED: try-except around signal engine)
+#  WEBSOCKET HANDLERS (FIXED)
 # -------------------------------
 def on_ws_open(wsapp):
     global sws
@@ -871,9 +855,6 @@ def on_ws_open(wsapp):
                 tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["ce_token"])
             if INDEX_TOKENS[idx].get("pe_token"):
                 tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["pe_token"])
-
-    # FIX: Don't hardcode VIX token - use dynamic lookup
-    # tokens_by_exchange[1].append("99919017")  # REMOVED - causes AB4046 error
 
     if sws:
         total_subs = 0
@@ -899,7 +880,7 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_tick_time, last_heartbeat
     last_tick_time = time.time()
-    last_heartbeat = time.time()  # RENDER FIX: Update heartbeat
+    last_heartbeat = time.time()
     try:
         ticks = []
         if isinstance(message, bytes):
@@ -943,7 +924,6 @@ def on_ws_data(wsapp, message):
             vol = tick.get("volume") or tick.get("v") or 0
             oi = tick.get("open_interest") or tick.get("oi") or 0
 
-            # Match token to index
             idx = None
             for i, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
@@ -961,11 +941,14 @@ def on_ws_data(wsapp, message):
                         price_histories[idx].append(ltp)
                         tick_counter += 1
                 elif token == INDEX_TOKENS[idx].get("ce_token"):
-                    pass  # REST API is primary source
+                    pass
                 elif token == INDEX_TOKENS[idx].get("pe_token"):
-                    pass  # REST API is primary source
+                    pass
+            elif token == "99919017":
+                if ltp > 0:
+                    latest_ticks["VIX"]["vix"] = ltp
+                    vix_history.append(ltp)
 
-        # FIX: Only run signals if we have sufficient data
         if tick_counter % 3 == 0 and tick_counter > 0:
             try:
                 run_all_signals()
@@ -987,7 +970,6 @@ def start_angel_websocket():
     while True:
         try:
             if not is_market_open():
-                # RENDER FIX: Shorter sleep + heartbeat update to prevent spin-down
                 time.sleep(5)
                 last_heartbeat = time.time()
                 continue
@@ -1009,27 +991,22 @@ def start_angel_websocket():
             time.sleep(10)
 
 # -------------------------------
-#  REST API POLLER (FIXED: empty sequence guards + Render heartbeat)
+#  REST API POLLER (FIXED)
 # -------------------------------
-# FIX: Use IST directly instead of UTC conversion
 def is_market_open():
-    """FIXED: Use IST directly with 5-minute buffers for stability"""
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     current_time = now_ist.time()
 
     is_weekday = now_ist.weekday() < 5
 
-    # Indian market hours: 09:15 to 15:30 IST
-    # Add 5-minute buffer before open and after close
-    market_open = dt_time(9, 10)   # 5 min early buffer
-    market_close = dt_time(15, 35)  # 5 min late buffer
+    market_open = dt_time(9, 10)
+    market_close = dt_time(15, 35)
 
     is_trading_hours = market_open <= current_time <= market_close
 
     return is_weekday and is_trading_hours
 
 def start_rest_api_poller():
-    """PRIMARY DATA SOURCE using REST API LTP calls - WS option tokens often give wrong data."""
     global last_heartbeat
     logger.info("REST API poller started - PRIMARY DATA SOURCE")
     auth_obj = None
@@ -1040,14 +1017,11 @@ def start_rest_api_poller():
 
     while True:
         try:
-            # RENDER FIX: Update heartbeat every iteration
             last_heartbeat = time.time()
 
             if not is_market_open():
-                # RENDER FIX: Shorter sleep to prevent free tier spin-down
                 time.sleep(5)
                 poll_count += 1
-                # Log market status every 60 iterations (5 minutes)
                 if poll_count % 60 == 0:
                     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
                     logger.info(f"Market CLOSED | IST: {now_ist.strftime('%H:%M')} | Waiting for 09:15 IST...")
@@ -1062,12 +1036,10 @@ def start_rest_api_poller():
                 time.sleep(10)
                 continue
 
-            # Fetch spot with caching
             for idx in INDEX_CONFIG:
                 if now - spot_cache[idx]["time"] > spot_cache_ttl:
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
-                        # Validation ranges
                         valid_ranges = {
                             "NIFTY": (15000, 30000),
                             "BANKNIFTY": (30000, 70000),
@@ -1084,19 +1056,16 @@ def start_rest_api_poller():
                         spot_cache[idx] = {"price": spot, "time": now}
                         logger.info(f"REST POLLER: {idx} spot fetched: {spot}")
 
-            # VIX - fetch every 30s
             if int(now) % 30 < 10:
                 vix = get_vix_value()
                 if vix:
                     latest_ticks["VIX"]["vix"] = vix
                     vix_history.append(vix)
 
-            # Option prices via REST (PRIMARY source)
             for idx, tokens in INDEX_TOKENS.items():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         spot = latest_ticks[idx]["spot_price"]
-                        # CE via REST
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
@@ -1111,7 +1080,6 @@ def start_rest_api_poller():
                             else:
                                 logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
 
-                        # PE via REST
                         pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
                         pe = safe_ltp(pe_resp)
                         if pe is not None:
@@ -1159,13 +1127,13 @@ def start_backgrounds():
     _start_background_threads()
 
 # -------------------------------
-#  FLASK ROUTES (FIXED: Render-compatible health checks)
+#  FLASK ROUTES (FIXED: market_open added to live-signals)
 # -------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v10.3 (Fixed)",
+        "engine": "Multi-Index Options Bot v10.5 (Complete Fix)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time()
@@ -1173,6 +1141,7 @@ def home():
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
+    # FIX: Added market_open to the response so frontend can display correct status
     return jsonify({
         "timestamp": datetime.now().isoformat(),
         "signals": market_signal,
@@ -1182,18 +1151,15 @@ def live_signals():
         "portfolios": portfolio_state,
         "safety": safety_state,
         "tokens": INDEX_TOKENS,
+        "market_open": is_market_open(),  # <-- FIX: Added this line
         "debug": {"ws_running": ws_running, "ticks": tick_counter}
     })
 
 @app.route("/api/health")
 def health():
-    """RENDER FIX: Enhanced health check that returns 200 even when market is closed"""
     now = time.time()
     heartbeat_age = now - last_heartbeat
-
-    # Consider unhealthy if no heartbeat for 60 seconds
     is_healthy = heartbeat_age < 60
-
     status_code = 200 if is_healthy else 503
 
     return jsonify({
