@@ -1192,10 +1192,11 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # V11 CORE FUNCTIONS (PRESERVED)
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
+    """Relaxed premium validation - SENSEX allows slightly higher premium %."""
     if premium <= 0 or spot_price <= 0:
         return False
     premium_pct = premium / spot_price
-    # For SENSEX, allow slightly higher max (0.25 instead of 0.20)
+    # For SENSEX (spot > 50k), allow up to 25% of spot; otherwise 20%
     max_pct = 0.25 if spot_price > 50000 else 0.20
     return 0.0002 < premium_pct < max_pct
 
@@ -1845,14 +1846,14 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
 
     # API fallback
+        # API fallback
     _, _, obj = get_auth_token()
     if obj:
         ce_token = pe_token = None
         ce_symbol = pe_symbol = None
         try:
-                        # For SENSEX (BFO), symbol format may need underscore or space
+            # For SENSEX (BFO), try multiple symbol patterns
             if index_name == "SENSEX":
-                # Try multiple patterns: with underscore, with space, without anything
                 patterns = [f"{config['symbol']}_{atm}CE", f"{config['symbol']} {atm} CE", f"{config['symbol']}{atm}CE"]
                 ce_token = None
                 pe_token = None
@@ -1865,7 +1866,7 @@ def get_current_atm_tokens(index_name):
                             ce_token = str(ce_resp["data"][0].get("symboltoken"))
                             ce_symbol = str(ce_resp["data"][0].get("symbol"))
                             break
-                    except:
+                    except Exception:
                         continue
                 for pat in patterns:
                     pat_pe = pat.replace("CE", "PE")
@@ -1875,13 +1876,13 @@ def get_current_atm_tokens(index_name):
                             pe_token = str(pe_resp["data"][0].get("symboltoken"))
                             pe_symbol = str(pe_resp["data"][0].get("symbol"))
                             break
-                    except:
+                    except Exception:
                         continue
                 if ce_token and pe_token:
                     INDEX_TOKENS[index_name].update({
-                        "ce_token": ce_token, 
+                        "ce_token": ce_token,
                         "pe_token": pe_token,
-                        "atm_strike": atm, 
+                        "atm_strike": atm,
                         "expiry": expiry,
                         "expiry_date": next_expiry,
                         "ce_symbol": ce_symbol,
@@ -1890,7 +1891,7 @@ def get_current_atm_tokens(index_name):
                     logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
                     return ce_token, pe_token
             else:
-                # Original code for NFO indices
+                # Original logic for NFO indices
                 ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
                 if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
                     ce_token = str(ce_resp["data"][0].get("symboltoken"))
@@ -1901,9 +1902,9 @@ def get_current_atm_tokens(index_name):
                     pe_symbol = str(pe_resp["data"][0].get("symbol"))
                 if ce_token and pe_token:
                     INDEX_TOKENS[index_name].update({
-                        "ce_token": ce_token, 
+                        "ce_token": ce_token,
                         "pe_token": pe_token,
-                        "atm_strike": atm, 
+                        "atm_strike": atm,
                         "expiry": expiry,
                         "expiry_date": next_expiry,
                         "ce_symbol": ce_symbol,
@@ -1911,26 +1912,6 @@ def get_current_atm_tokens(index_name):
                     })
                     logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
                     return ce_token, pe_token
-            if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                ce_symbol = str(ce_resp["data"][0].get("symbol"))
-            pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
-            if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                pe_symbol = str(pe_resp["data"][0].get("symbol"))
-
-            if ce_token and pe_token:
-                INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token, 
-                    "pe_token": pe_token,
-                    "atm_strike": atm, 
-                    "expiry": expiry,
-                    "expiry_date": next_expiry,
-                    "ce_symbol": ce_symbol or f"{config['symbol']}{atm}CE",
-                    "pe_symbol": pe_symbol or f"{config['symbol']}{atm}PE"
-                })
-                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
-                return ce_token, pe_token
         except Exception as e:
             logger.error(f"Search fallback error {index_name}: {e}")
 
