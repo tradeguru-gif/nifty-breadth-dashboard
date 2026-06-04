@@ -1,4 +1,4 @@
-# === VERSION 12.1 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
+# === VERSION 12.2 From DEEPSEEK - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
 # Fixes applied:
 # 1. Fixed "Premium Invalid: Rs0" - better token fetching, relaxed premium validation, auto-refresh
 # 2. Fixed indentation bug in live_signals() endpoint (return was inside for loop)
@@ -166,12 +166,12 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================================
-# INDEX CONFIGURATION - V12 ENHANCED
+# INDEX CONFIGURATION - V12 ENHANCED (SENSEX NOW ACTIVE)
 # ============================================================================
 INDEX_CONFIG = {
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
-        "lot_size": 50, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "lot_size": 50, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "BANKNIFTY",
@@ -179,7 +179,7 @@ INDEX_CONFIG = {
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY",
-        "lot_size": 25, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "lot_size": 25, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY",
@@ -187,7 +187,7 @@ INDEX_CONFIG = {
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY",
-        "lot_size": 40, "expiry_weekday": 1, "active": True,  # Tuesday = 1
+        "lot_size": 40, "expiry_weekday": 1, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
@@ -195,7 +195,7 @@ INDEX_CONFIG = {
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY",
-        "lot_size": 75, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "lot_size": 75, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
@@ -203,11 +203,12 @@ INDEX_CONFIG = {
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": False,  # Friday = 4
+        "lot_size": 15, "expiry_weekday": 4, "active": True,   # <-- ACTIVATED
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
-        "greeks_enabled": False, "pcr_enabled": False
+        "greeks_enabled": True,    # <-- Optional: enable Greeks for SENSEX
+        "pcr_enabled": True        # <-- Optional: enable PCR for SENSEX
     }
 }
 
