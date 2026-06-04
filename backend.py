@@ -1192,12 +1192,12 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # V11 CORE FUNCTIONS (PRESERVED)
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
-    """Relaxed premium validation to prevent false 'Premium Invalid' errors."""
     if premium <= 0 or spot_price <= 0:
         return False
     premium_pct = premium / spot_price
-    # Relaxed bounds: 0.02% to 20% of spot (was 0.1% to 15%)
-    return 0.0002 < premium_pct < 0.20
+    # For SENSEX, allow slightly higher max (0.25 instead of 0.20)
+    max_pct = 0.25 if spot_price > 50000 else 0.20
+    return 0.0002 < premium_pct < max_pct
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -1456,8 +1456,20 @@ def get_index_spot(index_name):
     if not config: return None
     _, _, obj = get_auth_token()
     if not obj: return None
-    if index_name == "SENSEX":
+       if index_name == "SENSEX":
         try:
+            # Use the token directly from config, NOT searchScrip
+            config = INDEX_CONFIG[index_name]
+            resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
+            ltp = safe_ltp(resp)
+            if ltp is not None:
+                if ltp > 100000: ltp /= 100
+                # Validate SENSEX range (50k-100k)
+                if 50000 < ltp < 100000:
+                    return ltp
+                else:
+                    logger.warning(f"SENSEX spot {ltp} out of range, trying fallback...")
+            # Fallback: try searchScrip for "SENSEX" (old method)
             resp = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
             if resp and resp.get("status") and resp.get("data") and len(resp["data"]) > 0:
                 token = str(resp["data"][0].get("symboltoken"))
@@ -1838,7 +1850,67 @@ def get_current_atm_tokens(index_name):
         ce_token = pe_token = None
         ce_symbol = pe_symbol = None
         try:
-            ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
+                        # For SENSEX (BFO), symbol format may need underscore or space
+            if index_name == "SENSEX":
+                # Try multiple patterns: with underscore, with space, without anything
+                patterns = [f"{config['symbol']}_{atm}CE", f"{config['symbol']} {atm} CE", f"{config['symbol']}{atm}CE"]
+                ce_token = None
+                pe_token = None
+                ce_symbol = None
+                pe_symbol = None
+                for pat in patterns:
+                    try:
+                        ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
+                        if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
+                            ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                            ce_symbol = str(ce_resp["data"][0].get("symbol"))
+                            break
+                    except:
+                        continue
+                for pat in patterns:
+                    pat_pe = pat.replace("CE", "PE")
+                    try:
+                        pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat_pe)
+                        if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
+                            pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                            pe_symbol = str(pe_resp["data"][0].get("symbol"))
+                            break
+                    except:
+                        continue
+                if ce_token and pe_token:
+                    INDEX_TOKENS[index_name].update({
+                        "ce_token": ce_token, 
+                        "pe_token": pe_token,
+                        "atm_strike": atm, 
+                        "expiry": expiry,
+                        "expiry_date": next_expiry,
+                        "ce_symbol": ce_symbol,
+                        "pe_symbol": pe_symbol
+                    })
+                    logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
+                    return ce_token, pe_token
+            else:
+                # Original code for NFO indices
+                ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
+                if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
+                    ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                    ce_symbol = str(ce_resp["data"][0].get("symbol"))
+                pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
+                if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
+                    pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                    pe_symbol = str(pe_resp["data"][0].get("symbol"))
+                if ce_token and pe_token:
+                    INDEX_TOKENS[index_name].update({
+                        "ce_token": ce_token, 
+                        "pe_token": pe_token,
+                        "atm_strike": atm, 
+                        "expiry": expiry,
+                        "expiry_date": next_expiry,
+                        "ce_symbol": ce_symbol,
+                        "pe_symbol": pe_symbol
+                    })
+                    logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
+                    return ce_token, pe_token
             if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
                 ce_token = str(ce_resp["data"][0].get("symboltoken"))
                 ce_symbol = str(ce_resp["data"][0].get("symbol"))
