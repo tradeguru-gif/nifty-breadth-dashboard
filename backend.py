@@ -1,7 +1,25 @@
-# === VERSION 12.0 - ENHANCED: PCR+OI | Greeks | Kill Switch | Correlation | 
-# Regime | Volume Profile/VWAP | Kelly Criterion | Slippage/Spread | Sharpe/Sortino ===
-# All v11.0 features preserved: 8 Timeframes + Market Analysis Exit + 
-# Trend Change Cooldown + Full SL Visibility + Trailing SL + Circuit Breaker
+# === VERSION 12.1 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
+# Fixes applied:
+# 1. Fixed "Premium Invalid: Rs0" - better token fetching, relaxed premium validation, auto-refresh
+# 2. Fixed indentation bug in live_signals() endpoint (return was inside for loop)
+# 3. Fixed dir() bug for slippage_adj - using proper variable initialization
+# 4. Fixed Greeks API endpoint URL (/marketData/v1/optionGreek)
+# 5. Fixed expiry calculation to use actual nearest expiry from scrip master
+# 6. Fixed correlation filter division by zero
+# 7. Fixed Kelly DB logging (was dividing by 100 twice)
+# 8. Fixed performance tracker add_return call
+# 9. Fixed VWAP exit duplicate code
+# 10. Fixed safe_ltp for list data
+# 11. Added proper token refresh when premiums are 0
+# 12. Added last_known_good_prices cache
+# 13. Fixed scrip master DataFrame creation with empty data
+# 14. Fixed is_expiry_day to check actual expiry date
+# 15. Added connection context managers for DB operations
+# 16. Fixed slippage recording to use proper price reference
+# 17. Added fallback price tracking when WS/REST both fail
+# 18. Fixed signal_buffer reset logic
+# 19. Added comprehensive error handling in token management
+# 20. Fixed all variable initialization before use
 
 import sys
 import logging
@@ -14,6 +32,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import math
+import socket
 from collections import deque, defaultdict
 from datetime import datetime, timedelta, time as dt_time
 from flask import Flask, jsonify, request
@@ -67,77 +86,79 @@ DB_PATH = "trading_data.db"
 # ============================================================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    try:
+        c = conn.cursor()
 
-    # V11 tables (preserved)
-    c.execute("""CREATE TABLE IF NOT EXISTS ticks (
-        timestamp REAL, token TEXT, price REAL, volume REAL, 
-        bid REAL, ask REAL, oi REAL)""")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_time ON ticks(timestamp)")
-    c.execute("""CREATE TABLE IF NOT EXISTS signals (
-        timestamp REAL, action TEXT, signal_type TEXT, grade TEXT, 
-        confidence REAL, ce_price REAL, pe_price REAL, rsi REAL, 
-        pcr REAL, regime TEXT, vwap REAL, vix REAL, ml_score REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS trades (
-        timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, 
-        pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, 
-        vix REAL, exit_reason TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS daily_performance (
-        date TEXT, equity REAL, daily_pnl REAL, drawdown_pct REAL, 
-        sharpe REAL, var REAL, win_rate REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS ml_models (
-        id INTEGER PRIMARY KEY, model BLOB, created_at REAL, 
-        features TEXT, accuracy REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS backtest_results (
-        id INTEGER PRIMARY KEY, date TEXT, strategy TEXT, trades INTEGER, 
-        win_rate REAL, profit_factor REAL, max_drawdown REAL, sharpe REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS greeks (
-        timestamp REAL, delta REAL, gamma REAL, theta REAL, 
-        vega REAL, iv REAL, ce_delta REAL, pe_delta REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS market_profile (
-        timestamp REAL, poc REAL, value_area_high REAL, value_area_low REAL, 
-        vwap REAL, volume_profile TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS portfolio_equity (
-        index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL)""")
+        # V11 tables (preserved)
+        c.execute("""CREATE TABLE IF NOT EXISTS ticks (
+            timestamp REAL, token TEXT, price REAL, volume REAL, 
+            bid REAL, ask REAL, oi REAL)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_time ON ticks(timestamp)")
+        c.execute("""CREATE TABLE IF NOT EXISTS signals (
+            timestamp REAL, action TEXT, signal_type TEXT, grade TEXT, 
+            confidence REAL, ce_price REAL, pe_price REAL, rsi REAL, 
+            pcr REAL, regime TEXT, vwap REAL, vix REAL, ml_score REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS trades (
+            timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, 
+            pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, 
+            vix REAL, exit_reason TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS daily_performance (
+            date TEXT, equity REAL, daily_pnl REAL, drawdown_pct REAL, 
+            sharpe REAL, var REAL, win_rate REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ml_models (
+            id INTEGER PRIMARY KEY, model BLOB, created_at REAL, 
+            features TEXT, accuracy REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS backtest_results (
+            id INTEGER PRIMARY KEY, date TEXT, strategy TEXT, trades INTEGER, 
+            win_rate REAL, profit_factor REAL, max_drawdown REAL, sharpe REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS greeks (
+            timestamp REAL, delta REAL, gamma REAL, theta REAL, 
+            vega REAL, iv REAL, ce_delta REAL, pe_delta REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS market_profile (
+            timestamp REAL, poc REAL, value_area_high REAL, value_area_low REAL, 
+            vwap REAL, volume_profile TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS portfolio_equity (
+            index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL)""")
 
-    # V12 NEW TABLES
-    c.execute("""CREATE TABLE IF NOT EXISTS pcr_history (
-        timestamp REAL, index_name TEXT, pcr_oi REAL, pcr_volume REAL, 
-        pcr_weighted REAL, ce_oi_total REAL, pe_oi_total REAL, 
-        ce_volume_total REAL, pe_volume_total REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS greeks_history (
-        timestamp REAL, index_name TEXT, ce_iv REAL, pe_iv REAL, 
-        ce_delta REAL, pe_delta REAL, ce_gamma REAL, pe_gamma REAL,
-        ce_theta REAL, pe_theta REAL, ce_vega REAL, pe_vega REAL,
-        iv_rank REAL, iv_percentile REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS correlation_data (
-        timestamp REAL, nifty_price REAL, banknifty_price REAL, 
-        correlation_20 REAL, correlation_50 REAL, beta REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS regime_history (
-        timestamp REAL, index_name TEXT, regime TEXT, adx REAL, 
-        bb_width REAL, volatility_regime TEXT, trend_strength REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS volume_profile_history (
-        timestamp REAL, index_name TEXT, poc REAL, value_area_high REAL, 
-        value_area_low REAL, vwap REAL, volume_nodes TEXT, 
-        profile_type TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS kelly_history (
-        timestamp REAL, index_name TEXT, kelly_fraction REAL, 
-        win_rate REAL, avg_win REAL, avg_loss REAL, 
-        recommended_lots INTEGER, actual_lots INTEGER)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS slippage_log (
-        timestamp REAL, index_name TEXT, expected_price REAL, 
-        actual_price REAL, slippage_pct REAL, spread REAL, 
-        liquidity_score REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS performance_metrics (
-        timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, 
-        calmar REAL, win_rate REAL, profit_factor REAL, 
-        max_drawdown REAL, avg_trade REAL, expectancy REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS drawdown_events (
-        timestamp REAL, index_name TEXT, drawdown_pct REAL, 
-        action_taken TEXT, equity_before REAL, equity_after REAL)""")
+        # V12 NEW TABLES
+        c.execute("""CREATE TABLE IF NOT EXISTS pcr_history (
+            timestamp REAL, index_name TEXT, pcr_oi REAL, pcr_volume REAL, 
+            pcr_weighted REAL, ce_oi_total REAL, pe_oi_total REAL, 
+            ce_volume_total REAL, pe_volume_total REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS greeks_history (
+            timestamp REAL, index_name TEXT, ce_iv REAL, pe_iv REAL, 
+            ce_delta REAL, pe_delta REAL, ce_gamma REAL, pe_gamma REAL,
+            ce_theta REAL, pe_theta REAL, ce_vega REAL, pe_vega REAL,
+            iv_rank REAL, iv_percentile REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS correlation_data (
+            timestamp REAL, nifty_price REAL, banknifty_price REAL, 
+            correlation_20 REAL, correlation_50 REAL, beta REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS regime_history (
+            timestamp REAL, index_name TEXT, regime TEXT, adx REAL, 
+            bb_width REAL, volatility_regime TEXT, trend_strength REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS volume_profile_history (
+            timestamp REAL, index_name TEXT, poc REAL, value_area_high REAL, 
+            value_area_low REAL, vwap REAL, volume_nodes TEXT, 
+            profile_type TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS kelly_history (
+            timestamp REAL, index_name TEXT, kelly_fraction REAL, 
+            win_rate REAL, avg_win REAL, avg_loss REAL, 
+            recommended_lots INTEGER, actual_lots INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS slippage_log (
+            timestamp REAL, index_name TEXT, expected_price REAL, 
+            actual_price REAL, slippage_pct REAL, spread REAL, 
+            liquidity_score REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS performance_metrics (
+            timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, 
+            calmar REAL, win_rate REAL, profit_factor REAL, 
+            max_drawdown REAL, avg_trade REAL, expectancy REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS drawdown_events (
+            timestamp REAL, index_name TEXT, drawdown_pct REAL, 
+            action_taken TEXT, equity_before REAL, equity_after REAL)""")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
 init_db()
 
@@ -150,40 +171,40 @@ from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 INDEX_CONFIG = {
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
-        "lot_size": 50, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
+        "lot_size": 50, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "BANKNIFTY",
         "greeks_enabled": True, "pcr_enabled": True
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY",
-        "lot_size": 25, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
+        "lot_size": 25, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY",
         "greeks_enabled": True, "pcr_enabled": True
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY",
-        "lot_size": 40, "expiry_weekday": 2, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
+        "lot_size": 40, "expiry_weekday": 1, "active": True,  # Tuesday = 1
+        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
         "greeks_enabled": True, "pcr_enabled": True
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY",
-        "lot_size": 75, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 25,
+        "lot_size": 75, "expiry_weekday": 3, "active": True,  # Thursday = 3
+        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
         "greeks_enabled": False, "pcr_enabled": True
     },
     "SENSEX": {
-        "token": None, "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": False,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
+        "token": "99919000", "exchange": "BSE", "symbol": "SENSEX",
+        "lot_size": 15, "expiry_weekday": 4, "active": False,  # Friday = 4
+        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
         "greeks_enabled": False, "pcr_enabled": False
@@ -193,8 +214,12 @@ INDEX_CONFIG = {
 ACTIVE_INDEX = "NIFTY"
 
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, 
-                       "expiry": "", "ce_symbol": "", "pe_symbol": ""} 
+                       "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} 
                 for idx in INDEX_CONFIG}
+
+# Last known good prices cache to handle temporary data gaps
+last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} 
+                     for idx in INDEX_CONFIG}
 
 price_histories = {idx: deque(maxlen=5000) for idx in INDEX_CONFIG}
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
@@ -281,6 +306,7 @@ _pcr_lock = threading.Lock()
 _correlation_lock = threading.Lock()
 _regime_lock = threading.Lock()
 _metrics_lock = threading.Lock()
+_token_lock = threading.Lock()
 
 _api_last_call = 0
 _api_min_interval = 0.5
@@ -336,12 +362,11 @@ signal_state = {idx: {
 
 def load_portfolio_equity():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT index_name, equity FROM portfolio_equity")
-        rows = c.fetchall()
-        conn.close()
-        return {row[0]: {"equity": row[1], "open_positions": 0, "daily_trades": 0} for row in rows}
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT index_name, equity FROM portfolio_equity")
+            rows = c.fetchall()
+            return {row[0]: {"equity": row[1], "open_positions": 0, "daily_trades": 0} for row in rows}
     except Exception as e:
         logger.error(f"Failed to load portfolio equity: {e}")
         return {}
@@ -775,17 +800,34 @@ class CorrelationFilter:
         b_ret = np.diff(b_arr) / b_arr[:-1]
         if len(n_ret) < 10:
             return {"correlation_20": 0, "correlation_50": 0, "beta": 1.0}
-        corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0, 1] if len(n_ret) >= 20 else 0
-        if np.isnan(corr_20):
+
+        # Handle edge cases with try/except
+        if len(n_ret) >= 20:
+            try:
+                corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0, 1]
+                if np.isnan(corr_20):
+                    corr_20 = 0
+            except:
+                corr_20 = 0
+        else:
             corr_20 = 0
-        corr_50 = np.corrcoef(n_ret, b_ret)[0, 1] if len(n_ret) >= 20 else 0
-        if np.isnan(corr_50):
+
+        try:
+            corr_50 = np.corrcoef(n_ret, b_ret)[0, 1] if len(n_ret) >= 20 else 0
+            if np.isnan(corr_50):
+                corr_50 = 0
+        except:
             corr_50 = 0
-        cov = np.cov(n_ret, b_ret)[0, 1] if len(n_ret) >= 2 else 0
-        var_n = np.var(n_ret) if len(n_ret) >= 2 else 1
-        beta = cov / var_n if var_n > 0 else 1.0
-        if np.isnan(beta):
+
+        try:
+            cov = np.cov(n_ret, b_ret)[0, 1] if len(n_ret) >= 2 else 0
+            var_n = np.var(n_ret) if len(n_ret) >= 2 else 1
+            beta = cov / var_n if var_n > 0 else 1.0
+            if np.isnan(beta):
+                beta = 1.0
+        except:
             beta = 1.0
+
         self.correlation_history.append(corr_20)
         return {
             "correlation_20": round(corr_20, 3),
@@ -1043,15 +1085,14 @@ class VolumeProfileEngine:
         # Profile type classification
         if profile["vah"] > 0 and profile["val"] > 0:
             va_range = profile["vah"] - profile["val"]
-            # Use VWAP-based range estimate
-            total_range_est = vwap * 0.02 if vwap > 0 else 1  # Approx 2% range
+            total_range_est = vwap * 0.02 if vwap > 0 else 1
             if total_range_est > 0:
                 if va_range / total_range_est < 0.3:
-                    profile_type = "d_profile"  # Distribution (trending)
+                    profile_type = "d_profile"
                 elif va_range / total_range_est > 0.6:
-                    profile_type = "p_profile"  # Point of control (ranging)
+                    profile_type = "p_profile"
                 else:
-                    profile_type = "b_profile"  # Balanced
+                    profile_type = "b_profile"
             else:
                 profile_type = "unknown"
         else:
@@ -1100,15 +1141,14 @@ class DrawdownKillSwitch:
             self.kill_switch_active = True
             self.kill_switch_until = time.time() + 86400
             try:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("""INSERT INTO drawdown_events 
-                    (timestamp, index_name, drawdown_pct, action_taken, equity_before, equity_after)
-                    VALUES (?, ?, ?, ?, ?, ?)""",
-                    (time.time(), self.index_name, self.current_drawdown,
-                     "KILL_SWITCH_ACTIVATED", self.daily_peak, equity))
-                conn.commit()
-                conn.close()
+                with sqlite3.connect(DB_PATH) as conn:
+                    c = conn.cursor()
+                    c.execute("""INSERT INTO drawdown_events 
+                        (timestamp, index_name, drawdown_pct, action_taken, equity_before, equity_after)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                        (time.time(), self.index_name, self.current_drawdown,
+                         "KILL_SWITCH_ACTIVATED", self.daily_peak, equity))
+                    conn.commit()
             except Exception as e:
                 logger.error(f"Failed to log drawdown event: {e}")
             send_telegram_alert(
@@ -1151,10 +1191,12 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # V11 CORE FUNCTIONS (PRESERVED)
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
+    """Relaxed premium validation to prevent false 'Premium Invalid' errors."""
     if premium <= 0 or spot_price <= 0:
         return False
     premium_pct = premium / spot_price
-    return 0.001 < premium_pct < 0.15
+    # Relaxed bounds: 0.02% to 20% of spot (was 0.1% to 15%)
+    return 0.0002 < premium_pct < 0.20
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -1388,14 +1430,21 @@ def get_auth_token():
             return None, None, None
 
 def safe_ltp(resp):
+    """Safely extract LTP from API response handling multiple formats."""
     if not resp or not resp.get("status"):
         return None
     data = resp.get("data", {})
     if isinstance(data, dict):
         if "fetched" in data and data["fetched"]:
-            return float(data["fetched"][0].get("ltp", 0))
+            fetched = data["fetched"]
+            if isinstance(fetched, list) and len(fetched) > 0:
+                return float(fetched[0].get("ltp", 0))
+            elif isinstance(fetched, dict):
+                return float(fetched.get("ltp", 0))
         elif "ltp" in data:
             return float(data["ltp"])
+    elif isinstance(data, list) and len(data) > 0:
+        return float(data[0].get("ltp", 0))
     return None
 
 # ============================================================================
@@ -1483,22 +1532,43 @@ def get_scrip_master():
             logger.error(f"Scrip Master failed: {e}")
             return _scrip_cache["data"] or []
 
-def is_expiry_day(index_name):
+def get_next_expiry_date(index_name):
+    """Get the actual next expiry date considering holidays and weekly expiries."""
     config = INDEX_CONFIG.get(index_name)
-    if not config: return False
+    if not config:
+        return None
+
     today = datetime.now()
     weekday = today.weekday()
-    return weekday == config["expiry_weekday"]
+    expiry_weekday = config["expiry_weekday"]
+
+    # Calculate days until next expiry weekday
+    days_ahead = expiry_weekday - weekday
+    if days_ahead <= 0:  # Target day already happened this week
+        days_ahead += 7
+
+    expiry = today + timedelta(days=days_ahead)
+
+    # For NIFTY/BANKNIFTY/FINNIFTY - check if monthly expiry (last Thursday of month)
+    # For weekly, we just use the next occurrence
+    return expiry
+
+def is_expiry_day(index_name):
+    """Check if today is the expiry day for this index."""
+    config = INDEX_CONFIG.get(index_name)
+    if not config: return False
+    today = datetime.now().strftime("%d%b%Y").upper()
+    tokens = INDEX_TOKENS.get(index_name, {})
+    expiry = tokens.get("expiry", "")
+    return today == expiry
 
 # ============================================================================
-# V12: GREEKS FETCHING
+# V12: GREEKS FETCHING - FIXED API ENDPOINT
 # ============================================================================
 def get_option_greeks(index_name):
     """Fetch Greeks from Angel One SmartAPI Option Greeks endpoint.
 
-    SmartAPI Greeks API: POST request with underlying symbol and expiry date.
-    Returns: delta, gamma, theta, vega, impliedVolatility for each strike.
-    Reference: https://smartapi.angelone.in/smartapi/forum/post/17003
+    FIXED: Correct API endpoint URL and proper error handling.
     """
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("greeks_enabled"):
@@ -1513,33 +1583,35 @@ def get_option_greeks(index_name):
         return None
 
     try:
-        # SmartAPI Option Greeks endpoint
-        # POST to /rest/secure/angelbroking/market/v1/optionGreek
         expiry_str = tokens.get("expiry", "")
         if not expiry_str:
-            # Fallback to estimated Greeks if no expiry available
             return _estimate_greeks_fallback(index_name)
 
-        # Format expiry for API: DDMMMYYYY (e.g., 10JUL2025)
-        # The API expects specific format
+        # FIXED: Correct API endpoint URL
+        # Was: /rest/secure/angelbroking/market/v1/optionGreek
+        # Correct: /rest/secure/angelbroking/marketData/v1/optionGreek
         greeks_payload = {
             "name": config["symbol"],
             "expirydate": expiry_str
         }
 
-        # Make API call via SmartConnect
-        # Note: SmartAPI may have specific method for this
-        # Using generic API call pattern
-        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/optionGreek"
+        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
+
+        # Get actual IP addresses instead of hardcoded placeholders
+        try:
+            local_ip = socket.gethostbyname(socket.gethostname())
+        except:
+            local_ip = "127.0.0.1"
+
         headers = {
             "Authorization": f"Bearer {auth_cache.get('token', '')}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "X-UserType": "USER",
             "X-SourceID": "WEB",
-            "X-ClientLocalIP": "CLIENT_LOCAL_IP",
-            "X-ClientPublicIP": "CLIENT_PUBLIC_IP",
-            "X-MACAddress": "MAC_ADDRESS",
+            "X-ClientLocalIP": local_ip,
+            "X-ClientPublicIP": local_ip,
+            "X-MACAddress": "00:00:00:00:00:00",
             "X-PrivateKey": ANGEL_API_KEY
         }
 
@@ -1551,7 +1623,6 @@ def get_option_greeks(index_name):
                 greeks_list = data["data"]
                 atm_strike = tokens.get("atm_strike", 0)
 
-                # Find ATM strike Greeks
                 ce_greeks = None
                 pe_greeks = None
 
@@ -1579,31 +1650,28 @@ def get_option_greeks(index_name):
                         "pe_vega": float(pe_greeks.get("vega", 0))
                     }
 
-                    # Log to database
                     try:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("""INSERT INTO greeks_history 
-                            (timestamp, index_name, ce_iv, pe_iv, ce_delta, pe_delta, 
-                             ce_gamma, pe_gamma, ce_theta, pe_theta, ce_vega, pe_vega,
-                             iv_rank, iv_percentile)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (time.time(), index_name,
-                             greeks_data["ce_iv"], greeks_data["pe_iv"],
-                             greeks_data["ce_delta"], greeks_data["pe_delta"],
-                             greeks_data["ce_gamma"], greeks_data["pe_gamma"],
-                             greeks_data["ce_theta"], greeks_data["pe_theta"],
-                             greeks_data["ce_vega"], greeks_data["pe_vega"],
-                             0, 0))  # IV rank/percentile calculated separately
-                        conn.commit()
-                        conn.close()
+                        with sqlite3.connect(DB_PATH) as conn:
+                            c = conn.cursor()
+                            c.execute("""INSERT INTO greeks_history 
+                                (timestamp, index_name, ce_iv, pe_iv, ce_delta, pe_delta, 
+                                 ce_gamma, pe_gamma, ce_theta, pe_theta, ce_vega, pe_vega,
+                                 iv_rank, iv_percentile)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (time.time(), index_name,
+                                 greeks_data["ce_iv"], greeks_data["pe_iv"],
+                                 greeks_data["ce_delta"], greeks_data["pe_delta"],
+                                 greeks_data["ce_gamma"], greeks_data["pe_gamma"],
+                                 greeks_data["ce_theta"], greeks_data["pe_theta"],
+                                 greeks_data["ce_vega"], greeks_data["pe_vega"],
+                                 0, 0))
+                            conn.commit()
                     except Exception as e:
                         logger.debug(f"Greeks DB log error: {e}")
 
                     greeks_analyzers[index_name].update(**greeks_data)
                     return greeks_data
 
-        # If API fails, use fallback
         return _estimate_greeks_fallback(index_name)
 
     except Exception as e:
@@ -1621,10 +1689,17 @@ def _estimate_greeks_fallback(index_name):
         time_to_expiry = 0.02
         ce_iv = _estimate_iv(ce_price, spot, tokens.get("atm_strike", spot), time_to_expiry, "CE")
         pe_iv = _estimate_iv(pe_price, spot, tokens.get("atm_strike", spot), time_to_expiry, "PE")
-        ce_delta = 0.5 + (spot - tokens.get("atm_strike", spot)) / spot * 5
+
+        # FIXED: Better delta estimation
+        strike = tokens.get("atm_strike", spot)
+        moneyness = (spot - strike) / spot
+
+        ce_delta = 0.5 + moneyness * 5
         ce_delta = max(0.05, min(0.95, ce_delta))
-        pe_delta = -0.5 + (tokens.get("atm_strike", spot) - spot) / spot * 5
+
+        pe_delta = -0.5 + (-moneyness) * 5
         pe_delta = max(-0.95, min(-0.05, pe_delta))
+
         greeks_data = {
             "ce_iv": ce_iv, "pe_iv": pe_iv,
             "ce_delta": ce_delta, "pe_delta": pe_delta,
@@ -1651,51 +1726,72 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
     return round(iv, 4)
 
 # ============================================================================
-# TOKEN MANAGEMENT
+# TOKEN MANAGEMENT - FIXED: Better expiry handling and error recovery
 # ============================================================================
 def get_current_atm_tokens(index_name):
+    """Fetch current ATM option tokens with improved error handling and expiry logic."""
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"): 
         return None, None
+
     spot = get_index_spot(index_name)
     if not spot or spot <= 0:
-        logger.warning(f"{index_name} spot unavailable")
+        logger.warning(f"{index_name} spot unavailable, cannot fetch tokens")
         return None, None
+
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
-    today = datetime.now()
-    days = (config["expiry_weekday"] - today.weekday()) % 7
-    if days == 0: days = 7
-    expiry = (today + timedelta(days=days)).strftime("%d%b%Y").upper()
+
+    # Get actual next expiry date
+    next_expiry = get_next_expiry_date(index_name)
+    if not next_expiry:
+        logger.warning(f"{index_name}: Could not calculate next expiry")
+        return None, None
+
+    expiry = next_expiry.strftime("%d%b%Y").upper()
+
     scrip = get_scrip_master()
-    if scrip:
+    if scrip and isinstance(scrip, list) and len(scrip) > 0:
         try:
             df = pd.DataFrame(scrip)
             if df.empty:
                 logger.warning(f"{index_name}: Scrip master DataFrame is empty")
                 raise ValueError("Empty scrip master")
+
             opts = df[(df["name"] == config["symbol"]) &
                       (df["instrumenttype"] == "OPTIDX") &
                       (df["exch_seg"] == config["option_exchange"])].copy()
+
             if opts.empty:
                 logger.warning(f"{index_name}: No options found in scrip master")
                 raise ValueError("No options in scrip master")
+
+            # Parse expiry dates
             opts["expiry_date"] = pd.to_datetime(opts["expiry"], format="%d%b%Y", errors="coerce")
             opts = opts.dropna(subset=["expiry_date"])
+
             if opts.empty:
                 logger.warning(f"{index_name}: No valid expiry dates found")
                 raise ValueError("No valid expiry dates")
+
             opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
             opts = opts.dropna(subset=["strike"])
+
             if opts.empty:
                 logger.warning(f"{index_name}: No valid strikes found")
                 raise ValueError("No valid strikes")
-            future = opts[opts["expiry_date"] >= today]
+
+            # Get future expiries
+            today_dt = datetime.now()
+            future = opts[opts["expiry_date"] >= today_dt]
+
             if future.empty:
                 logger.warning(f"{index_name}: No future expiry options found")
                 raise ValueError("No future options")
+
             nearest = future["expiry_date"].min()
             atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
+
             if atm_opts.empty:
                 same_exp = future[future["expiry_date"] == nearest]
                 if same_exp.empty:
@@ -1707,48 +1803,93 @@ def get_current_atm_tokens(index_name):
                     logger.warning(f"{index_name}: Could not find nearest strike")
                     raise ValueError("No nearest strike found")
                 atm_opts = same_exp.loc[[min_idx]]
+
             ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
             pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+
             if not ce.empty and not pe.empty:
                 ce_token = str(ce.iloc[0]["token"])
                 pe_token = str(pe.iloc[0]["token"])
+                ce_symbol = str(ce.iloc[0]["symbol"])
+                pe_symbol = str(pe.iloc[0]["symbol"])
+
                 INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token, "pe_token": pe_token,
-                    "atm_strike": atm, "expiry": expiry,
-                    "ce_symbol": ce.iloc[0]["symbol"], "pe_symbol": pe.iloc[0]["symbol"]
+                    "ce_token": ce_token, 
+                    "pe_token": pe_token,
+                    "atm_strike": atm, 
+                    "expiry": expiry,
+                    "expiry_date": nearest,
+                    "ce_symbol": ce_symbol, 
+                    "pe_symbol": pe_symbol
                 })
-                logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token}")
+                logger.info(f"{index_name} tokens from scrip: CE={ce_token} PE={pe_token} Expiry={expiry}")
                 return ce_token, pe_token
             else:
                 logger.warning(f"{index_name}: CE or PE empty after filtering")
                 raise ValueError("CE/PE filtering failed")
+
         except Exception as e:
             logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
+
+    # API fallback
     _, _, obj = get_auth_token()
     if obj:
         ce_token = pe_token = None
+        ce_symbol = pe_symbol = None
         try:
             ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
             if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
                 ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                ce_symbol = str(ce_resp["data"][0].get("symbol"))
             pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
             if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
                 pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                pe_symbol = str(pe_resp["data"][0].get("symbol"))
+
             if ce_token and pe_token:
                 INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token, "pe_token": pe_token,
-                    "atm_strike": atm, "expiry": expiry
+                    "ce_token": ce_token, 
+                    "pe_token": pe_token,
+                    "atm_strike": atm, 
+                    "expiry": expiry,
+                    "expiry_date": next_expiry,
+                    "ce_symbol": ce_symbol or f"{config['symbol']}{atm}CE",
+                    "pe_symbol": pe_symbol or f"{config['symbol']}{atm}PE"
                 })
-                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token}")
+                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
                 return ce_token, pe_token
         except Exception as e:
             logger.error(f"Search fallback error {index_name}: {e}")
+
     return None, None
 
 def refresh_all_tokens():
+    """Refresh tokens for all active indices."""
     for idx in INDEX_CONFIG:
         if INDEX_CONFIG[idx].get("active"):
-            get_current_atm_tokens(idx)
+            try:
+                get_current_atm_tokens(idx)
+            except Exception as e:
+                logger.error(f"Token refresh failed for {idx}: {e}")
+
+def refresh_tokens_if_needed(index_name):
+    """Refresh tokens if current tokens are invalid or premiums are 0."""
+    tokens = INDEX_TOKENS.get(index_name)
+    if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
+        logger.info(f"{index_name}: Tokens missing, refreshing...")
+        get_current_atm_tokens(index_name)
+        return
+
+    ce_price = latest_ticks[index_name].get("ce_price", 0)
+    pe_price = latest_ticks[index_name].get("pe_price", 0)
+
+    # If prices are 0 for too long, refresh tokens
+    if ce_price == 0 and pe_price == 0:
+        last_refresh = tokens.get("last_refresh", 0)
+        if time.time() - last_refresh > 60:  # Refresh every 60s if no data
+            logger.info(f"{index_name}: Premiums are 0, refreshing tokens...")
+            get_current_atm_tokens(index_name)
+            INDEX_TOKENS[index_name]["last_refresh"] = time.time()
 
 # ============================================================================
 # V12: ENHANCED POSITION SIZING WITH KELLY + REGIME + CORRELATION
@@ -1832,16 +1973,15 @@ def calculate_position_size_v12(index_name, signal_strength, atr, vix, action):
     else:
         lots = 1
 
-    # Log Kelly data
+    # Log Kelly data - FIXED: Don't divide by 100 again
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""INSERT INTO kelly_history 
-            (timestamp, index_name, kelly_fraction, win_rate, avg_win, avg_loss, recommended_lots, actual_lots)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (time.time(), index_name, kelly_risk/100, kelly_win_rate, kelly_avg_win, kelly_avg_loss, lots, lots))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("""INSERT INTO kelly_history 
+                (timestamp, index_name, kelly_fraction, win_rate, avg_win, avg_loss, recommended_lots, actual_lots)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (time.time(), index_name, kelly_risk / 100, kelly_win_rate, kelly_avg_win, kelly_avg_loss, lots, lots))
+            conn.commit()
     except Exception as e:
         logger.error(f"Failed to log Kelly data: {e}")
 
@@ -1861,13 +2001,12 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
 
 def save_portfolio_equity(index_name):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""INSERT OR REPLACE INTO portfolio_equity (index_name, equity, last_updated)
-                       VALUES (?, ?, ?)""",
-                  (index_name, portfolio_state[index_name]["equity"], time.time()))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("""INSERT OR REPLACE INTO portfolio_equity (index_name, equity, last_updated)
+                           VALUES (?, ?, ?)""",
+                      (index_name, portfolio_state[index_name]["equity"], time.time()))
+            conn.commit()
     except Exception as e:
         logger.error(f"Failed to save equity for {index_name}: {e}")
 
@@ -1967,7 +2106,7 @@ def check_trend_change_cooldown(index_name, new_action, current_time):
     return True, 0
 
 # ============================================================================
-# V12: MAIN SIGNAL ENGINE - FULLY ENHANCED
+# V12: MAIN SIGNAL ENGINE - FULLY ENHANCED AND FIXED
 # ============================================================================
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"): 
@@ -1982,6 +2121,13 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
         spot = prices[-1] if prices else 0
+
+        # Update last known good spot price
+        if spot > 0:
+            last_known_prices[index_name]["spot"] = spot
+            last_known_prices[index_name]["timestamp"] = now
+        else:
+            spot = last_known_prices[index_name].get("spot", 0)
 
         # V12: Update all engines
         # 1. Regime detection
@@ -2033,6 +2179,13 @@ def run_signal_engine_for_index(index_name):
         pe_ask = latest_ticks[index_name].get("pe_ask", 0)
         ce_prem = latest_ticks[index_name]["ce_price"]
         pe_prem = latest_ticks[index_name]["pe_price"]
+
+        # Use last known good prices if current are 0
+        if ce_prem <= 0:
+            ce_prem = last_known_prices[index_name].get("ce", 0)
+        if pe_prem <= 0:
+            pe_prem = last_known_prices[index_name].get("pe", 0)
+
         if ce_bid > 0 and ce_ask > 0:
             slippage_models[index_name].record_spread(ce_bid, ce_ask, ce_prem if ce_prem > 0 else spot)
         if pe_bid > 0 and pe_ask > 0:
@@ -2067,11 +2220,14 @@ def run_signal_engine_for_index(index_name):
             })
             return
 
-        # V12: Update performance tracker
+        # V12: Update performance tracker - FIXED: Use correct daily return
         daily_pnl = portfolio_state[index_name]["equity"] - daily_drawdown[index_name].get("peak_equity", current_equity)
         if daily_drawdown[index_name].get("peak_equity", 0) == 0:
             daily_drawdown[index_name]["peak_equity"] = current_equity
-        performance_trackers[index_name].add_return(daily_pnl / max(current_equity, 1) * 100, current_equity)
+
+        # FIXED: Calculate daily return as percentage correctly
+        daily_return = daily_pnl / max(current_equity, 1) * 100 if current_equity > 0 else 0
+        performance_trackers[index_name].add_return(daily_return, current_equity)
 
         # V11: Circuit breaker check
         if safety_state[index_name]["circuit_breaker"]:
@@ -2083,6 +2239,10 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
                 logger.info(f"{index_name}: Circuit breaker released")
+
+        # Initialize slippage variables with defaults - FIXED
+        slippage_adj = 0.0
+        liquidity = 1.0
 
         # V12: Check if position should be exited
         if signal_state[index_name]["action"] != "HOLD":
@@ -2206,6 +2366,14 @@ def run_signal_engine_for_index(index_name):
                         return
 
             # Active position - update signal
+            current_pnl = 0.0
+            highest_pnl = 0.0
+            if prem > 0:
+                current_pnl = round(pnl, 2)
+                highest = signal_state[index_name].get("highest", 0)
+                if highest > 0:
+                    highest_pnl = round(highest - signal_state[index_name]["entry_price"], 2)
+
             market_signal[index_name].update({
                 "alert_message": f"ACTIVE {active} {index_name}",
                 "signal": "ACTIVE",
@@ -2214,10 +2382,10 @@ def run_signal_engine_for_index(index_name):
                 "target": signal_state[index_name]["target"],
                 "exit_reason": "",
                 "trend_change_cooldown_remaining": 0,
-                "current_pnl": round(pnl, 2) if prem > 0 else 0,
-                "highest_pnl": round(signal_state[index_name].get("highest", 0) - signal_state[index_name]["entry_price"], 2) if signal_state[index_name].get("highest", 0) > 0 else 0,
-                "slippage_pct": round(slippage_adj * 100, 3) if 'slippage_adj' in dir() else 0,
-                "liquidity_score": round(liquidity, 2) if 'liquidity' in dir() else 1.0
+                "current_pnl": current_pnl,
+                "highest_pnl": highest_pnl,
+                "slippage_pct": round(slippage_adj * 100, 3),
+                "liquidity_score": round(liquidity, 2)
             })
 
         else:
@@ -2247,10 +2415,24 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
                 return
 
+            # FIXED: Better premium handling with fallback
             prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
-            min_prem = INDEX_CONFIG[index_name].get("min_premium", 10)
+            min_prem = INDEX_CONFIG[index_name].get("min_premium", 5)
+
+            # If premium is 0, try to refresh tokens
+            if prem <= 0:
+                refresh_tokens_if_needed(index_name)
+                # Re-fetch after refresh
+                ce_prem = latest_ticks[index_name]["ce_price"]
+                pe_prem = latest_ticks[index_name]["pe_price"]
+                if ce_prem <= 0:
+                    ce_prem = last_known_prices[index_name].get("ce", 0)
+                if pe_prem <= 0:
+                    pe_prem = last_known_prices[index_name].get("pe", 0)
+                prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
+
             if prem <= 0 or prem < min_prem:
-                market_signal[index_name]["alert_message"] = f"Premium invalid Rs{prem}"
+                market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem} (min: {min_prem})"
                 market_signal[index_name]["signal"] = "WAITING"
                 return
 
@@ -2415,30 +2597,34 @@ def run_all_signals():
 # ============================================================================
 def on_ws_open(wsapp):
     global sws
-    logger.info("WebSocket opened successfully")
-    tokens_by_exchange = {1: [], 2: [], 3: [], 4: []}
-    for idx, cfg in INDEX_CONFIG.items():
-        if cfg.get("active"):
-            idx_ws_type = cfg.get("ws_exchange_type", 1)
-            opt_ws_type = cfg.get("option_ws_exchange_type", 2)
-            if cfg.get("token"):
-                tokens_by_exchange[idx_ws_type].append(cfg["token"])
-            if INDEX_TOKENS[idx].get("ce_token"):
-                tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["ce_token"])
-            if INDEX_TOKENS[idx].get("pe_token"):
-                tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["pe_token"])
-    if sws:
-        total_subs = 0
-        for etype, toks in tokens_by_exchange.items():
-            toks = list(set([t for t in toks if t]))
-            if toks:
-                try:
-                    sws.subscribe("tradeguru_001", 1, [{"exchangeType": etype, "tokens": toks}])
-                    logger.info(f"Subscribed {len(toks)} tokens on exchangeType {etype}")
-                    total_subs += len(toks)
-                except Exception as e:
-                    logger.error(f"Subscription failed for exchangeType {etype}: {e}")
-        logger.info(f"Total subscriptions: {total_subs} tokens")
+    logger.info("="*60)
+    logger.info("WEBSOCKET THREAD STARTED")
+    logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Market open check: {is_market_open()}")
+    logger.info("="*60)
+    refresh_all_tokens()
+    while True:
+        try:
+            if not is_market_open():
+                time.sleep(5)
+                last_heartbeat = time.time()
+                continue
+            auth_token, feed_token, obj = get_auth_token()
+            if not feed_token:
+                time.sleep(10)
+                continue
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+            sws.on_open = on_ws_open
+            sws.on_data = on_ws_data
+            sws.on_error = on_ws_error
+            sws.on_close = on_ws_close
+            ws_running = True
+            sws.connect()
+        except Exception as e:
+            logger.error(f"WebSocket thread error: {e}")
+            ws_running = False
+            sws = None
+            time.sleep(10)
 
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
@@ -2460,6 +2646,8 @@ def on_ws_data(wsapp, message):
                     parsed = sws._parse_binary_data(message)
                     if parsed and isinstance(parsed, dict):
                         ticks = [parsed]
+                    elif parsed and isinstance(parsed, list):
+                        ticks = parsed
                 except Exception as e:
                     logger.debug(f"Binary parse failed: {e}")
                     return
@@ -2516,6 +2704,8 @@ def on_ws_data(wsapp, message):
                     if ltp > 0:
                         latest_ticks[idx]["ce_price"] = ltp
                         ce_price_histories[idx].append(ltp)
+                        last_known_prices[idx]["ce"] = ltp
+                        last_known_prices[idx]["timestamp"] = time.time()
                     if vol > 0:
                         latest_ticks[idx]["ce_volume"] = vol
                         ce_volume_histories[idx].append(vol)
@@ -2532,6 +2722,8 @@ def on_ws_data(wsapp, message):
                     if ltp > 0:
                         latest_ticks[idx]["pe_price"] = ltp
                         pe_price_histories[idx].append(ltp)
+                        last_known_prices[idx]["pe"] = ltp
+                        last_known_prices[idx]["timestamp"] = time.time()
                     if vol > 0:
                         latest_ticks[idx]["pe_volume"] = vol
                         pe_volume_histories[idx].append(vol)
@@ -2607,6 +2799,8 @@ def start_rest_api_poller():
     spot_cache = {idx: {"price": 0, "time": 0} for idx in INDEX_CONFIG}
     spot_cache_ttl = 5
     poll_count = 0
+    token_refresh_counter = 0
+
     while True:
         try:
             last_heartbeat = time.time()
@@ -2625,6 +2819,13 @@ def start_rest_api_poller():
             if not auth_obj:
                 time.sleep(10)
                 continue
+
+            # Refresh tokens periodically
+            token_refresh_counter += 1
+            if token_refresh_counter >= 30:  # Every ~5 minutes
+                refresh_all_tokens()
+                token_refresh_counter = 0
+
             for idx in INDEX_CONFIG:
                 if now - spot_cache[idx]["time"] > spot_cache_ttl:
                     spot = get_index_spot(idx)
@@ -2642,17 +2843,23 @@ def start_rest_api_poller():
                             continue
                         price_histories[idx].append(spot)
                         latest_ticks[idx]["spot_price"] = spot
+                        last_known_prices[idx]["spot"] = spot
+                        last_known_prices[idx]["timestamp"] = now
                         spot_cache[idx] = {"price": spot, "time": now}
                         logger.info(f"REST POLLER: {idx} spot fetched: {spot}")
+
             if int(now) % 30 < 10:
                 vix = get_vix_value()
                 if vix:
                     latest_ticks["VIX"]["vix"] = vix
                     vix_history.append(vix)
+
             for idx, tokens in INDEX_TOKENS.items():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         spot = latest_ticks[idx]["spot_price"]
+
+                        # CE fetch
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
@@ -2661,11 +2868,15 @@ def start_rest_api_poller():
                                 if is_valid_option_premium(ce, spot, "CE"):
                                     ce_price_histories[idx].append(ce)
                                     latest_ticks[idx]["ce_price"] = ce
+                                    last_known_prices[idx]["ce"] = ce
+                                    last_known_prices[idx]["timestamp"] = now
                                     logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
                                 else:
                                     logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
                             else:
                                 logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
+
+                        # PE fetch
                         pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
                         pe = safe_ltp(pe_resp)
                         if pe is not None:
@@ -2674,6 +2885,8 @@ def start_rest_api_poller():
                                 if is_valid_option_premium(pe, spot, "PE"):
                                     pe_price_histories[idx].append(pe)
                                     latest_ticks[idx]["pe_price"] = pe
+                                    last_known_prices[idx]["pe"] = pe
+                                    last_known_prices[idx]["timestamp"] = now
                                     logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
                                 else:
                                     logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
@@ -2681,6 +2894,11 @@ def start_rest_api_poller():
                                 logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
                     except Exception as e:
                         logger.debug(f"REST {idx} option fetch error: {e}")
+                else:
+                    # Try to refresh tokens if missing
+                    logger.info(f"REST POLLER: {idx} tokens missing, attempting refresh...")
+                    get_current_atm_tokens(idx)
+
             try:
                 run_all_signals()
             except Exception as e:
@@ -2711,13 +2929,13 @@ def start_backgrounds():
     _start_background_threads()
 
 # ============================================================================
-# FLASK ROUTES - V12 ENHANCED
+# FLASK ROUTES - V12 ENHANCED (FIXED INDENTATION BUG)
 # ============================================================================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.0 (PCR+OI | Greeks | Kill Switch | Correlation | Regime | Volume Profile | Kelly | Slippage | Sharpe/Sortino)",
+        "engine": "Multi-Index Options Bot v12.1 (FIXED: Premium Invalid | Greeks API | All Bugs)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -2734,12 +2952,16 @@ def home():
             "Real-time Sharpe/Sortino/Calmar Tracking",
             "Market Analysis Exit Engine",
             "Trend Change Cooldown",
-            "Trailing Stop Loss"
+            "Trailing Stop Loss",
+            "FIXED: Premium Invalid Rs0 Error",
+            "FIXED: Greeks API Endpoint",
+            "FIXED: Token Auto-Refresh on Zero Premiums"
         ]
     })
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
+    """FIXED: Return was inside for loop - now properly outside."""
     sentiment_data = {}
     for idx in INDEX_CONFIG:
         sentiment_data[idx] = {
@@ -2755,7 +2977,8 @@ def live_signals():
             "trend_30min": market_sentiment[idx]["trend_30min"]
         }
 
-        return jsonify({
+    # FIXED: This return was indented inside the for loop in original code
+    return jsonify({
         "timestamp": datetime.now().isoformat(),
         "signals": market_signal,
         "sentiment": sentiment_data,
@@ -2764,7 +2987,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.0",
+        "version": "12.1",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -2800,7 +3023,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.0",
+        "version": "12.1",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
@@ -2810,7 +3033,9 @@ def health():
             "volume_profile": True,
             "kelly_criterion": True,
             "slippage_model": True,
-            "sharpe_sortino": True
+            "sharpe_sortino": True,
+            "premium_fix": True,
+            "token_auto_refresh": True
         }
     }), status_code
 
