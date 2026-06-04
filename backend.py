@@ -2755,7 +2755,7 @@ def live_signals():
             "trend_30min": market_sentiment[idx]["trend_30min"]
         }
 
-    return jsonify({
+        return jsonify({
         "timestamp": datetime.now().isoformat(),
         "signals": market_signal,
         "sentiment": sentiment_data,
@@ -2765,7 +2765,6 @@ def live_signals():
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
         "version": "12.0",
-        # V12 additions
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -2773,18 +2772,18 @@ def live_signals():
         "correlation": latest_correlation,
         "performance": latest_metrics,
         "drawdown": {k: {
-            "current_drawdown": v.current_drawdown,
-            "kill_switch_active": v.is_active(),
-            "max_drawdown_pct": v.max_drawdown_pct
+            "current_drawdown": float(v.current_drawdown),
+            "kill_switch_active": bool(v.is_active()),
+            "max_drawdown_pct": float(v.max_drawdown_pct)
         } for k, v in kill_switches.items()},
         "slippage": {k: {
-            "liquidity_score": v.get_liquidity_score(),
-            "avg_spread_pct": round(np.mean(list(v.spread_history)) * 100, 3) if v.spread_history else 0
+            "liquidity_score": float(v.get_liquidity_score()),
+            "avg_spread_pct": round(float(np.mean(list(v.spread_history)) * 100), 3) if v.spread_history else 0.0
         } for k, v in slippage_models.items()},
         "kelly": {k: {
-            "recommended_risk_pct": round(v.get_recommended_risk_pct()[0], 2),
-            "win_rate": round(v.get_recommended_risk_pct()[1], 2),
-            "total_trades": v.win_count + v.loss_count
+            "recommended_risk_pct": round(float(v.get_recommended_risk_pct()[0]), 2),
+            "win_rate": round(float(v.get_recommended_risk_pct()[1]), 2),
+            "total_trades": int(v.win_count + v.loss_count)
         } for k, v in kelly_trackers.items()}
     })
 
