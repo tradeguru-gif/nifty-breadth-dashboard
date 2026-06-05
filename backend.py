@@ -2516,25 +2516,29 @@ def on_ws_open(wsapp):
                 "tokens": [tok["pe_token"]]
             })
 
-    if subscribe_tokens and sws:
-        try:
-            # correlation_id can be any string; mode 1 = LTP
-            sws.subscribe("admin", 1, subscribe_tokens)
-            logger.info(f"Subscribed to {len(subscribe_tokens)} token groups")
-        except Exception as e:
-            logger.error(f"WebSocket subscription failed: {e}")
-    else:
+    if not subscribe_tokens:
         logger.warning("No tokens available to subscribe yet. REST poller will backfill.")
+        return
 
-
-def on_ws_error(wsapp, error):
-    logger.error(f"WebSocket Error: {error}")
-
-
-def on_ws_close(wsapp, close_status_code=None, close_msg=None):
-    global ws_running
-    ws_running = False
-    logger.warning(f"WebSocket closed: {close_status_code} {close_msg}")
+    # Safe subscription - handle different SmartAPI library versions
+    try:
+        if sws is None:
+            logger.warning("Global sws is None, cannot subscribe")
+            return
+            
+        if hasattr(sws, 'subscribe'):
+            # Standard V2 signature: subscribe(correlation_id, mode, token_list)
+            sws.subscribe("admin", 1, subscribe_tokens)
+            logger.info(f"Subscribed to {len(subscribe_tokens)} token groups via subscribe()")
+        elif hasattr(sws, 'send_request'):
+            # Fallback for older/alternative versions
+            sws.send_request("subscribe", subscribe_tokens)
+            logger.info(f"Subscribed to {len(subscribe_tokens)} token groups via send_request()")
+        else:
+            logger.warning("WebSocket object has no subscribe/send_request method. Check SmartAPI library version.")
+    except Exception as e:
+        logger.error(f"WebSocket subscription failed (non-fatal): {e}")
+        # REST poller will continue fetching data, so this is not fatal
 
 
 def start_angel_websocket():
@@ -2544,7 +2548,10 @@ def start_angel_websocket():
     logger.info("WEBSOCKET THREAD STARTED")
     logger.info("=" * 60)
     
-    refresh_all_tokens()
+    try:
+        refresh_all_tokens()
+    except Exception as e:
+        logger.error(f"Token refresh during WS startup failed: {e}")
 
     while True:
         try:
@@ -2573,6 +2580,7 @@ def start_angel_websocket():
             ws_running = False
             sws = None
             time.sleep(10)
+
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
 
