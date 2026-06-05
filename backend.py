@@ -2811,48 +2811,47 @@ def start_rest_api_poller():
                     try:
                         spot = latest_ticks[idx]["spot_price"]
 
-                    ce_resp = rate_limited_api_call(
-                        auth_obj.ltpData,
-                        INDEX_CONFIG[idx]["option_exchange"],
-                        tokens["ce_symbol"],
-                        tokens["ce_token"]
-                    )
-                    ce = safe_ltp(ce_resp)
-                    if ce is not None:
-                        if ce > 100000: ce /= 100
-                        if ce > 0 and ce < 10000:
-                            if is_valid_option_premium(ce, spot, "CE"):
-                                ce_price_histories[idx].append(ce)
-                                latest_ticks[idx]["ce_price"] = ce
-                                last_known_prices[idx]["ce"] = ce
-                                last_known_prices[idx]["timestamp"] = now
-                                logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
+                        ce_resp = rate_limited_api_call(
+                            auth_obj.ltpData,
+                            INDEX_CONFIG[idx]["option_exchange"],
+                            tokens["ce_symbol"],
+                            tokens["ce_token"]
+                        )
+                        ce = safe_ltp(ce_resp)
+                        if ce is not None:
+                            if ce > 100000: ce /= 100
+                            if ce > 0 and ce < 10000:
+                                if is_valid_option_premium(ce, spot, "CE"):
+                                    ce_price_histories[idx].append(ce)
+                                    latest_ticks[idx]["ce_price"] = ce
+                                    last_known_prices[idx]["ce"] = ce
+                                    last_known_prices[idx]["timestamp"] = now
+                                    logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
+                                else:
+                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
                             else:
-                                logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
-                        else:
-                            logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
+                                logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
 
-                    pe_resp = rate_limited_api_call(
-                        auth_obj.ltpData,
-                        INDEX_CONFIG[idx]["option_exchange"],
-                        tokens["pe_symbol"],
-                        tokens["pe_token"]
-                    )
-                    pe = safe_ltp(pe_resp)
-                    if pe is not None:
-                        if pe > 100000: pe /= 100
-                        if pe > 0 and pe < 10000:
-                            if is_valid_option_premium(pe, spot, "PE"):
-                                pe_price_histories[idx].append(pe)
-                                latest_ticks[idx]["pe_price"] = pe
-                                last_known_prices[idx]["pe"] = pe
-                                last_known_prices[idx]["timestamp"] = now
-                                logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
+                        pe_resp = rate_limited_api_call(
+                            auth_obj.ltpData,
+                            INDEX_CONFIG[idx]["option_exchange"],
+                            tokens["pe_symbol"],
+                            tokens["pe_token"]
+                        )
+                        pe = safe_ltp(pe_resp)
+                        if pe is not None:
+                            if pe > 100000: pe /= 100
+                            if pe > 0 and pe < 10000:
+                                if is_valid_option_premium(pe, spot, "PE"):
+                                    pe_price_histories[idx].append(pe)
+                                    latest_ticks[idx]["pe_price"] = pe
+                                    last_known_prices[idx]["pe"] = pe
+                                    last_known_prices[idx]["timestamp"] = now
+                                    logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
+                                else:
+                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
                             else:
-                                logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
-                        else:
-                            logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
-
+                                logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
                     except Exception as e:
                         logger.debug(f"REST {idx} option fetch error: {e}")
                 else:
