@@ -1,4 +1,4 @@
-# === VERSION 12.2 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
+# === VERSION 12.2 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | PnL Tracking ===
 # Fixes applied:
 # 1. Fixed "Premium Invalid: Rs0" - better token fetching, relaxed premium validation, auto-refresh
 # 2. Fixed indentation bug in live_signals() endpoint (return was inside for loop)
@@ -20,6 +20,8 @@
 # 18. Fixed signal_buffer reset logic
 # 19. Added comprehensive error handling in token management
 # 20. Fixed all variable initialization before use
+# 21. [NEW] Added daily_pnl, total_pnl, live_pnl to portfolio_state
+# 22. [NEW] Removed duplicate start_angel_websocket definition
 
 import sys
 import logging
@@ -373,8 +375,11 @@ def load_portfolio_equity():
         return {}
 
 persisted = load_portfolio_equity()
+
+# V12 PnL FIX: Added daily_pnl, total_pnl, live_pnl to portfolio_state
 portfolio_state = {idx: {"equity": persisted.get(idx, {}).get("equity", 100000.0), 
-                          "open_positions": 0, "daily_trades": 0} for idx in INDEX_CONFIG}
+                          "open_positions": 0, "daily_trades": 0,
+                          "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_CONFIG}
 
 for idx in INDEX_CONFIG:
     daily_drawdown[idx]["peak_equity"] = portfolio_state[idx]["equity"]
@@ -2124,6 +2129,10 @@ def run_signal_engine_for_index(index_name):
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
+                        # V12 PnL FIX: Update realized PnL on kill switch exit
+                        portfolio_state[index_name]["daily_pnl"] += pnl_total
+                        portfolio_state[index_name]["total_pnl"] += pnl_total
+                        portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_equity(index_name)
                     reset_signal_state(index_name, now, "KILL_SWITCH")
             market_signal[index_name].update({
@@ -2164,6 +2173,10 @@ def run_signal_engine_for_index(index_name):
                 )
 
                 pnl = adjusted_prem - signal_state[index_name]["entry_price"]
+                
+                # V12 PnL FIX: Track live/unrealized PnL every tick
+                live_pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                portfolio_state[index_name]["live_pnl"] = round(live_pnl_total, 2)
 
                 if prem > signal_state[index_name].get("highest", 0):
                     signal_state[index_name]["highest"] = prem
@@ -2175,6 +2188,10 @@ def run_signal_engine_for_index(index_name):
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
+                        # V12 PnL FIX
+                        portfolio_state[index_name]["daily_pnl"] += pnl_total
+                        portfolio_state[index_name]["total_pnl"] += pnl_total
+                        portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_equity(index_name)
 
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
@@ -2196,6 +2213,10 @@ def run_signal_engine_for_index(index_name):
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
+                        # V12 PnL FIX
+                        portfolio_state[index_name]["daily_pnl"] += pnl_total
+                        portfolio_state[index_name]["total_pnl"] += pnl_total
+                        portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_equity(index_name)
 
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
@@ -2213,6 +2234,10 @@ def run_signal_engine_for_index(index_name):
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
+                        # V12 PnL FIX
+                        portfolio_state[index_name]["daily_pnl"] += pnl_total
+                        portfolio_state[index_name]["total_pnl"] += pnl_total
+                        portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_equity(index_name)
 
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
@@ -2229,6 +2254,10 @@ def run_signal_engine_for_index(index_name):
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
+                        # V12 PnL FIX
+                        portfolio_state[index_name]["daily_pnl"] += pnl_total
+                        portfolio_state[index_name]["total_pnl"] += pnl_total
+                        portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_equity(index_name)
 
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
@@ -2247,6 +2276,10 @@ def run_signal_engine_for_index(index_name):
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         with _portfolio_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
+                            # V12 PnL FIX
+                            portfolio_state[index_name]["daily_pnl"] += pnl_total
+                            portfolio_state[index_name]["total_pnl"] += pnl_total
+                            portfolio_state[index_name]["live_pnl"] = 0.0
                             save_portfolio_equity(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
                         performance_trackers[index_name].add_trade(pnl_total)
@@ -2258,6 +2291,10 @@ def run_signal_engine_for_index(index_name):
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         with _portfolio_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
+                            # V12 PnL FIX
+                            portfolio_state[index_name]["daily_pnl"] += pnl_total
+                            portfolio_state[index_name]["total_pnl"] += pnl_total
+                            portfolio_state[index_name]["live_pnl"] = 0.0
                             save_portfolio_equity(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
                         performance_trackers[index_name].add_trade(pnl_total)
@@ -2308,6 +2345,9 @@ def run_signal_engine_for_index(index_name):
                 daily_trade_count[index_name] = 0
                 last_trade_date[index_name] = today
                 kill_switches[index_name].reset_daily()
+                # V12 PnL FIX: Reset daily PnL at day start
+                portfolio_state[index_name]["daily_pnl"] = 0.0
+                portfolio_state[index_name]["live_pnl"] = 0.0
 
             if daily_trade_count[index_name] >= 20:
                 market_signal[index_name]["alert_message"] = "Max daily trades reached"
@@ -2393,6 +2433,7 @@ def run_signal_engine_for_index(index_name):
                 "exit_reason": ""
             })
             portfolio_state[index_name]["open_positions"] = 1
+            portfolio_state[index_name]["live_pnl"] = 0.0   # V12 PnL FIX
             buf["ce_count"] = 0
             buf["pe_count"] = 0
             if "CE" in action:
@@ -2541,46 +2582,7 @@ def on_ws_open(wsapp):
         # REST poller will continue fetching data, so this is not fatal
 
 
-def start_angel_websocket():
-    """Main WebSocket reconnection thread."""
-    global sws, ws_running, last_heartbeat
-    logger.info("=" * 60)
-    logger.info("WEBSOCKET THREAD STARTED")
-    logger.info("=" * 60)
-    
-    try:
-        refresh_all_tokens()
-    except Exception as e:
-        logger.error(f"Token refresh during WS startup failed: {e}")
-
-    while True:
-        try:
-            if not is_market_open():
-                time.sleep(5)
-                last_heartbeat = time.time()
-                continue
-
-            auth_token, feed_token, obj = get_auth_token()
-            if not feed_token:
-                logger.warning("No feed token, retrying in 10s...")
-                time.sleep(10)
-                continue
-
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws.on_open = on_ws_open
-            sws.on_data = on_ws_data
-            sws.on_error = on_ws_error
-            sws.on_close = on_ws_close
-            
-            # connect() is blocking; it returns only when the socket closes
-            sws.connect()
-            
-        except Exception as e:
-            logger.error(f"WebSocket thread error: {e}")
-            ws_running = False
-            sws = None
-            time.sleep(10)
-
+# V12 FIX: Removed duplicate start_angel_websocket definition. Keeping single merged version below.
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
 
@@ -2701,6 +2703,8 @@ def on_ws_data(wsapp, message):
                 logger.error(f"Signal engine error in WS callback: {e}")
     except Exception as e:
         logger.error(f"WS data error: {e}")
+
+# V12 FIX: Single merged start_angel_websocket (removed duplicate)
 def start_angel_websocket():
     global sws, ws_running, last_heartbeat
     logger.info("="*60)
@@ -2708,7 +2712,10 @@ def start_angel_websocket():
     logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Market open check: {is_market_open()}")
     logger.info("="*60)
-    refresh_all_tokens()
+    try:
+        refresh_all_tokens()
+    except Exception as e:
+        logger.error(f"Token refresh during WS startup failed: {e}")
     while True:
         try:
             if not is_market_open():
@@ -2894,7 +2901,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.2 (MERGED: Working Socket + Full Analytics)",
+        "engine": "Multi-Index Options Bot v12.2 (MERGED: Working Socket + Full Analytics + PnL)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -2916,6 +2923,7 @@ def home():
             "FIXED: Greeks API Endpoint",
             "FIXED: Token Auto-Refresh on Zero Premiums",
             "FIXED: SENSEX Token Fetching with Multiple Patterns",
+            "FIXED: PnL Tracking (daily/live/total)",
             "MERGED: Working WebSocket + REST Data Fetching"
         ]
     })
@@ -2994,7 +3002,8 @@ def health():
             "slippage_model": True,
             "sharpe_sortino": True,
             "premium_fix": True,
-            "token_auto_refresh": True
+            "token_auto_refresh": True,
+            "pnl_tracking": True
         }
     }), status_code
 
