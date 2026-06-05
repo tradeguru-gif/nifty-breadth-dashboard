@@ -2595,9 +2595,7 @@ def on_ws_data(wsapp, message):
     last_heartbeat = time.time()
     try:
         ticks = []
-
-
-                if isinstance(message, bytes):
+        if isinstance(message, bytes):
             # Try library parser if available, otherwise skip gracefully
             if sws is not None and hasattr(sws, '_parse_binary_data'):
                 try:
@@ -2609,10 +2607,7 @@ def on_ws_data(wsapp, message):
             else:
                 logger.debug("Received binary tick but no parser available")
                 return
-
-
         elif isinstance(message, str):
-
             try:
                 data = json.loads(message)
                 ticks = data if isinstance(data, list) else [data]
@@ -2706,7 +2701,6 @@ def on_ws_data(wsapp, message):
                 logger.error(f"Signal engine error in WS callback: {e}")
     except Exception as e:
         logger.error(f"WS data error: {e}")
-
 def start_angel_websocket():
     global sws, ws_running, last_heartbeat
     logger.info("="*60)
