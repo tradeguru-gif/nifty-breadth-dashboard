@@ -1,4 +1,4 @@
-# === VERSION 12.2 From DEEPSEEK - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
+# === VERSION 12.1 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | All Bugs ===
 # Fixes applied:
 # 1. Fixed "Premium Invalid: Rs0" - better token fetching, relaxed premium validation, auto-refresh
 # 2. Fixed indentation bug in live_signals() endpoint (return was inside for loop)
@@ -166,12 +166,12 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================================
-# INDEX CONFIGURATION - V12 ENHANCED (SENSEX NOW ACTIVE)
+# INDEX CONFIGURATION - V12 ENHANCED
 # ============================================================================
 INDEX_CONFIG = {
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
-        "lot_size": 50, "expiry_weekday": 3, "active": True,
+        "lot_size": 50, "expiry_weekday": 3, "active": True,  # Thursday = 3
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "BANKNIFTY",
@@ -179,7 +179,7 @@ INDEX_CONFIG = {
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY",
-        "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "lot_size": 25, "expiry_weekday": 3, "active": True,  # Thursday = 3
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY",
@@ -187,7 +187,7 @@ INDEX_CONFIG = {
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY",
-        "lot_size": 40, "expiry_weekday": 1, "active": True,
+        "lot_size": 40, "expiry_weekday": 1, "active": True,  # Tuesday = 1
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
@@ -195,7 +195,7 @@ INDEX_CONFIG = {
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY",
-        "lot_size": 75, "expiry_weekday": 3, "active": True,
+        "lot_size": 75, "expiry_weekday": 3, "active": True,  # Thursday = 3
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25,
         "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
@@ -203,12 +203,11 @@ INDEX_CONFIG = {
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": True,   # <-- ACTIVATED
+        "lot_size": 15, "expiry_weekday": 4, "active": False,  # Friday = 4
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
-        "greeks_enabled": True,    # <-- Optional: enable Greeks for SENSEX
-        "pcr_enabled": True        # <-- Optional: enable PCR for SENSEX
+        "greeks_enabled": False, "pcr_enabled": False
     }
 }
 
@@ -1192,13 +1191,12 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # V11 CORE FUNCTIONS (PRESERVED)
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
-    """Relaxed premium validation - SENSEX allows slightly higher premium %."""
+    """Relaxed premium validation to prevent false 'Premium Invalid' errors."""
     if premium <= 0 or spot_price <= 0:
         return False
     premium_pct = premium / spot_price
-    # For SENSEX (spot > 50k), allow up to 25% of spot; otherwise 20%
-    max_pct = 0.25 if spot_price > 50000 else 0.20
-    return 0.0002 < premium_pct < max_pct
+    # Relaxed bounds: 0.02% to 20% of spot (was 0.1% to 15%)
+    return 0.0002 < premium_pct < 0.20
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -1459,17 +1457,9 @@ def get_index_spot(index_name):
     if not obj: return None
     if index_name == "SENSEX":
         try:
-            # Use token directly from config (99919000)
-            resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
-            ltp = safe_ltp(resp)
-            if ltp is not None:
-                if ltp > 100000: ltp /= 100
-                if 50000 < ltp < 100000:
-                    return ltp
-            # Fallback: search for "SENSEX" token
-            search = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
-            if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
-                token = str(search["data"][0].get("symboltoken"))
+            resp = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
+            if resp and resp.get("status") and resp.get("data") and len(resp["data"]) > 0:
+                token = str(resp["data"][0].get("symboltoken"))
                 ltp_resp = rate_limited_api_call(obj.ltpData, "BSE", "SENSEX", token)
                 ltp = safe_ltp(ltp_resp)
                 if ltp is not None:
@@ -1478,24 +1468,6 @@ def get_index_spot(index_name):
         except Exception as e:
             logger.error(f"SENSEX spot error: {e}")
         return None
-    # For other indices
-    try:
-        resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
-        ltp = safe_ltp(resp)
-        if ltp is not None:
-            if ltp > 100000: ltp /= 100
-            if index_name == "MIDCPNIFTY" and (ltp < 5000 or ltp > 25000):
-                search = rate_limited_api_call(obj.searchScrip, "NSE", "MIDCPNIFTY")
-                if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
-                    token = str(search["data"][0].get("symboltoken"))
-                    ltp2 = safe_ltp(rate_limited_api_call(obj.ltpData, "NSE", "MIDCPNIFTY", token))
-                    if ltp2 is not None:
-                        if ltp2 > 100000: ltp2 /= 100
-                        ltp = ltp2
-            return ltp
-    except Exception as e:
-        logger.error(f"Spot fetch {index_name}: {e}")
-    return None
     try:
         resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
         ltp = safe_ltp(resp)
@@ -1759,7 +1731,7 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
 def get_current_atm_tokens(index_name):
     """Fetch current ATM option tokens with improved error handling and expiry logic."""
     config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("active"):
+    if not config or not config.get("active"): 
         return None, None
 
     spot = get_index_spot(index_name)
@@ -1775,141 +1747,6 @@ def get_current_atm_tokens(index_name):
     if not next_expiry:
         logger.warning(f"{index_name}: Could not calculate next expiry")
         return None, None
-
-    expiry = next_expiry.strftime("%d%b%Y").upper()
-
-    scrip = get_scrip_master()
-    if scrip and isinstance(scrip, list) and len(scrip) > 0:
-        try:
-            df = pd.DataFrame(scrip)
-            if df.empty:
-                logger.warning(f"{index_name}: Scrip master DataFrame is empty")
-                raise ValueError("Empty scrip master")
-
-            opts = df[(df["name"] == config["symbol"]) &
-                      (df["instrumenttype"] == "OPTIDX") &
-                      (df["exch_seg"] == config["option_exchange"])].copy()
-
-            if opts.empty:
-                logger.warning(f"{index_name}: No options found in scrip master")
-                raise ValueError("No options in scrip master")
-
-            opts["expiry_date"] = pd.to_datetime(opts["expiry"], format="%d%b%Y", errors="coerce")
-            opts = opts.dropna(subset=["expiry_date"])
-
-            if opts.empty:
-                logger.warning(f"{index_name}: No valid expiry dates found")
-                raise ValueError("No valid expiry dates")
-
-            opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
-            opts = opts.dropna(subset=["strike"])
-
-            if opts.empty:
-                logger.warning(f"{index_name}: No valid strikes found")
-                raise ValueError("No valid strikes")
-
-            today_dt = datetime.now()
-            future = opts[opts["expiry_date"] >= today_dt]
-
-            if future.empty:
-                logger.warning(f"{index_name}: No future expiry options found")
-                raise ValueError("No future options")
-
-            nearest = future["expiry_date"].min()
-            atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
-
-            if atm_opts.empty:
-                same_exp = future[future["expiry_date"] == nearest]
-                if same_exp.empty:
-                    logger.warning(f"{index_name}: No options for nearest expiry {nearest}")
-                    raise ValueError("No nearest expiry options")
-                strike_diffs = (same_exp["strike"] - atm).abs()
-                min_idx = strike_diffs.idxmin()
-                if pd.isna(min_idx):
-                    logger.warning(f"{index_name}: Could not find nearest strike")
-                    raise ValueError("No nearest strike found")
-                atm_opts = same_exp.loc[[min_idx]]
-
-            ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
-            pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
-
-            if not ce.empty and not pe.empty:
-                ce_token = str(ce.iloc[0]["token"])
-                pe_token = str(pe.iloc[0]["token"])
-                ce_symbol = str(ce.iloc[0]["symbol"])
-                pe_symbol = str(pe.iloc[0]["symbol"])
-
-                INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token,
-                    "pe_token": pe_token,
-                    "atm_strike": atm,
-                    "expiry": expiry,
-                    "expiry_date": nearest,
-                    "ce_symbol": ce_symbol,
-                    "pe_symbol": pe_symbol
-                })
-                logger.info(f"{index_name} tokens from scrip: CE={ce_token} PE={pe_token} Expiry={expiry}")
-                return ce_token, pe_token
-            else:
-                logger.warning(f"{index_name}: CE or PE empty after filtering")
-                raise ValueError("CE/PE filtering failed")
-
-        except Exception as e:
-            logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
-
-    # API fallback
-    _, _, obj = get_auth_token()
-    if obj:
-        ce_token = pe_token = None
-        ce_symbol = pe_symbol = None
-        try:
-            if index_name == "SENSEX":
-                patterns = [f"{config['symbol']}_{atm}CE", f"{config['symbol']} {atm} CE", f"{config['symbol']}{atm}CE"]
-                for pat in patterns:
-                    try:
-                        ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
-                        if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                            ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                            ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                            break
-                    except Exception:
-                        continue
-                for pat in patterns:
-                    pat_pe = pat.replace("CE", "PE")
-                    try:
-                        pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat_pe)
-                        if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                            pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                            pe_symbol = str(pe_resp["data"][0].get("symbol"))
-                            break
-                    except Exception:
-                        continue
-            else:
-                ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
-                if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                    ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                    ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
-                if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                    pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                    pe_symbol = str(pe_resp["data"][0].get("symbol"))
-
-            if ce_token and pe_token:
-                INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token,
-                    "pe_token": pe_token,
-                    "atm_strike": atm,
-                    "expiry": expiry,
-                    "expiry_date": next_expiry,
-                    "ce_symbol": ce_symbol,
-                    "pe_symbol": pe_symbol
-                })
-                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
-                return ce_token, pe_token
-        except Exception as e:
-            logger.error(f"Search fallback error {index_name}: {e}")
-
-    return None, None
 
     expiry = next_expiry.strftime("%d%b%Y").upper()
 
@@ -1995,72 +1832,32 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
 
     # API fallback
-        # API fallback
     _, _, obj = get_auth_token()
     if obj:
         ce_token = pe_token = None
         ce_symbol = pe_symbol = None
         try:
-            # For SENSEX (BFO), try multiple symbol patterns
-            if index_name == "SENSEX":
-                patterns = [f"{config['symbol']}_{atm}CE", f"{config['symbol']} {atm} CE", f"{config['symbol']}{atm}CE"]
-                ce_token = None
-                pe_token = None
-                ce_symbol = None
-                pe_symbol = None
-                for pat in patterns:
-                    try:
-                        ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
-                        if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                            ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                            ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                            break
-                    except Exception:
-                        continue
-                for pat in patterns:
-                    pat_pe = pat.replace("CE", "PE")
-                    try:
-                        pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat_pe)
-                        if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                            pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                            pe_symbol = str(pe_resp["data"][0].get("symbol"))
-                            break
-                    except Exception:
-                        continue
-                if ce_token and pe_token:
-                    INDEX_TOKENS[index_name].update({
-                        "ce_token": ce_token,
-                        "pe_token": pe_token,
-                        "atm_strike": atm,
-                        "expiry": expiry,
-                        "expiry_date": next_expiry,
-                        "ce_symbol": ce_symbol,
-                        "pe_symbol": pe_symbol
-                    })
-                    logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
-                    return ce_token, pe_token
-            else:
-                # Original logic for NFO indices
-                ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
-                if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                    ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                    ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
-                if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                    pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                    pe_symbol = str(pe_resp["data"][0].get("symbol"))
-                if ce_token and pe_token:
-                    INDEX_TOKENS[index_name].update({
-                        "ce_token": ce_token,
-                        "pe_token": pe_token,
-                        "atm_strike": atm,
-                        "expiry": expiry,
-                        "expiry_date": next_expiry,
-                        "ce_symbol": ce_symbol,
-                        "pe_symbol": pe_symbol
-                    })
-                    logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
-                    return ce_token, pe_token
+            ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
+            if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
+                ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                ce_symbol = str(ce_resp["data"][0].get("symbol"))
+            pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
+            if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
+                pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                pe_symbol = str(pe_resp["data"][0].get("symbol"))
+
+            if ce_token and pe_token:
+                INDEX_TOKENS[index_name].update({
+                    "ce_token": ce_token, 
+                    "pe_token": pe_token,
+                    "atm_strike": atm, 
+                    "expiry": expiry,
+                    "expiry_date": next_expiry,
+                    "ce_symbol": ce_symbol or f"{config['symbol']}{atm}CE",
+                    "pe_symbol": pe_symbol or f"{config['symbol']}{atm}PE"
+                })
+                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
+                return ce_token, pe_token
         except Exception as e:
             logger.error(f"Search fallback error {index_name}: {e}")
 
