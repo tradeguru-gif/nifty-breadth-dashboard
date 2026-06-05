@@ -2483,36 +2483,96 @@ def run_all_signals():
 # WEBSOCKET HANDLERS (from working connection code)
 # ============================================================================
 def on_ws_open(wsapp):
-    global sws
-    logger.info("="*60)
+    """Called once when WebSocket connects. Subscribe to tokens here."""
+    global ws_running, last_heartbeat
+    ws_running = True
+    last_heartbeat = time.time()
+    logger.info("=" * 60)
+    logger.info("WEBSOCKET CONNECTED")
+    logger.info("=" * 60)
+
+    # Build subscription list for all active indices
+    subscribe_tokens = []
+    for idx, cfg in INDEX_CONFIG.items():
+        if not cfg.get("active"):
+            continue
+        
+        # Spot index token
+        subscribe_tokens.append({
+            "exchangeType": cfg["ws_exchange_type"],
+            "tokens": [cfg["token"]]
+        })
+        
+        # Option tokens (if already fetched)
+        tok = INDEX_TOKENS.get(idx, {})
+        if tok.get("ce_token"):
+            subscribe_tokens.append({
+                "exchangeType": cfg["option_ws_exchange_type"],
+                "tokens": [tok["ce_token"]]
+            })
+        if tok.get("pe_token"):
+            subscribe_tokens.append({
+                "exchangeType": cfg["option_ws_exchange_type"],
+                "tokens": [tok["pe_token"]]
+            })
+
+    if subscribe_tokens and sws:
+        try:
+            # correlation_id can be any string; mode 1 = LTP
+            sws.subscribe("admin", 1, subscribe_tokens)
+            logger.info(f"Subscribed to {len(subscribe_tokens)} token groups")
+        except Exception as e:
+            logger.error(f"WebSocket subscription failed: {e}")
+    else:
+        logger.warning("No tokens available to subscribe yet. REST poller will backfill.")
+
+
+def on_ws_error(wsapp, error):
+    logger.error(f"WebSocket Error: {error}")
+
+
+def on_ws_close(wsapp, close_status_code=None, close_msg=None):
+    global ws_running
+    ws_running = False
+    logger.warning(f"WebSocket closed: {close_status_code} {close_msg}")
+
+
+def start_angel_websocket():
+    """Main WebSocket reconnection thread."""
+    global sws, ws_running, last_heartbeat
+    logger.info("=" * 60)
     logger.info("WEBSOCKET THREAD STARTED")
-    logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Market open check: {is_market_open()}")
-    logger.info("="*60)
+    logger.info("=" * 60)
+    
     refresh_all_tokens()
+
     while True:
         try:
             if not is_market_open():
                 time.sleep(5)
                 last_heartbeat = time.time()
                 continue
+
             auth_token, feed_token, obj = get_auth_token()
             if not feed_token:
+                logger.warning("No feed token, retrying in 10s...")
                 time.sleep(10)
                 continue
+
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
-            ws_running = True
+            
+            # connect() is blocking; it returns only when the socket closes
             sws.connect()
+            
         except Exception as e:
             logger.error(f"WebSocket thread error: {e}")
             ws_running = False
             sws = None
             time.sleep(10)
-
 def on_ws_error(wsapp, error):
     logger.error(f"WebSocket Error: {error}")
 
@@ -2527,20 +2587,24 @@ def on_ws_data(wsapp, message):
     last_heartbeat = time.time()
     try:
         ticks = []
-        if isinstance(message, bytes):
+
+
+                if isinstance(message, bytes):
+            # Try library parser if available, otherwise skip gracefully
             if sws is not None and hasattr(sws, '_parse_binary_data'):
                 try:
                     parsed = sws._parse_binary_data(message)
-                    if parsed and isinstance(parsed, dict):
-                        ticks = [parsed]
-                    elif parsed and isinstance(parsed, list):
-                        ticks = parsed
+                    ticks = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else []
                 except Exception as e:
                     logger.debug(f"Binary parse failed: {e}")
                     return
             else:
+                logger.debug("Received binary tick but no parser available")
                 return
+
+
         elif isinstance(message, str):
+
             try:
                 data = json.loads(message)
                 ticks = data if isinstance(data, list) else [data]
@@ -2745,37 +2809,48 @@ def start_rest_api_poller():
                     try:
                         spot = latest_ticks[idx]["spot_price"]
 
-                        ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
-                        ce = safe_ltp(ce_resp)
-                        if ce is not None:
-                            if ce > 100000: ce /= 100
-                            if ce > 0 and ce < 10000:
-                                if is_valid_option_premium(ce, spot, "CE"):
-                                    ce_price_histories[idx].append(ce)
-                                    latest_ticks[idx]["ce_price"] = ce
-                                    last_known_prices[idx]["ce"] = ce
-                                    last_known_prices[idx]["timestamp"] = now
-                                    logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
+                    ce_resp = rate_limited_api_call(
+                        auth_obj.ltpData,
+                        INDEX_CONFIG[idx]["option_exchange"],
+                        tokens["ce_symbol"],
+                        tokens["ce_token"]
+                    )
+                    ce = safe_ltp(ce_resp)
+                    if ce is not None:
+                        if ce > 100000: ce /= 100
+                        if ce > 0 and ce < 10000:
+                            if is_valid_option_premium(ce, spot, "CE"):
+                                ce_price_histories[idx].append(ce)
+                                latest_ticks[idx]["ce_price"] = ce
+                                last_known_prices[idx]["ce"] = ce
+                                last_known_prices[idx]["timestamp"] = now
+                                logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
                             else:
-                                logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
+                                logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
+                        else:
+                            logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
 
-                        pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
-                        pe = safe_ltp(pe_resp)
-                        if pe is not None:
-                            if pe > 100000: pe /= 100
-                            if pe > 0 and pe < 10000:
-                                if is_valid_option_premium(pe, spot, "PE"):
-                                    pe_price_histories[idx].append(pe)
-                                    latest_ticks[idx]["pe_price"] = pe
-                                    last_known_prices[idx]["pe"] = pe
-                                    last_known_prices[idx]["timestamp"] = now
-                                    logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
+                    pe_resp = rate_limited_api_call(
+                        auth_obj.ltpData,
+                        INDEX_CONFIG[idx]["option_exchange"],
+                        tokens["pe_symbol"],
+                        tokens["pe_token"]
+                    )
+                    pe = safe_ltp(pe_resp)
+                    if pe is not None:
+                        if pe > 100000: pe /= 100
+                        if pe > 0 and pe < 10000:
+                            if is_valid_option_premium(pe, spot, "PE"):
+                                pe_price_histories[idx].append(pe)
+                                latest_ticks[idx]["pe_price"] = pe
+                                last_known_prices[idx]["pe"] = pe
+                                last_known_prices[idx]["timestamp"] = now
+                                logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
                             else:
-                                logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
+                                logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
+                        else:
+                            logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
+
                     except Exception as e:
                         logger.debug(f"REST {idx} option fetch error: {e}")
                 else:
