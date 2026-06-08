@@ -1583,21 +1583,113 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 def get_next_expiry_date(index_name):
-    """Get the actual next expiry date considering weekly expiries."""
+    """Get the actual next expiry date by finding the nearest expiry in scrip master.
+    CRITICAL FIX: Instead of assuming fixed weekday, scan scrip master for actual nearest expiry.
+    This handles holiday-adjusted expiries and different expiry schedules.
+    """
     config = INDEX_CONFIG.get(index_name)
     if not config:
         return None
 
-    today = datetime.now()
-    weekday = today.weekday()
-    expiry_weekday = config["expiry_weekday"]
+    try:
+        scrip_data = get_scrip_master()
+        if not scrip_data:
+            # Fallback to old method if scrip master unavailable
+            today = datetime.now()
+            weekday = today.weekday()
+            expiry_weekday = config["expiry_weekday"]
+            days_ahead = expiry_weekday - weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
 
-    days_ahead = expiry_weekday - weekday
-    if days_ahead <= 0:
-        days_ahead += 7
+        df = pd.DataFrame(scrip_data)
+        if df.empty:
+            today = datetime.now()
+            weekday = today.weekday()
+            expiry_weekday = config["expiry_weekday"]
+            days_ahead = expiry_weekday - weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
 
-    expiry = today + timedelta(days=days_ahead)
-    return expiry
+        opt_exchange = config["option_exchange"]
+        symbol_prefix = config["symbol"]
+
+        # Filter for options on this index
+        mask = (
+            (df["exch_seg"] == opt_exchange) &
+            (df["symbol"].str.startswith(symbol_prefix, na=False)) &
+            (df["instrumenttype"] == "OPTIDX")
+        )
+        options = df[mask].copy()
+
+        if options.empty:
+            today = datetime.now()
+            weekday = today.weekday()
+            expiry_weekday = config["expiry_weekday"]
+            days_ahead = expiry_weekday - weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
+
+        # Extract expiry dates from symbol names like NIFTY30JUN2623450CE
+        import re
+        expiry_dates = []
+        for sym in options["symbol"]:
+            if pd.isna(sym):
+                continue
+            sym_str = str(sym)
+            # Pattern: INDEX + DD + MMM + YY + STRIKE + CE/PE
+            # e.g., NIFTY30JUN2623450CE, BANKNIFTY29SEP2648000CE, FINNIFTY30JUN2623250PE
+            match = re.search(r'(\d{1,2})([A-Z]{3})(\d{2,4})', sym_str)
+            if match:
+                day = match.group(1)
+                month = match.group(2)
+                year = match.group(3)
+                try:
+                    if len(year) == 2:
+                        year_int = int(year)
+                        if year_int >= 50:
+                            full_year = 1900 + year_int
+                        else:
+                            full_year = 2000 + year_int
+                    else:
+                        full_year = int(year)
+                    date_str = f"{day}{month}{full_year}"
+                    dt = datetime.strptime(date_str, "%d%b%Y")
+                    expiry_dates.append(dt)
+                except:
+                    pass
+
+        if not expiry_dates:
+            today = datetime.now()
+            weekday = today.weekday()
+            expiry_weekday = config["expiry_weekday"]
+            days_ahead = expiry_weekday - weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
+
+        # Find nearest future expiry
+        today = datetime.now()
+        future_expiries = [d for d in expiry_dates if d.date() >= today.date()]
+        if not future_expiries:
+            future_expiries = expiry_dates  # Use all if none in future
+
+        nearest_expiry = min(future_expiries, key=lambda d: abs((d.date() - today.date()).days))
+        logger.info(f"{index_name}: Nearest expiry from scrip master: {nearest_expiry.strftime('%d%b%Y').upper()}")
+        return nearest_expiry
+
+    except Exception as e:
+        logger.error(f"{index_name}: Error finding nearest expiry from scrip master: {e}")
+        today = datetime.now()
+        weekday = today.weekday()
+        expiry_weekday = config["expiry_weekday"]
+        days_ahead = expiry_weekday - weekday
+        if days_ahead <= 0:
+            days_ahead += 7
+        return today + timedelta(days=days_ahead)
 
 def is_expiry_day(index_name):
     """Check if today is the expiry day for this index."""
@@ -1843,7 +1935,7 @@ def get_current_atm_tokens(index_name):
                 break
 
         if not expiry_matched:
-            # Fallback: try to match by expiry column if available
+            # Fallback 1: try to match by expiry column if available
             if "expiry" in options.columns:
                 for expiry_fmt in expiry_formats:
                     mask_expiry = options["expiry"].astype(str).str.contains(expiry_fmt, na=False, regex=False)
@@ -1851,8 +1943,39 @@ def get_current_atm_tokens(index_name):
                         options = options[mask_expiry].copy()
                         expiry_matched = True
                         break
+
+            # Fallback 2: Use the nearest expiry date we already found
+            if not expiry_matched and next_expiry:
+                # Try matching just the day+month part (e.g., "30JUN")
+                short_fmt = next_expiry.strftime("%d%b").upper()
+                mask_expiry = options["symbol"].str.contains(short_fmt, na=False, regex=False)
+                if mask_expiry.any():
+                    options = options[mask_expiry].copy()
+                    expiry_matched = True
+                    logger.info(f"{index_name}: Matched short expiry format {short_fmt}")
+                else:
+                    # Fallback 3: Just find ANY option with reasonable strike near ATM
+                    # and extract its expiry from the symbol
+                    logger.warning(f"{index_name}: No exact expiry match. Using symbol-based nearest expiry detection.")
+                    # Parse all strikes and find nearest to ATM
+                    options["strike_parsed"] = options["strike"].apply(parse_strike)
+                    options["strike_diff"] = abs(options["strike_parsed"] - atm)
+                    options_sorted = options.sort_values("strike_diff")
+                    if not options_sorted.empty:
+                        # Get the symbol of nearest strike and extract its expiry
+                        nearest_sym = str(options_sorted.iloc[0]["symbol"])
+                        import re
+                        match = re.search(r'(\d{1,2}[A-Z]{3}\d{2,4})', nearest_sym)
+                        if match:
+                            extracted_expiry = match.group(1)
+                            mask_expiry = options["symbol"].str.contains(extracted_expiry, na=False, regex=False)
+                            if mask_expiry.any():
+                                options = options[mask_expiry].copy()
+                                expiry_matched = True
+                                logger.info(f"{index_name}: Matched extracted expiry {extracted_expiry} from nearest strike")
+
             if not expiry_matched:
-                logger.warning(f"{index_name}: No options matched expiry formats {expiry_formats}. Available symbols sample: {options['symbol'].head(3).tolist()}")
+                logger.warning(f"{index_name}: No options matched expiry formats {expiry_formats}. Available symbols sample: {options['symbol'].head(5).tolist()}")
                 return None, None
 
         # Parse strike - Angel One stores strike as string like "2340000" meaning 23400.00
@@ -3133,7 +3256,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.4 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
+        "engine": "Multi-Index Options Bot v12.5 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -3187,7 +3310,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.4",
+        "version": "12.5",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -3223,7 +3346,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.4",
+        "version": "12.5",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
