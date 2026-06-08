@@ -1145,6 +1145,15 @@ class DrawdownKillSwitch:
         self.kill_switch_active = False
         self.kill_switch_until = 0
 
+    def manual_reset(self):
+        """Manual reset of kill switch - use after fixing token issues."""
+        self.kill_switch_active = False
+        self.kill_switch_until = 0
+        self.current_drawdown = 0.0
+        self.daily_peak = portfolio_state[self.index_name]["equity"]
+        logger.warning(f"{self.index_name}: Kill switch MANUALLY RESET")
+        send_telegram_alert(f"KILL SWITCH RESET {self.index_name} | Trading resumed manually")
+
     def update_equity(self, equity):
         if equity > self.daily_peak:
             self.daily_peak = equity
@@ -1205,20 +1214,20 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
     """Relaxed premium validation - prevents false Invalid Premium rejections.
-    CRITICAL FIX: When spot is temporarily 0, use absolute bounds instead of rejecting.
+    CRITICAL FIX v12.6: Deep ITM options can be 40%+ of spot. Allow up to 50%.
     """
     if premium <= 0:
         return False
-    # If spot is unavailable, use relaxed absolute bounds (index ATM options range)
+    # If spot is unavailable, use relaxed absolute bounds
     if spot_price <= 0:
-        valid = 0.5 <= premium <= 5000
+        valid = 0.5 <= premium <= 10000
         if not valid:
             logger.debug(f"Premium validation (no spot): premium={premium} -> {valid}")
         return valid
     premium_pct = premium / spot_price
-    # Allow up to 35% of spot for all indices (covers ATM + high volatility days)
-    max_pct = 0.35
-    min_pct = 0.0001
+    # CRITICAL: Allow up to 50% of spot for deep ITM, and as low as 0.001% for far OTM
+    max_pct = 0.50
+    min_pct = 0.00001
     valid = min_pct < premium_pct < max_pct
     if not valid:
         logger.debug(f"Premium validation: premium={premium}, spot={spot_price}, pct={premium_pct:.4f} -> {valid}")
@@ -1860,12 +1869,19 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
 # TOKEN MANAGEMENT - CRITICAL FIXES
 # ============================================================================
 def get_current_atm_tokens(index_name):
-    """CRITICAL FIX: Complete function that actually searches scrip master and returns CE/PE tokens.
+    """CRITICAL FIX v12.6: Bulletproof token search with strike validation.
 
-    Previously this function ended abruptly after calculating next_expiry, causing:
-    - Implicit None return
-    - 'cannot unpack non-iterable NoneType object' in refresh_all_tokens
-    - No tokens ever being set -> Premium Invalid: Rs0
+    Root cause of previous failures:
+    - Expiry matching was finding wrong expiry (e.g., DEC instead of JUN)
+    - Strike parsing was finding deep ITM/OTM strikes instead of ATM
+    - No validation that found strike is actually near ATM
+
+    This version:
+    1. Finds ALL available expiries in scrip master
+    2. Picks the nearest future expiry
+    3. Filters ONLY that expiry
+    4. Finds ATM strike within that expiry
+    5. VALIDATES strike is within 2% of spot (rejects deep ITM/OTM)
     """
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"):
@@ -1879,17 +1895,9 @@ def get_current_atm_tokens(index_name):
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
 
-    next_expiry = get_next_expiry_date(index_name)
-    if not next_expiry:
-        logger.warning(f"{index_name}: Could not calculate next expiry")
-        return None, None
-
-    # Try multiple expiry formats: "05JUN2026", "05JUN26", "05-JUN-2026"
-    expiry_formats = [
-        next_expiry.strftime("%d%b%Y").upper(),   # 05JUN2026
-        next_expiry.strftime("%d%b%y").upper(),    # 05JUN26
-        next_expiry.strftime("%d%b").upper(),      # 05JUN
-    ]
+    # ATM strike must be within 2% of spot
+    min_valid_strike = spot * 0.98
+    max_valid_strike = spot * 1.02
 
     try:
         scrip_data = get_scrip_master()
@@ -1924,67 +1932,64 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No OPTIDX found for {symbol_prefix} on {opt_exchange}")
             return None, None
 
-        # Try each expiry format
-        expiry_matched = False
-        for expiry_fmt in expiry_formats:
-            mask_expiry = options["symbol"].str.contains(expiry_fmt, na=False, regex=False)
-            if mask_expiry.any():
-                options = options[mask_expiry].copy()
-                expiry_matched = True
-                logger.info(f"{index_name}: Matched expiry format {expiry_fmt}")
-                break
+        logger.info(f"{index_name}: Found {len(options)} total options in scrip master")
 
-        if not expiry_matched:
-            # Fallback 1: try to match by expiry column if available
-            if "expiry" in options.columns:
-                for expiry_fmt in expiry_formats:
-                    mask_expiry = options["expiry"].astype(str).str.contains(expiry_fmt, na=False, regex=False)
-                    if mask_expiry.any():
-                        options = options[mask_expiry].copy()
-                        expiry_matched = True
-                        break
+        # STEP 1: Extract all unique expiry dates from symbols
+        import re
+        expiry_dates = {}
+        for sym in options["symbol"]:
+            if pd.isna(sym):
+                continue
+            sym_str = str(sym)
+            # Extract date pattern like 30JUN26 or 29DEC26 from symbol
+            match = re.search(r'(\d{1,2}[A-Z]{3}\d{2,4})', sym_str)
+            if match:
+                date_str = match.group(1)
+                try:
+                    day = re.search(r'\d{1,2}', date_str).group()
+                    month = re.search(r'[A-Z]{3}', date_str).group()
+                    year = re.search(r'\d{2,4}$', date_str).group()
+                    if len(year) == 2:
+                        year_int = int(year)
+                        full_year = 2000 + year_int if year_int < 50 else 1900 + year_int
+                    else:
+                        full_year = int(year)
+                    dt = datetime.strptime(f"{day}{month}{full_year}", "%d%b%Y")
+                    expiry_dates[date_str] = dt
+                except:
+                    pass
 
-            # Fallback 2: Use the nearest expiry date we already found
-            if not expiry_matched and next_expiry:
-                # Try matching just the day+month part (e.g., "30JUN")
-                short_fmt = next_expiry.strftime("%d%b").upper()
-                mask_expiry = options["symbol"].str.contains(short_fmt, na=False, regex=False)
-                if mask_expiry.any():
-                    options = options[mask_expiry].copy()
-                    expiry_matched = True
-                    logger.info(f"{index_name}: Matched short expiry format {short_fmt}")
-                else:
-                    # Fallback 3: Just find ANY option with reasonable strike near ATM
-                    # and extract its expiry from the symbol
-                    logger.warning(f"{index_name}: No exact expiry match. Using symbol-based nearest expiry detection.")
-                    # Parse all strikes and find nearest to ATM
-                    options["strike_parsed"] = options["strike"].apply(parse_strike)
-                    options["strike_diff"] = abs(options["strike_parsed"] - atm)
-                    options_sorted = options.sort_values("strike_diff")
-                    if not options_sorted.empty:
-                        # Get the symbol of nearest strike and extract its expiry
-                        nearest_sym = str(options_sorted.iloc[0]["symbol"])
-                        import re
-                        match = re.search(r'(\d{1,2}[A-Z]{3}\d{2,4})', nearest_sym)
-                        if match:
-                            extracted_expiry = match.group(1)
-                            mask_expiry = options["symbol"].str.contains(extracted_expiry, na=False, regex=False)
-                            if mask_expiry.any():
-                                options = options[mask_expiry].copy()
-                                expiry_matched = True
-                                logger.info(f"{index_name}: Matched extracted expiry {extracted_expiry} from nearest strike")
+        if not expiry_dates:
+            logger.warning(f"{index_name}: Could not extract any expiry dates from symbols")
+            return None, None
 
-            if not expiry_matched:
-                logger.warning(f"{index_name}: No options matched expiry formats {expiry_formats}. Available symbols sample: {options['symbol'].head(5).tolist()}")
-                return None, None
+        logger.info(f"{index_name}: Found expiries: {list(expiry_dates.keys())}")
 
-        # Parse strike - Angel One stores strike as string like "2340000" meaning 23400.00
+        # STEP 2: Find nearest future expiry
+        today = datetime.now()
+        future_expiries = {k: v for k, v in expiry_dates.items() if v.date() >= today.date()}
+        if not future_expiries:
+            future_expiries = expiry_dates
+
+        nearest_expiry_str = min(future_expiries.items(), key=lambda x: (x[1].date() - today.date()).days)[0]
+        nearest_expiry_dt = future_expiries[nearest_expiry_str]
+        logger.info(f"{index_name}: Selected nearest expiry: {nearest_expiry_str} ({nearest_expiry_dt.strftime('%Y-%m-%d')})")
+
+        # STEP 3: Filter options to ONLY this expiry
+        mask_expiry = options["symbol"].str.contains(nearest_expiry_str, na=False, regex=False)
+        if not mask_expiry.any():
+            logger.warning(f"{index_name}: No options matched selected expiry {nearest_expiry_str}")
+            return None, None
+
+        options = options[mask_expiry].copy()
+        logger.info(f"{index_name}: {len(options)} options for expiry {nearest_expiry_str}")
+
+        # STEP 4: Parse strikes
         def parse_strike(strike_val):
             try:
                 if pd.isna(strike_val):
                     return 0
                 s = float(strike_val)
-                # If strike looks like 2340000, divide by 100
                 if s > 100000:
                     return s / 100
                 return s
@@ -1998,7 +2003,7 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No valid strikes after parsing")
             return None, None
 
-        # Find nearest ATM strike
+        # STEP 5: Find nearest ATM strike
         options["strike_diff"] = abs(options["strike_parsed"] - atm)
         options_sorted = options.sort_values("strike_diff")
 
@@ -2007,35 +2012,50 @@ def get_current_atm_tokens(index_name):
         pe_options = options_sorted[options_sorted["symbol"].str.contains("PE", na=False)]
 
         if ce_options.empty or pe_options.empty:
-            logger.warning(f"{index_name}: ATM CE/PE not found. ATM={atm}, Expiry tried={expiry_formats}")
+            logger.warning(f"{index_name}: No CE or PE found for expiry {nearest_expiry_str}")
             return None, None
 
         ce_row = ce_options.iloc[0]
         pe_row = pe_options.iloc[0]
 
+        ce_strike = float(ce_row["strike_parsed"])
+        pe_strike = float(pe_row["strike_parsed"])
+
+        # STEP 6: CRITICAL VALIDATION - Strike must be near ATM
+        if ce_strike < min_valid_strike or ce_strike > max_valid_strike:
+            logger.error(f"{index_name}: CE strike {ce_strike} is NOT near ATM {atm} (spot {spot}). Rejecting tokens!")
+            logger.error(f"{index_name}: Valid range: {min_valid_strike:.0f} - {max_valid_strike:.0f}")
+            return None, None
+
+        if pe_strike < min_valid_strike or pe_strike > max_valid_strike:
+            logger.error(f"{index_name}: PE strike {pe_strike} is NOT near ATM {atm} (spot {spot}). Rejecting tokens!")
+            return None, None
+
         ce_token = str(ce_row["token"])
         pe_token = str(pe_row["token"])
         ce_symbol = str(ce_row["symbol"])
         pe_symbol = str(pe_row["symbol"])
-        actual_strike = float(ce_row["strike_parsed"])
 
         # Update INDEX_TOKENS with full metadata
         INDEX_TOKENS[index_name].update({
             "ce_token": ce_token,
             "pe_token": pe_token,
-            "atm_strike": actual_strike,
-            "expiry": expiry_formats[0],  # Use primary format
-            "expiry_date": next_expiry.strftime("%Y-%m-%d"),
+            "atm_strike": ce_strike,
+            "expiry": nearest_expiry_str,
+            "expiry_date": nearest_expiry_dt.strftime("%Y-%m-%d"),
             "ce_symbol": ce_symbol,
             "pe_symbol": pe_symbol,
             "last_refresh": time.time()
         })
 
-        logger.info(f"{index_name}: ATM tokens SET - Strike:{actual_strike} CE:{ce_token} PE:{pe_token} CE_Sym:{ce_symbol}")
+        logger.info(f"{index_name}: VALID ATM tokens SET - Strike:{ce_strike} Spot:{spot} CE:{ce_token} PE:{pe_token}")
+        logger.info(f"{index_name}: CE Symbol: {ce_symbol} | PE Symbol: {pe_symbol}")
         return ce_token, pe_token
 
     except Exception as e:
         logger.error(f"{index_name}: Token fetch error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None, None
 
 def refresh_all_tokens():
@@ -3256,7 +3276,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.5 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
+        "engine": "Multi-Index Options Bot v12.6 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -3310,7 +3330,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.5",
+        "version": "12.6",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -3346,7 +3366,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.5",
+        "version": "12.6",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
@@ -3413,6 +3433,40 @@ def performance_endpoint():
             "current_drawdown": v.current_drawdown,
             "kill_switch_active": v.is_active()
         } for k, v in kill_switches.items()}
+    })
+
+@app.route("/api/reset-kill-switch/<index_name>", methods=["POST"])
+def reset_kill_switch(index_name):
+    """Manual reset of kill switch after fixing issues."""
+    if index_name not in INDEX_CONFIG:
+        return jsonify({"error": "Invalid index"}), 400
+    kill_switches[index_name].manual_reset()
+    return jsonify({
+        "status": "success",
+        "index": index_name,
+        "message": "Kill switch reset. Trading resumed.",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/api/reset-all-kill-switches", methods=["POST"])
+def reset_all_kill_switches():
+    """Reset all kill switches."""
+    for idx in INDEX_CONFIG:
+        kill_switches[idx].manual_reset()
+    return jsonify({
+        "status": "success",
+        "message": "All kill switches reset",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/api/force-refresh-tokens", methods=["POST"])
+def force_refresh_tokens():
+    """Force refresh all tokens immediately."""
+    refresh_all_tokens()
+    return jsonify({
+        "status": "success",
+        "tokens": INDEX_TOKENS,
+        "timestamp": datetime.now().isoformat()
     })
 
 if __name__ == "__main__":
