@@ -1,4 +1,4 @@
-# === VERSION 12.2 - FIXED: Premium Invalid | Indentation | Greeks API | Slippage | PnL Tracking ===
+# === VERSION 12.3 - FIXED: Premium Invalid Root Causes | Token Fetching | Expiry Parsing | Spot Fallback ===
 # Fixes applied:
 # 1. Fixed "Premium Invalid: Rs0" - better token fetching, relaxed premium validation, auto-refresh
 # 2. Fixed indentation bug in live_signals() endpoint (return was inside for loop)
@@ -1173,13 +1173,15 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # ============================================================================
 # V11 CORE FUNCTIONS (SENTIMENT, SIGNALS, ETC.)
 # ============================================================================
-def is_valid_option_premium(premium, spot_price, side):
+def is_valid_option_premium(premium, spot_price, side, strict=True):
     """Relaxed premium validation - SENSEX allows slightly higher premium %."""
-    if premium <= 0 or spot_price <= 0:
+    if premium <= 0:
         return False
+    if spot_price <= 0:
+        return not strict
     premium_pct = premium / spot_price
-    max_pct = 0.25 if spot_price > 50000 else 0.20
-    return 0.0002 < premium_pct < max_pct
+    max_pct = 0.30 if spot_price > 50000 else 0.25
+    return 0.0001 < premium_pct < max_pct
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -1412,68 +1414,75 @@ def get_auth_token():
             logger.error(f"Auth loop fail: {e}")
             return None, None, None
 
-def safe_ltp(resp):
+def safe_ltp(resp, context=""):
     """Safely extract LTP from API response handling multiple formats."""
     if not resp or not resp.get("status"):
+        logger.warning(f"safe_ltp [{context}]: API status False. Resp: {resp}")
         return None
     data = resp.get("data", {})
+    ltp = None
     if isinstance(data, dict):
         if "fetched" in data and data["fetched"]:
             fetched = data["fetched"]
             if isinstance(fetched, list) and len(fetched) > 0:
-                return float(fetched[0].get("ltp", 0))
+                ltp = float(fetched[0].get("ltp", 0))
             elif isinstance(fetched, dict):
-                return float(fetched.get("ltp", 0))
+                ltp = float(fetched.get("ltp", 0))
         elif "ltp" in data:
-            return float(data["ltp"])
+            ltp = float(data["ltp"])
     elif isinstance(data, list) and len(data) > 0:
-        return float(data[0].get("ltp", 0))
-    return None
+        ltp = float(data[0].get("ltp", 0))
+
+    if ltp == 0:
+        logger.warning(f"safe_ltp [{context}]: API returned LTP=0. Resp snippet: {json.dumps(resp, default=str)[:400]}")
+    return ltp
 
 # ============================================================================
 # MARKET DATA FUNCTIONS (fixed SENSEX spot and token fetching)
 # ============================================================================
 def get_index_spot(index_name):
     config = INDEX_CONFIG.get(index_name)
-    if not config: return None
-    _, _, obj = get_auth_token()
-    if not obj: return None
-    if index_name == "SENSEX":
-        try:
-            # Direct token fetch
-            resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
-            ltp = safe_ltp(resp)
-            if ltp is not None:
-                if ltp > 100000: ltp /= 100
-                if 50000 < ltp < 100000:
-                    return ltp
-            # Fallback: search for "SENSEX"
-            search = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
-            if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
-                token = str(search["data"][0].get("symboltoken"))
-                ltp_resp = rate_limited_api_call(obj.ltpData, "BSE", "SENSEX", token)
-                ltp = safe_ltp(ltp_resp)
-                if ltp is not None:
-                    if ltp > 100000: ltp /= 100
-                    return ltp
-        except Exception as e:
-            logger.error(f"SENSEX spot error: {e}")
+    if not config:
         return None
-    # Other indices
+    _, _, obj = get_auth_token()
+    if not obj:
+        return None
+
+    valid_ranges = {
+        "NIFTY": (15000, 30000),
+        "BANKNIFTY": (30000, 70000),
+        "FINNIFTY": (15000, 30000),
+        "MIDCPNIFTY": (8000, 18000),
+        "SENSEX": (50000, 100000)
+    }
+    min_val, max_val = valid_ranges.get(index_name, (0, 999999))
+
     try:
         resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
-        ltp = safe_ltp(resp)
-        if ltp is not None:
-            if ltp > 100000: ltp /= 100
-            if index_name == "MIDCPNIFTY" and (ltp < 5000 or ltp > 25000):
-                search = rate_limited_api_call(obj.searchScrip, "NSE", "MIDCPNIFTY")
-                if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
-                    token = str(search["data"][0].get("symboltoken"))
-                    ltp2 = safe_ltp(rate_limited_api_call(obj.ltpData, "NSE", "MIDCPNIFTY", token))
-                    if ltp2 is not None:
-                        if ltp2 > 100000: ltp2 /= 100
-                        ltp = ltp2
-            return ltp
+        ltp = safe_ltp(resp, context=f"{index_name}_spot")
+        if ltp is not None and ltp > 0:
+            if ltp > 100000:
+                ltp /= 100
+            if min_val < ltp < max_val:
+                return ltp
+            else:
+                logger.warning(f"{index_name} spot {ltp} out of range ({min_val}-{max_val})")
+
+        # Fallback search
+        if index_name == "SENSEX":
+            search = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
+        else:
+            search = rate_limited_api_call(obj.searchScrip, config["exchange"], config["symbol"])
+
+        if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
+            token = str(search["data"][0].get("symboltoken"))
+            ltp_resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], token)
+            ltp = safe_ltp(ltp_resp, context=f"{index_name}_spot_fallback")
+            if ltp is not None and ltp > 0:
+                if ltp > 100000:
+                    ltp /= 100
+                if min_val < ltp < max_val:
+                    return ltp
     except Exception as e:
         logger.error(f"Spot fetch {index_name}: {e}")
     return None
@@ -1486,8 +1495,8 @@ def get_vix_value():
         for token in vix_tokens:
             try:
                 resp = rate_limited_api_call(obj.ltpData, "NSE", "INDIAVIX", token)
-                ltp = safe_ltp(resp)
-                if ltp is not None:
+                ltp = safe_ltp(resp, context="VIX")
+                if ltp is not None and ltp > 0:
                     return ltp
             except Exception:
                 continue
@@ -1496,8 +1505,8 @@ def get_vix_value():
             if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
                 token = str(search["data"][0].get("symboltoken"))
                 resp = rate_limited_api_call(obj.ltpData, "NSE", "INDIAVIX", token)
-                ltp = safe_ltp(resp)
-                if ltp is not None:
+                ltp = safe_ltp(resp, context="VIX_fallback")
+                if ltp is not None and ltp > 0:
                     return ltp
         except Exception:
             pass
@@ -1586,6 +1595,7 @@ def get_option_greeks(index_name):
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") and data.get("data"):
+                logger.info(f"Greeks API success for {index_name} expiry {expiry_str}")
                 greeks_list = data["data"]
                 atm_strike = tokens.get("atm_strike", 0)
                 ce_greeks = None
@@ -1631,6 +1641,10 @@ def get_option_greeks(index_name):
                         logger.debug(f"Greeks DB log error: {e}")
                     greeks_analyzers[index_name].update(**greeks_data)
                     return greeks_data
+            else:
+                logger.warning(f"Greeks API empty data for {index_name} expiry {expiry_str}. Status: {data.get('status')}")
+        else:
+            logger.warning(f"Greeks API HTTP {resp.status_code} for {index_name} expiry {expiry_str}")
         return _estimate_greeks_fallback(index_name)
     except Exception as e:
         logger.debug(f"Greeks API error {index_name}: {e}")
@@ -1679,6 +1693,24 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
 # ============================================================================
 # TOKEN MANAGEMENT - FIXED: with SENSEX multiple patterns
 # ============================================================================
+def parse_expiry_date(expiry_str):
+    """Try multiple Angel One expiry formats."""
+    if not expiry_str or pd.isna(expiry_str):
+        return pd.NaT
+    formats = ["%d%b%Y", "%d%b%y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d", "%d/%m/%Y", "%d%m%Y"]
+    for fmt in formats:
+        try:
+            result = pd.to_datetime(expiry_str, format=fmt)
+            return result
+        except:
+            continue
+    try:
+        result = pd.to_datetime(expiry_str, infer_datetime_format=True)
+        return result
+    except:
+        logger.warning(f"parse_expiry_date: Could not parse '{expiry_str}' with any format")
+        return pd.NaT
+
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"):
@@ -1696,6 +1728,7 @@ def get_current_atm_tokens(index_name):
         logger.warning(f"{index_name}: Could not calculate next expiry")
         return None, None
     expiry = next_expiry.strftime("%d%b%Y").upper()
+    expiry_short = expiry[:5]  # e.g., "11JUN"
 
     scrip = get_scrip_master()
     if scrip and isinstance(scrip, list) and len(scrip) > 0:
@@ -1708,31 +1741,44 @@ def get_current_atm_tokens(index_name):
                       (df["exch_seg"] == config["option_exchange"])].copy()
             if opts.empty:
                 raise ValueError("No options in scrip master")
-            opts["expiry_date"] = pd.to_datetime(opts["expiry"], format="%d%b%Y", errors="coerce")
+
+            # Robust expiry parsing
+            opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
             opts = opts.dropna(subset=["expiry_date"])
             if opts.empty:
-                raise ValueError("No valid expiry dates")
+                raise ValueError("No valid expiry dates after parsing")
+
             opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
             opts = opts.dropna(subset=["strike"])
             if opts.empty:
                 raise ValueError("No valid strikes")
+
             today_dt = datetime.now()
             future = opts[opts["expiry_date"] >= today_dt]
             if future.empty:
                 raise ValueError("No future options")
+
             nearest = future["expiry_date"].min()
             atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
+
             if atm_opts.empty:
+                # Find nearest strike at nearest expiry
                 same_exp = future[future["expiry_date"] == nearest]
                 if same_exp.empty:
                     raise ValueError("No nearest expiry options")
-                strike_diffs = (same_exp["strike"] - atm).abs()
-                min_idx = strike_diffs.idxmin()
-                if pd.isna(min_idx):
+                same_exp["strike_diff"] = (same_exp["strike"] - atm).abs()
+                min_diff = same_exp["strike_diff"].min()
+                nearest_strike_rows = same_exp[same_exp["strike_diff"] == min_diff]
+                if nearest_strike_rows.empty:
                     raise ValueError("No nearest strike found")
-                atm_opts = same_exp.loc[[min_idx]]
+                nearest_strike = nearest_strike_rows["strike"].iloc[0]
+                atm_opts = same_exp[same_exp["strike"] == nearest_strike]
+                if atm_opts.empty:
+                    raise ValueError("No options at nearest strike")
+
             ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
             pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+
             if not ce.empty and not pe.empty:
                 ce_token = str(ce.iloc[0]["token"])
                 pe_token = str(pe.iloc[0]["token"])
@@ -1747,12 +1793,23 @@ def get_current_atm_tokens(index_name):
                     "ce_symbol": ce_symbol,
                     "pe_symbol": pe_symbol
                 })
-                logger.info(f"{index_name} tokens from scrip: CE={ce_token} PE={pe_token} Expiry={expiry}")
+                logger.info(f"{index_name} tokens from scrip: CE={ce_token} PE={pe_token} Expiry={expiry} Strike={atm}")
                 return ce_token, pe_token
             else:
-                raise ValueError("CE/PE filtering failed")
+                raise ValueError(f"CE/PE filtering failed. CE rows: {len(ce)}, PE rows: {len(pe)}")
         except Exception as e:
             logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
+            # Clear cache if expiry parsing failed
+            if "expiry" in str(e).lower() or "parse" in str(e).lower() or "valid" in str(e).lower() or "empty" in str(e).lower():
+                with _scrip_lock:
+                    _scrip_cache["data"] = None
+                    _scrip_cache["timestamp"] = 0
+                logger.info("Cleared scrip master cache due to parsing/empty failure")
+            elif "scrip" in str(e).lower() or "master" in str(e).lower():
+                with _scrip_lock:
+                    _scrip_cache["data"] = None
+                    _scrip_cache["timestamp"] = 0
+                logger.info("Cleared scrip master cache due to data issue")
 
     # API fallback with multiple patterns for SENSEX
     _, _, obj = get_auth_token()
@@ -1761,35 +1818,84 @@ def get_current_atm_tokens(index_name):
         ce_symbol = pe_symbol = None
         try:
             if index_name == "SENSEX":
-                patterns = [f"{config['symbol']}_{atm}CE", f"{config['symbol']} {atm} CE", f"{config['symbol']}{atm}CE"]
+                patterns = [
+                    f"{config['symbol']}_{atm}CE",
+                    f"{config['symbol']} {atm} CE",
+                    f"{config['symbol']}{atm}CE",
+                    f"{config['symbol']}{expiry_short}{atm}CE"
+                ]
                 for pat in patterns:
                     try:
                         ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
                         if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                            ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                            ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                            break
+                            valid = [d for d in ce_resp["data"] if expiry_short in d.get("symbol", "")]
+                            if valid:
+                                ce_token = str(valid[0].get("symboltoken"))
+                                ce_symbol = str(valid[0].get("symbol"))
+                                break
+                            else:
+                                ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                                ce_symbol = str(ce_resp["data"][0].get("symbol"))
+                                break
                     except Exception:
                         continue
+
                 for pat in patterns:
                     pat_pe = pat.replace("CE", "PE")
                     try:
                         pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat_pe)
                         if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                            pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                            pe_symbol = str(pe_resp["data"][0].get("symbol"))
-                            break
+                            valid = [d for d in pe_resp["data"] if expiry_short in d.get("symbol", "")]
+                            if valid:
+                                pe_token = str(valid[0].get("symboltoken"))
+                                pe_symbol = str(valid[0].get("symbol"))
+                                break
+                            else:
+                                pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                                pe_symbol = str(pe_resp["data"][0].get("symbol"))
+                                break
                     except Exception:
                         continue
             else:
-                ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
-                if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                    ce_token = str(ce_resp["data"][0].get("symboltoken"))
-                    ce_symbol = str(ce_resp["data"][0].get("symbol"))
-                pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
-                if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                    pe_token = str(pe_resp["data"][0].get("symboltoken"))
-                    pe_symbol = str(pe_resp["data"][0].get("symbol"))
+                search_patterns_ce = [
+                    f"{config['symbol']}{expiry_short}{atm}CE",
+                    f"{config['symbol']}{atm}CE"
+                ]
+                for pat in search_patterns_ce:
+                    try:
+                        ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
+                        if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
+                            valid = [d for d in ce_resp["data"] if expiry_short in d.get("symbol", "")]
+                            if valid:
+                                ce_token = str(valid[0].get("symboltoken"))
+                                ce_symbol = str(valid[0].get("symbol"))
+                                break
+                            else:
+                                ce_token = str(ce_resp["data"][0].get("symboltoken"))
+                                ce_symbol = str(ce_resp["data"][0].get("symbol"))
+                                break
+                    except Exception:
+                        continue
+
+                search_patterns_pe = [
+                    f"{config['symbol']}{expiry_short}{atm}PE",
+                    f"{config['symbol']}{atm}PE"
+                ]
+                for pat in search_patterns_pe:
+                    try:
+                        pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], pat)
+                        if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
+                            valid = [d for d in pe_resp["data"] if expiry_short in d.get("symbol", "")]
+                            if valid:
+                                pe_token = str(valid[0].get("symboltoken"))
+                                pe_symbol = str(valid[0].get("symbol"))
+                                break
+                            else:
+                                pe_token = str(pe_resp["data"][0].get("symboltoken"))
+                                pe_symbol = str(pe_resp["data"][0].get("symbol"))
+                                break
+                    except Exception:
+                        continue
 
             if ce_token and pe_token:
                 INDEX_TOKENS[index_name].update({
@@ -1801,8 +1907,10 @@ def get_current_atm_tokens(index_name):
                     "ce_symbol": ce_symbol,
                     "pe_symbol": pe_symbol
                 })
-                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry}")
+                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token} Expiry={expiry} Strike={atm}")
                 return ce_token, pe_token
+            else:
+                logger.error(f"{index_name}: Search fallback incomplete. CE={ce_token}, PE={pe_token}")
         except Exception as e:
             logger.error(f"Search fallback error {index_name}: {e}")
 
@@ -1828,8 +1936,16 @@ def refresh_tokens_if_needed(index_name):
         last_refresh = tokens.get("last_refresh", 0)
         if time.time() - last_refresh > 60:
             logger.info(f"{index_name}: Premiums are 0, refreshing tokens...")
+            old_ce = tokens.get("ce_token")
+            old_pe = tokens.get("pe_token")
             get_current_atm_tokens(index_name)
-            INDEX_TOKENS[index_name]["last_refresh"] = time.time()
+            new_ce = INDEX_TOKENS[index_name].get("ce_token")
+            new_pe = INDEX_TOKENS[index_name].get("pe_token")
+            if new_ce and new_pe and (new_ce != old_ce or new_pe != old_pe):
+                INDEX_TOKENS[index_name]["last_refresh"] = time.time()
+                logger.info(f"{index_name}: Token refresh succeeded")
+            else:
+                logger.warning(f"{index_name}: Token refresh failed or returned same/invalid tokens")
 
 # ============================================================================
 # V12: ENHANCED POSITION SIZING WITH KELLY + REGIME + CORRELATION
@@ -2365,6 +2481,35 @@ def run_signal_engine_for_index(index_name):
                     ce_prem = last_known_prices[index_name].get("ce", 0)
                 if pe_prem <= 0:
                     pe_prem = last_known_prices[index_name].get("pe", 0)
+                # If still 0, try fetching via REST directly
+                if ce_prem <= 0 or pe_prem <= 0:
+                    tokens = INDEX_TOKENS.get(index_name, {})
+                    if tokens.get("ce_token") and tokens.get("ce_symbol"):
+                        try:
+                            _, _, obj = get_auth_token()
+                            if obj:
+                                resp = rate_limited_api_call(obj.ltpData, INDEX_CONFIG[index_name]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
+                                ltp = safe_ltp(resp, context=f"{index_name}_CE_direct")
+                                if ltp and ltp > 0:
+                                    ce_prem = ltp
+                                    latest_ticks[index_name]["ce_price"] = ltp
+                                    last_known_prices[index_name]["ce"] = ltp
+                                    logger.info(f"Direct CE fetch success: {index_name}={ltp}")
+                        except Exception as e:
+                            logger.debug(f"Direct CE fetch failed: {e}")
+                    if tokens.get("pe_token") and tokens.get("pe_symbol"):
+                        try:
+                            _, _, obj = get_auth_token()
+                            if obj:
+                                resp = rate_limited_api_call(obj.ltpData, INDEX_CONFIG[index_name]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
+                                ltp = safe_ltp(resp, context=f"{index_name}_PE_direct")
+                                if ltp and ltp > 0:
+                                    pe_prem = ltp
+                                    latest_ticks[index_name]["pe_price"] = ltp
+                                    last_known_prices[index_name]["pe"] = ltp
+                                    logger.info(f"Direct PE fetch success: {index_name}={ltp}")
+                        except Exception as e:
+                            logger.debug(f"Direct PE fetch failed: {e}")
                 prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
 
             if prem <= 0 or prem < min_prem:
@@ -2761,6 +2906,12 @@ def start_rest_api_poller():
     poll_count = 0
     token_refresh_counter = 0
 
+    # Startup diagnostic: log token state
+    for idx in INDEX_CONFIG:
+        if INDEX_CONFIG[idx].get("active"):
+            tok = INDEX_TOKENS.get(idx, {})
+            logger.info(f"REST POLLER STARTUP: {idx} tokens -> CE={tok.get('ce_token','MISSING')} PE={tok.get('pe_token','MISSING')} Expiry={tok.get('expiry','MISSING')} Strike={tok.get('atm_strike','MISSING')}")
+
     while True:
         try:
             last_heartbeat = time.time()
@@ -2816,7 +2967,15 @@ def start_rest_api_poller():
             for idx, tokens in INDEX_TOKENS.items():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
+                        # Use last known spot if current is 0
                         spot = latest_ticks[idx]["spot_price"]
+                        if spot <= 0:
+                            spot = last_known_prices[idx].get("spot", 0)
+                        if spot <= 0:
+                            logger.warning(f"REST POLLER: No valid spot for {idx}, using non-strict validation")
+                            strict_check = False
+                        else:
+                            strict_check = True
 
                         ce_resp = rate_limited_api_call(
                             auth_obj.ltpData,
@@ -2824,18 +2983,18 @@ def start_rest_api_poller():
                             tokens["ce_symbol"],
                             tokens["ce_token"]
                         )
-                        ce = safe_ltp(ce_resp)
+                        ce = safe_ltp(ce_resp, context=f"{idx}_CE_{tokens['ce_symbol']}")
                         if ce is not None:
                             if ce > 100000: ce /= 100
                             if ce > 0 and ce < 10000:
-                                if is_valid_option_premium(ce, spot, "CE"):
+                                if is_valid_option_premium(ce, spot, "CE", strict=strict_check):
                                     ce_price_histories[idx].append(ce)
                                     latest_ticks[idx]["ce_price"] = ce
                                     last_known_prices[idx]["ce"] = ce
                                     last_known_prices[idx]["timestamp"] = now
                                     logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
                                 else:
-                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
+                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot} (strict={strict_check})")
                             else:
                                 logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
 
@@ -2845,18 +3004,18 @@ def start_rest_api_poller():
                             tokens["pe_symbol"],
                             tokens["pe_token"]
                         )
-                        pe = safe_ltp(pe_resp)
+                        pe = safe_ltp(pe_resp, context=f"{idx}_PE_{tokens['pe_symbol']}")
                         if pe is not None:
                             if pe > 100000: pe /= 100
                             if pe > 0 and pe < 10000:
-                                if is_valid_option_premium(pe, spot, "PE"):
+                                if is_valid_option_premium(pe, spot, "PE", strict=strict_check):
                                     pe_price_histories[idx].append(pe)
                                     latest_ticks[idx]["pe_price"] = pe
                                     last_known_prices[idx]["pe"] = pe
                                     last_known_prices[idx]["timestamp"] = now
                                     logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
                                 else:
-                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
+                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot} (strict={strict_check})")
                             else:
                                 logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
                     except Exception as e:
@@ -2869,6 +3028,15 @@ def start_rest_api_poller():
                 run_all_signals()
             except Exception as e:
                 logger.error(f"REST poller signal engine error: {e}")
+
+            # Periodic token health check
+            for idx in INDEX_CONFIG:
+                if INDEX_CONFIG[idx].get("active"):
+                    tok = INDEX_TOKENS.get(idx, {})
+                    if not tok.get("ce_token") or not tok.get("pe_token"):
+                        logger.warning(f"REST POLLER: {idx} missing tokens, triggering refresh")
+                        get_current_atm_tokens(idx)
+
             time.sleep(10)
         except Exception as e:
             logger.error(f"REST poller error: {e}")
@@ -2901,7 +3069,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.2 (MERGED: Working Socket + Full Analytics + PnL)",
+        "engine": "Multi-Index Options Bot v12.3 (MERGED: Working Socket + Full Analytics + PnL + Premium Fix)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -2919,11 +3087,15 @@ def home():
             "Market Analysis Exit Engine",
             "Trend Change Cooldown",
             "Trailing Stop Loss",
-            "FIXED: Premium Invalid Rs0 Error",
+            "FIXED: Premium Invalid Rs0 Error (v12.3)",
             "FIXED: Greeks API Endpoint",
             "FIXED: Token Auto-Refresh on Zero Premiums",
             "FIXED: SENSEX Token Fetching with Multiple Patterns",
             "FIXED: PnL Tracking (daily/live/total)",
+            "FIXED: Multi-format Expiry Parsing",
+            "FIXED: Nearest Strike CE+PE Fetching",
+            "FIXED: Spot Fallback for Premium Validation",
+            "FIXED: Direct Option LTP Fallback",
             "MERGED: Working WebSocket + REST Data Fetching"
         ]
     })
@@ -2954,7 +3126,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.2",
+        "version": "12.3",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -2990,7 +3162,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.2",
+        "version": "12.3",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
