@@ -381,6 +381,9 @@ portfolio_state = {idx: {"equity": persisted.get(idx, {}).get("equity", 100000.0
                           "open_positions": 0, "daily_trades": 0,
                           "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_CONFIG}
 
+# Track bot startup time for grace periods
+_bot_startup_time = time.time()
+
 for idx in INDEX_CONFIG:
     daily_drawdown[idx]["peak_equity"] = portfolio_state[idx]["equity"]
 
@@ -1564,24 +1567,64 @@ def get_option_greeks(index_name):
     tokens = INDEX_TOKENS.get(index_name)
     if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
         return None
-    _, _, obj = get_auth_token()
-    if not obj:
-        return None
+
+    # Force fresh auth token for Greeks API
+    auth_token, feed_token, obj = get_auth_token()
+    if not obj or not auth_token:
+        return _estimate_greeks_fallback(index_name)
+
     try:
         expiry_str = tokens.get("expiry", "")
         if not expiry_str:
             return _estimate_greeks_fallback(index_name)
-        greeks_payload = {
-            "name": config["symbol"],
-            "expirydate": expiry_str
-        }
+
+        # Try using SmartAPI library's built-in method first (if available in newer versions)
+        try:
+            if hasattr(obj, 'optionGreek'):
+                # SmartAPI library might have a built-in method
+                resp = obj.optionGreek({"name": config["symbol"], "expirydate": expiry_str})
+                if resp and resp.get("status") and resp.get("data"):
+                    logger.info(f"Greeks API success via SmartAPI library for {index_name}")
+                    greeks_list = resp["data"]
+                    atm_strike = tokens.get("atm_strike", 0)
+                    ce_greeks = None
+                    pe_greeks = None
+                    for g in greeks_list:
+                        strike = float(g.get("strikePrice", 0))
+                        opt_type = g.get("optionType", "")
+                        if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50) * 0.5:
+                            if opt_type == "CE":
+                                ce_greeks = g
+                            elif opt_type == "PE":
+                                pe_greeks = g
+                    if ce_greeks and pe_greeks:
+                        greeks_data = {
+                            "ce_iv": float(ce_greeks.get("impliedVolatility", 0)) / 100 if float(ce_greeks.get("impliedVolatility", 0)) > 1 else float(ce_greeks.get("impliedVolatility", 0)),
+                            "pe_iv": float(pe_greeks.get("impliedVolatility", 0)) / 100 if float(pe_greeks.get("impliedVolatility", 0)) > 1 else float(pe_greeks.get("impliedVolatility", 0)),
+                            "ce_delta": float(ce_greeks.get("delta", 0)),
+                            "pe_delta": float(pe_greeks.get("delta", 0)),
+                            "ce_gamma": float(ce_greeks.get("gamma", 0)),
+                            "pe_gamma": float(pe_greeks.get("gamma", 0)),
+                            "ce_theta": float(ce_greeks.get("theta", 0)),
+                            "pe_theta": float(pe_greeks.get("theta", 0)),
+                            "ce_vega": float(ce_greeks.get("vega", 0)),
+                            "pe_vega": float(pe_greeks.get("vega", 0))
+                        }
+                        greeks_analyzers[index_name].update(**greeks_data)
+                        return greeks_data
+        except Exception as e:
+            logger.debug(f"SmartAPI library optionGreek method failed: {e}")
+
+        # Fallback to direct HTTP call
         url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
+
         try:
             local_ip = socket.gethostbyname(socket.gethostname())
         except:
             local_ip = "127.0.0.1"
+
         headers = {
-            "Authorization": f"Bearer {auth_cache.get('token', '')}",
+            "Authorization": f"Bearer {auth_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "X-UserType": "USER",
@@ -1591,63 +1634,83 @@ def get_option_greeks(index_name):
             "X-MACAddress": "00:00:00:00:00:00",
             "X-PrivateKey": ANGEL_API_KEY
         }
-        resp = requests.post(url, json=greeks_payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") and data.get("data"):
-                logger.info(f"Greeks API success for {index_name} expiry {expiry_str}")
-                greeks_list = data["data"]
-                atm_strike = tokens.get("atm_strike", 0)
-                ce_greeks = None
-                pe_greeks = None
-                for g in greeks_list:
-                    strike = float(g.get("strikePrice", 0))
-                    opt_type = g.get("optionType", "")
-                    if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50) * 0.5:
-                        if opt_type == "CE":
-                            ce_greeks = g
-                        elif opt_type == "PE":
-                            pe_greeks = g
-                if ce_greeks and pe_greeks:
-                    greeks_data = {
-                        "ce_iv": float(ce_greeks.get("impliedVolatility", 0)) / 100 if float(ce_greeks.get("impliedVolatility", 0)) > 1 else float(ce_greeks.get("impliedVolatility", 0)),
-                        "pe_iv": float(pe_greeks.get("impliedVolatility", 0)) / 100 if float(pe_greeks.get("impliedVolatility", 0)) > 1 else float(pe_greeks.get("impliedVolatility", 0)),
-                        "ce_delta": float(ce_greeks.get("delta", 0)),
-                        "pe_delta": float(pe_greeks.get("delta", 0)),
-                        "ce_gamma": float(ce_greeks.get("gamma", 0)),
-                        "pe_gamma": float(pe_greeks.get("gamma", 0)),
-                        "ce_theta": float(ce_greeks.get("theta", 0)),
-                        "pe_theta": float(pe_greeks.get("theta", 0)),
-                        "ce_vega": float(ce_greeks.get("vega", 0)),
-                        "pe_vega": float(pe_greeks.get("vega", 0))
-                    }
-                    try:
-                        with sqlite3.connect(DB_PATH) as conn:
-                            c = conn.cursor()
-                            c.execute("""INSERT INTO greeks_history 
-                                (timestamp, index_name, ce_iv, pe_iv, ce_delta, pe_delta, 
-                                 ce_gamma, pe_gamma, ce_theta, pe_theta, ce_vega, pe_vega,
-                                 iv_rank, iv_percentile)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                (time.time(), index_name,
-                                 greeks_data["ce_iv"], greeks_data["pe_iv"],
-                                 greeks_data["ce_delta"], greeks_data["pe_delta"],
-                                 greeks_data["ce_gamma"], greeks_data["pe_gamma"],
-                                 greeks_data["ce_theta"], greeks_data["pe_theta"],
-                                 greeks_data["ce_vega"], greeks_data["pe_vega"],
-                                 0, 0))
-                            conn.commit()
-                    except Exception as e:
-                        logger.debug(f"Greeks DB log error: {e}")
-                    greeks_analyzers[index_name].update(**greeks_data)
-                    return greeks_data
+
+        # Try with exact expiry format from forum
+        payload = {"name": config["symbol"], "expirydate": expiry_str}
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=10)
+            logger.debug(f"Greeks API raw response for {index_name}: status={resp.status_code}, text={resp.text[:500]}")
+
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception as e:
+                    logger.warning(f"Greeks API JSON parse error for {index_name}: {e}. Raw: {resp.text[:200]}")
+                    return _estimate_greeks_fallback(index_name)
+
+                if data.get("status") and data.get("data"):
+                    logger.info(f"Greeks API success for {index_name} expiry {expiry_str}")
+                    greeks_list = data["data"]
+                    atm_strike = tokens.get("atm_strike", 0)
+                    ce_greeks = None
+                    pe_greeks = None
+                    for g in greeks_list:
+                        strike = float(g.get("strikePrice", 0))
+                        opt_type = g.get("optionType", "")
+                        if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50) * 0.5:
+                            if opt_type == "CE":
+                                ce_greeks = g
+                            elif opt_type == "PE":
+                                pe_greeks = g
+                    if ce_greeks and pe_greeks:
+                        greeks_data = {
+                            "ce_iv": float(ce_greeks.get("impliedVolatility", 0)) / 100 if float(ce_greeks.get("impliedVolatility", 0)) > 1 else float(ce_greeks.get("impliedVolatility", 0)),
+                            "pe_iv": float(pe_greeks.get("impliedVolatility", 0)) / 100 if float(pe_greeks.get("impliedVolatility", 0)) > 1 else float(pe_greeks.get("impliedVolatility", 0)),
+                            "ce_delta": float(ce_greeks.get("delta", 0)),
+                            "pe_delta": float(pe_greeks.get("delta", 0)),
+                            "ce_gamma": float(ce_greeks.get("gamma", 0)),
+                            "pe_gamma": float(pe_greeks.get("gamma", 0)),
+                            "ce_theta": float(ce_greeks.get("theta", 0)),
+                            "pe_theta": float(pe_greeks.get("theta", 0)),
+                            "ce_vega": float(ce_greeks.get("vega", 0)),
+                            "pe_vega": float(pe_greeks.get("vega", 0))
+                        }
+                        try:
+                            with sqlite3.connect(DB_PATH) as conn:
+                                c = conn.cursor()
+                                c.execute("""INSERT INTO greeks_history 
+                                    (timestamp, index_name, ce_iv, pe_iv, ce_delta, pe_delta, 
+                                     ce_gamma, pe_gamma, ce_theta, pe_theta, ce_vega, pe_vega,
+                                     iv_rank, iv_percentile)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    (time.time(), index_name,
+                                     greeks_data["ce_iv"], greeks_data["pe_iv"],
+                                     greeks_data["ce_delta"], greeks_data["pe_delta"],
+                                     greeks_data["ce_gamma"], greeks_data["pe_gamma"],
+                                     greeks_data["ce_theta"], greeks_data["pe_theta"],
+                                     greeks_data["ce_vega"], greeks_data["pe_vega"],
+                                     0, 0))
+                                conn.commit()
+                        except Exception as e:
+                            logger.debug(f"Greeks DB log error: {e}")
+                        greeks_analyzers[index_name].update(**greeks_data)
+                        return greeks_data
+                    else:
+                        logger.warning(f"Greeks API: No matching CE/PE at strike {atm_strike} for {index_name}")
+                else:
+                    status = data.get('status')
+                    message = data.get('message', 'N/A')
+                    errorcode = data.get('errorcode', 'N/A')
+                    logger.warning(f"Greeks API empty data for {index_name} expiry {expiry_str}. Status: {status}, Message: {message}, ErrorCode: {errorcode}")
             else:
-                logger.warning(f"Greeks API empty data for {index_name} expiry {expiry_str}. Status: {data.get('status')}")
-        else:
-            logger.warning(f"Greeks API HTTP {resp.status_code} for {index_name} expiry {expiry_str}")
+                logger.warning(f"Greeks API HTTP {resp.status_code} for {index_name} expiry {expiry_str}. Response: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Greeks API request error for {index_name}: {e}")
+
         return _estimate_greeks_fallback(index_name)
     except Exception as e:
-        logger.debug(f"Greeks API error {index_name}: {e}")
+        logger.debug(f"Greeks API outer error {index_name}: {e}")
         return _estimate_greeks_fallback(index_name)
 
 def _estimate_greeks_fallback(index_name):
@@ -2163,6 +2226,11 @@ def run_signal_engine_for_index(index_name):
             return
 
         now = time.time()
+
+        # Grace period: first 2 minutes after startup, be lenient with premiums
+        startup_grace = 120
+        is_grace_period = (now - _bot_startup_time) < startup_grace
+
         spot = prices[-1] if prices else 0
 
         # Update last known good spot price
@@ -2473,14 +2541,23 @@ def run_signal_engine_for_index(index_name):
             prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
             min_prem = INDEX_CONFIG[index_name].get("min_premium", 5)
 
+            # Detailed premium diagnostics
+            prem_source = "initial"
             if prem <= 0:
                 refresh_tokens_if_needed(index_name)
                 ce_prem = latest_ticks[index_name]["ce_price"]
                 pe_prem = latest_ticks[index_name]["pe_price"]
+                prem_source = "latest_ticks"
+
                 if ce_prem <= 0:
                     ce_prem = last_known_prices[index_name].get("ce", 0)
+                    if ce_prem > 0:
+                        prem_source = "last_known_ce"
                 if pe_prem <= 0:
                     pe_prem = last_known_prices[index_name].get("pe", 0)
+                    if pe_prem > 0:
+                        prem_source = "last_known_pe"
+
                 # If still 0, try fetching via REST directly
                 if ce_prem <= 0 or pe_prem <= 0:
                     tokens = INDEX_TOKENS.get(index_name, {})
@@ -2495,6 +2572,8 @@ def run_signal_engine_for_index(index_name):
                                     latest_ticks[index_name]["ce_price"] = ltp
                                     last_known_prices[index_name]["ce"] = ltp
                                     logger.info(f"Direct CE fetch success: {index_name}={ltp}")
+                                    if "CE" in action:
+                                        prem_source = "direct_api_ce"
                         except Exception as e:
                             logger.debug(f"Direct CE fetch failed: {e}")
                     if tokens.get("pe_token") and tokens.get("pe_symbol"):
@@ -2508,14 +2587,32 @@ def run_signal_engine_for_index(index_name):
                                     latest_ticks[index_name]["pe_price"] = ltp
                                     last_known_prices[index_name]["pe"] = ltp
                                     logger.info(f"Direct PE fetch success: {index_name}={ltp}")
+                                    if "PE" in action:
+                                        prem_source = "direct_api_pe"
                         except Exception as e:
                             logger.debug(f"Direct PE fetch failed: {e}")
+
                 prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
 
+            # Grace period: if we have valid tokens but premiums are 0, 
+            # don't immediately fail - might be timing issue with REST poller
             if prem <= 0 or prem < min_prem:
-                market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem} (min: {min_prem})"
-                market_signal[index_name]["signal"] = "WAITING"
-                return
+                tokens = INDEX_TOKENS.get(index_name, {})
+                has_tokens = bool(tokens.get("ce_token") and tokens.get("pe_token"))
+                token_age = time.time() - tokens.get("last_refresh", 0) if tokens.get("last_refresh") else 999
+
+                # During grace period or with fresh tokens, be lenient
+                if (is_grace_period or (has_tokens and token_age < 120)):
+                    # Tokens exist and are fresh - likely a timing issue, not a real error
+                    logger.info(f"{index_name}: Premium {prem} below min {min_prem}, but tokens are fresh (age={token_age:.0f}s, grace={is_grace_period}). Source={prem_source}. Waiting...")
+                    market_signal[index_name]["alert_message"] = f"Premium loading: Rs{prem} (source: {prem_source}, grace={is_grace_period})"
+                    market_signal[index_name]["signal"] = "WAITING"
+                    return
+                else:
+                    logger.warning(f"{index_name}: Premium invalid: Rs{prem} (min: {min_prem}). Source={prem_source}. Has tokens={has_tokens}, token_age={token_age:.0f}s, grace={is_grace_period}")
+                    market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem} (min: {min_prem})"
+                    market_signal[index_name]["signal"] = "WAITING"
+                    return
 
             if INDEX_CONFIG[index_name].get("greeks_enabled"):
                 greeks_check = greeks_analyzers[index_name].analyze(action)
@@ -3036,6 +3133,17 @@ def start_rest_api_poller():
                     if not tok.get("ce_token") or not tok.get("pe_token"):
                         logger.warning(f"REST POLLER: {idx} missing tokens, triggering refresh")
                         get_current_atm_tokens(idx)
+                    else:
+                        # Check if premiums are stale (0 for too long)
+                        ce_p = latest_ticks[idx].get("ce_price", 0)
+                        pe_p = latest_ticks[idx].get("pe_price", 0)
+                        if ce_p == 0 and pe_p == 0:
+                            last_ce = last_known_prices[idx].get("ce", 0)
+                            last_pe = last_known_prices[idx].get("pe", 0)
+                            if last_ce == 0 and last_pe == 0:
+                                # Never had valid premiums - tokens might be wrong
+                                logger.warning(f"REST POLLER: {idx} has tokens but never got valid premiums. Refreshing tokens...")
+                                get_current_atm_tokens(idx)
 
             time.sleep(10)
         except Exception as e:
