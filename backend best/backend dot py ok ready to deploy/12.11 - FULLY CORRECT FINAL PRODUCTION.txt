@@ -1132,6 +1132,7 @@ def run_signal_engine_for_index(index_name):
                         safety_state[index_name]["consecutive_sl"] += 1
                         if safety_state[index_name]["consecutive_sl"] >= 3:
                             safety_state[index_name]["circuit_breaker"] = True
+                            safety_state[index_name]["circuit_breaker_until"] = now + 1800  # 30 min
                             circuit_triggered = True
                     if circuit_triggered:
                         # No telegram, just log
@@ -1317,8 +1318,9 @@ def run_signal_engine_for_index(index_name):
         adx = calculate_adx(highs_5min, lows_5min, closes_5min, 14)
     else:
         adx = 20
-    vix = latest_ticks["VIX"]["vix"]
-    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
+    with _latest_ticks_lock:
+        vix = latest_ticks["VIX"]["vix"]
+    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])    
     if ml_prob < 0.4 and "STRONG" not in action:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"ML filter: probability {ml_prob:.2f} < 0.4"
@@ -1540,7 +1542,7 @@ def on_ws_data(wsapp, message):
                             last_known_prices[idx]["ce"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
                         # Track incremental option volume
-                                                with _prev_vol_lock:
+                        with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
                 elif token == tokens.get("pe_token"):
@@ -1556,12 +1558,13 @@ def on_ws_data(wsapp, message):
                         with _last_known_lock:
                             last_known_prices[idx]["pe"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
-                                                with _prev_vol_lock:
+                        with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
-            if token == "99919017" and ltp>0:
-                latest_ticks["VIX"]["vix"] = ltp
-                vix_history.append(ltp)
+ if token == "99919017" and ltp>0:
+    with _latest_ticks_lock:
+        latest_ticks["VIX"]["vix"] = ltp
+        vix_history.append(ltp)
         if tick_counter % 5 == 0 and tick_counter>0:
             run_all_signals()
     except Exception as e:
