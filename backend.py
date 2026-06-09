@@ -1,4 +1,4 @@
-# === VERSION 12.10 - FULLY CORRECTED: No Telegram, All Locks, IST Expiry, No Network Calls Inside Locks ===
+# === VERSION 12.11 - FULLY CORRECTED: No ADX, Trend‑change cooldown, VIX removed, All signals retained ===
 import sys
 import logging
 import os
@@ -196,7 +196,7 @@ def update_candle(idx, price, volume, timestamp):
                 _current_candle[idx][tf]["volume"] += tick_vol
 
 # ----------------------------------------------------------------------
-# TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (ADX removed, using EMA + RSI + MACD)
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices: return 0
@@ -252,51 +252,6 @@ def calculate_atr(highs, lows, closes, period=14):
         else:
             tr.append(abs(closes[i] - closes[i-1]))
     return sum(tr[-period:])/period if len(tr)>=period else 5.0
-
-def calculate_adx(highs, lows, closes, period=14):
-    """
-    Standard Wilder's ADX.
-    Note: This is a simplified version that computes a single DX then smooths.
-    For exact values matching TradingView, use TA‑Lib or pandas_ta.
-    """
-    if len(closes) < period*2:
-        return 20.0
-    tr = []
-    plus_dm = []
-    minus_dm = []
-    for i in range(1, len(closes)):
-        if len(highs) > i and highs[i] > 0 and lows[i] > 0:
-            hl = highs[i] - lows[i]
-            hc = abs(highs[i] - closes[i-1])
-            lc = abs(lows[i] - closes[i-1])
-            tr.append(max(hl, hc, lc))
-            up = highs[i] - highs[i-1]
-            down = lows[i-1] - lows[i]
-            plus_dm.append(max(up, 0) if up>down else 0)
-            minus_dm.append(max(down, 0) if down>up else 0)
-        else:
-            tr.append(abs(closes[i] - closes[i-1]))
-            plus_dm.append(max(closes[i] - closes[i-1], 0))
-            minus_dm.append(max(closes[i-1] - closes[i], 0))
-    if len(tr) < period:
-        return 20.0
-    # Wilder smoothing
-    atr = sum(tr[:period])/period
-    plus_di = sum(plus_dm[:period])/period
-    minus_di = sum(minus_dm[:period])/period
-    for i in range(period, len(tr)):
-        atr = (atr*(period-1) + tr[i])/period
-        plus_di = (plus_di*(period-1) + plus_dm[i])/period
-        minus_di = (minus_di*(period-1) + minus_dm[i])/period
-    if atr == 0: return 20.0
-    plus_di = 100 * plus_di / atr
-    minus_di = 100 * minus_di / atr
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di+minus_di)>0 else 0
-    # Smooth DX to ADX
-    adx = dx
-    for i in range(period, len(tr)):
-        adx = (adx*(period-1) + dx)/period
-    return adx
 
 def calculate_bollinger(prices, period=20, std_dev=2):
     if len(prices)<period: return None,None,None
@@ -354,7 +309,7 @@ def load_persisted_state():
         daily_drawdown[idx]["peak_equity"] = portfolio_state[idx]["equity"]
 
 # ----------------------------------------------------------------------
-# GREEKS (with IV rank computed from history)
+# GREEKS (unchanged)
 # ----------------------------------------------------------------------
 def get_option_greeks(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -756,6 +711,7 @@ def get_index_spot(index_name):
     return None
 
 def get_vix_value():
+    # VIX is not used; keep placeholder
     return 15.0
 
 _scrip_cache = {"data": None, "timestamp": 0}
@@ -869,7 +825,7 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# SENTIMENT MAPPING
+# SENTIMENT MAPPING (grades preserved)
 # ----------------------------------------------------------------------
 SENTIMENT_SCORES = {
     "STRONG_BULLISH": (85, 100, "STRONG BULLISH", "STRONG_BUY_CE"),
@@ -894,6 +850,7 @@ def get_sentiment_label(sentiment):
     return "UNKNOWN"
 
 def compute_sentiment(index_name):
+    """Simpler trend detection using EMA + RSI + MACD, no ADX."""
     sentiment_scores = []
     min_bars_per_tf = {"1min":30, "2min":20, "3min":20, "5min":15,
                        "10min":10, "15min":10, "20min":8, "30min":5}
@@ -903,44 +860,60 @@ def compute_sentiment(index_name):
         if len(candles) < min_bars_per_tf.get(tf, 5):
             continue
         closes = [c["close"] for c in candles]
-        # Use EMA trend detection
         if len(closes) < 60:
             continue
+
+        # EMA trend
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
         ema50 = calculate_ema(closes, 50) if len(closes)>=50 else ema21
         price = closes[-1]
-        recent = closes[-30:]
-        price_range = (max(recent)-min(recent))/sum(recent)*len(recent) if sum(recent) else 0
-        if price_range < 0.005:
-            score = 0
-        elif tf in ["1min","2min","3min"]:
-            if ema9 > ema21 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]
-            elif ema9 < ema21 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]
-            else: score = 0
-        elif tf in ["5min","10min"]:
-            if ema9 > ema21 > ema50 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]
-            elif ema9 < ema21 < ema50 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]
-            elif ema9 > ema21 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]-5
-            elif ema9 < ema21 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]+5
-            else: score = 0
-        else:
-            if ema9 > ema21 > ema50: score = TIMEFRAME_WEIGHTS[tf]-5
-            elif ema9 < ema21 < ema50: score = -TIMEFRAME_WEIGHTS[tf]+5
-            else: score = 0
+
+        # RSI
+        rsi = calculate_rsi(closes)
+        # MACD
+        macd, _, _ = calculate_macd(closes)
+
+        # Score based on combination
+        score = 0
+        # EMA alignment
+        if ema9 > ema21 > ema50 and price > ema9:
+            score += TIMEFRAME_WEIGHTS[tf]
+        elif ema9 < ema21 < ema50 and price < ema9:
+            score -= TIMEFRAME_WEIGHTS[tf]
+        elif ema9 > ema21 and price > ema9:
+            score += TIMEFRAME_WEIGHTS[tf] - 5
+        elif ema9 < ema21 and price < ema9:
+            score -= TIMEFRAME_WEIGHTS[tf] - 5
+
+        # RSI boost
+        if rsi > 60:
+            score += 5
+        elif rsi < 40:
+            score -= 5
+
+        # MACD boost
+        if macd > 0:
+            score += 5
+        elif macd < 0:
+            score -= 5
+
         sentiment_scores.append(score)
-    if not sentiment_scores: return 50
+
+    if not sentiment_scores:
+        return 50
     total = sum(sentiment_scores)
     sentiment = 50 + (total / 3.5)
     return max(0, min(100, sentiment))
 
 # ----------------------------------------------------------------------
-# EXIT LOGIC (improved)
+# EXIT LOGIC (VIX removed)
 # ----------------------------------------------------------------------
 def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem):
-    if len(prices_spot) < 60: return False, ""
+    if len(prices_spot) < 60:
+        return False, ""
     exit_reason = ""
-    # Check 5min trend using candles
+    # Check 5min trend using candles (EMA cross)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
     if len(candles) >= 10:
@@ -951,7 +924,8 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
             exit_reason = "5min trend turned bearish"
         elif "PE" in action and ema9 > ema21:
             exit_reason = "5min trend turned bullish"
-    if exit_reason: return True, exit_reason
+    if exit_reason:
+        return True, exit_reason
     # RSI divergence using 1min closes
     with _candle_histories_lock:
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
@@ -964,18 +938,11 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-        # VIX spike
-    with _latest_ticks_lock:
-        vix = latest_ticks["VIX"]["vix"]
-        vix_hist = list(vix_history)
-    if len(vix_hist) >= 10:
-        vix_sma = sum(vix_hist[-10:])/10
-        if vix > vix_sma*1.25:
-            return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
+    # VIX spike removed (commented)
     return False, ""
 
 # ----------------------------------------------------------------------
-# MAIN SIGNAL ENGINE (with all locks and fixes)
+# MAIN SIGNAL ENGINE (with trend‑change cooldown)
 # ----------------------------------------------------------------------
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_trades": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_CONFIG}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "confidence": 0, "highest": 0, "entry_time": 0, "prev_action_side": None, "trend_change_cooldown": 0, "exit_reason": ""} for idx in INDEX_CONFIG}
@@ -1021,7 +988,7 @@ def run_signal_engine_for_index(index_name):
         if ce_prem <= 0: ce_prem = last_known_prices[index_name].get("ce", 0)
         if pe_prem <= 0: pe_prem = last_known_prices[index_name].get("pe", 0)
 
-    # Update volume profile with spot price and volume (use ce_volume as proxy)
+    # Update volume profile
     vp_engine = volume_profile_engines[index_name]
     with _latest_ticks_lock:
         vp_engine.update(spot, latest_ticks[index_name]["ce_volume"])
@@ -1044,6 +1011,28 @@ def run_signal_engine_for_index(index_name):
     sentiment = compute_sentiment(index_name)
     action = get_signal_from_sentiment(sentiment)
     sentiment_label = get_sentiment_label(sentiment)
+
+    # --- TREND CHANGE COOLDOWN (prevents flip‑flopping) ---
+    new_side = None
+    if "CE" in action:
+        new_side = "CE"
+    elif "PE" in action:
+        new_side = "PE"
+    if new_side is not None:
+        prev_side = signal_state[index_name].get("prev_action_side")
+        if prev_side is not None and prev_side != new_side:
+            cooldown_until = signal_state[index_name].get("trend_change_cooldown", 0)
+            if now < cooldown_until:
+                remaining = int(cooldown_until - now)
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"Trend cooldown: {remaining}s (flip from {prev_side} to {new_side})"
+                    market_signal[index_name]["signal"] = "COOLDOWN"
+                    market_signal[index_name]["trend_change_cooldown_remaining"] = remaining
+                return
+            else:
+                # set new cooldown for future flips
+                signal_state[index_name]["trend_change_cooldown"] = now + 60
+        signal_state[index_name]["prev_action_side"] = new_side
 
     with _market_signal_lock:
         market_signal[index_name]["sentiment_score"] = sentiment
@@ -1135,7 +1124,6 @@ def run_signal_engine_for_index(index_name):
                             safety_state[index_name]["circuit_breaker_until"] = now + 1800
                             circuit_triggered = True
                     if circuit_triggered:
-                        # No telegram, just log
                         logger.warning(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
                     with _trade_count_lock:
                         daily_trade_count[index_name] += 1
@@ -1311,22 +1299,27 @@ def run_signal_engine_for_index(index_name):
     with _candle_histories_lock:
         candles_5min = list(candle_histories[index_name]["5min"])
     if len(candles_5min) >= 30:
-        highs_5min = [c["high"] for c in candles_5min]
-        lows_5min = [c["low"] for c in candles_5min]
         closes_5min = [c["close"] for c in candles_5min]
-        adx = calculate_adx(highs_5min, lows_5min, closes_5min, 14)
+        # approximate trend strength using EMA slope (instead of ADX)
+        if len(closes_5min) >= 10:
+            ema9 = calculate_ema(closes_5min, 9)
+            ema21 = calculate_ema(closes_5min, 21)
+            ema_slope = ema9 - ema21
+            trend_strength = abs(ema_slope) / (closes_5min[-1] + 1e-10) * 100
+        else:
+            trend_strength = 0
     else:
-        adx = 20
-    with _latest_ticks_lock:
-        vix = latest_ticks["VIX"]["vix"]
-    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
+        trend_strength = 0
+    # VIX removed – use constant
+    vix = 15.0
+    ml_prob = ml_filter.predict([prem, spot, rsi, trend_strength, vix, sentiment])
     if ml_prob < 0.4 and "STRONG" not in action:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"ML filter: probability {ml_prob:.2f} < 0.4"
             market_signal[index_name]["signal"] = "BLOCKED"
         return
 
-    # Kelly position sizing
+    # Kelly position sizing (VIX adjustments removed)
     kelly_risk, win_rate, avg_win, avg_loss = kelly_trackers[index_name].get_recommended_risk_pct()
     if "STRONG" in action:
         base_risk_pct = 2.0
@@ -1335,11 +1328,12 @@ def run_signal_engine_for_index(index_name):
     else:
         base_risk_pct = 1.2
     risk_pct = base_risk_pct * 0.5 + kelly_risk * 0.5
-    if vix > 25: risk_pct *= 0.7
-    elif vix > 20: risk_pct *= 0.85
-    # ADX regime adjustment
-    if adx > 25: risk_pct *= 1.2
-    elif adx < 15: risk_pct *= 0.8
+    # No VIX adjustment
+    # Trend strength adjustment (instead of ADX)
+    if trend_strength > 1.5:
+        risk_pct *= 1.2
+    elif trend_strength < 0.5:
+        risk_pct *= 0.8
     risk_pct *= beta_adj
     if greeks_data:
         iv_rank = greeks_data.get("iv_rank", 50)
@@ -1404,7 +1398,7 @@ def run_signal_engine_for_index(index_name):
     # Log alert (no telegram)
     emoji = "B" if "STRONG" in action and "CE" in action else "S" if "STRONG" in action and "PE" in action else "W" if "LOW" in action else "N"
     vwap = vp_analysis["vwap"]
-    regime = "TRENDING" if adx>25 else "RANGING"
+    regime = "TRENDING" if trend_strength > 1 else "RANGING"
     iv_str = f"IV-R:{greeks_data.get('iv_rank',0):.0f}" if greeks_data else ""
     msg = (f"{emoji} {action} {index_name} | Spot:{spot:.0f} Prem:{prem:.2f} SL:{sl:.2f} Tgt:{target:.2f} | "
            f"Sentiment:{sentiment:.0f} ({sentiment_label}) | Lots:{lots} Risk:{risk_pct:.1f}% | "
@@ -1443,31 +1437,28 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET (subscribes to spot + option tokens, with incremental volume)
+# WEBSOCKET (unchanged)
 # ----------------------------------------------------------------------
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat
     ws_running = True
     last_heartbeat = time.time()
     logger.info("WebSocket connected, subscribing...")
-    # Pre‑fetch tokens before connecting (to avoid missing options)
     refresh_all_tokens()
     token_list = []
-    # Spot indices
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
             token_list.append({"exchangeType": cfg["ws_exchange_type"], "tokens": [cfg["token"]]})
-    # Option tokens (CE/PE) for real‑time premiums
     with _index_tokens_lock:
         index_tokens_snapshot = list(INDEX_TOKENS.items())
     for idx, tokens in index_tokens_snapshot:
         if not INDEX_CONFIG[idx].get("active"): continue
         if tokens.get("ce_token") and tokens.get("pe_token"):
             token_list.append({"exchangeType": INDEX_CONFIG[idx]["option_ws_exchange_type"], "tokens": [tokens["ce_token"], tokens["pe_token"]]})
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX
+    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
     if token_list and sws:
         try:
-            sws.subscribe("admin", 3, token_list)  # mode 3 = full quote
+            sws.subscribe("admin", 3, token_list)
             total = sum(len(g["tokens"]) for g in token_list)
             logger.info(f"Subscribed to {total} tokens (spot + options)")
         except Exception as e:
@@ -1500,7 +1491,6 @@ def on_ws_data(wsapp, message):
             if isinstance(ltp, str):
                 try: ltp = float(ltp)
                 except: ltp = 0
-            # Price normalisation: only for equity cash, not indices
             if ltp > 100000 and token not in INDEX_TOKENS_SET:
                 ltp /= 100
             vol = tick.get("volume") or tick.get("v") or 0
@@ -1515,7 +1505,6 @@ def on_ws_data(wsapp, message):
                             latest_ticks[idx]["spot_price"] = ltp
                         with _price_histories_lock:
                             price_histories[idx].append(ltp)
-                        # Incremental volume for candles
                         update_candle(idx, ltp, vol, time.time())
                         with _tick_counter_lock:
                             tick_counter += 1
@@ -1615,7 +1604,6 @@ def start_rest_api_poller():
             if not auth_obj:
                 time.sleep(10)
                 continue
-            # Fallback fetch for any index that may have missing WebSocket updates
             with _index_tokens_lock:
                 index_tokens_snapshot = list(INDEX_TOKENS.items())
             for idx, tokens in index_tokens_snapshot:
@@ -1650,7 +1638,7 @@ def start_rest_api_poller():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS (started once in main)
+# BACKGROUND THREADS
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -1665,7 +1653,7 @@ def _start_background_threads():
             logger.info("Background threads started")
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (health endpoint exempt from API key)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -1680,7 +1668,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.10 (No Telegram, All Locks Fixed)",
+        "engine": "Multi-Index Options Bot v12.11 (No ADX, Trend Cooldown, VIX removed)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1700,7 +1688,7 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {"ws_running": ws_running, "ticks": tick_counter},
-            "version": "12.10"
+            "version": "12.11"
         })
 
 @app.route("/api/health", methods=["GET"])
