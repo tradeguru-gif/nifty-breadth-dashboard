@@ -5,7 +5,6 @@
 # - Picks the nearest expiry and the exact ATM strike
 # - Grace period extended to 5 minutes
 # - REST poller always stores fetched CE/PE prices regardless of validation
-# - NEW: Fallback to next nearest strike (±1 multiple) if CE or PE missing at exact ATM
 
 import sys
 import logging
@@ -19,7 +18,6 @@ import numpy as np
 import sqlite3
 import math
 import socket
-import re
 from collections import deque, defaultdict
 from datetime import datetime, timedelta, time as dt_time
 from flask import Flask, jsonify, request
@@ -1696,13 +1694,14 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
     return round(iv, 4)
 
 # ============================================================================
-# TOKEN MANAGEMENT - FIXED (correct expiry parsing + FALLBACK)
+# TOKEN MANAGEMENT - FIXED (correct expiry parsing)
 # ============================================================================
 def parse_expiry_date_from_symbol(symbol_str):
     """Extract and parse expiry date from Angel One option symbol.
     Examples: 'NIFTY11JUN2630000CE' -> datetime(2026,6,11)
               'BANKNIFTY11JUN2643500PE' -> datetime(2026,6,11)
     Returns NaT if not found."""
+    import re
     # Try full 4-digit year first (DDMMMYYYY) -> e.g., 11JUN2026
     match = re.search(r'(\d{2}[A-Z]{3}\d{4})', symbol_str)
     if match:
@@ -1736,6 +1735,7 @@ def get_current_atm_tokens(index_name):
     atm = int(round(spot / mult) * mult)
 
     today = get_ist_now()
+    # Look for expiries within next 60 days (to avoid far‑future options)
     max_future_days = 60
     future_limit = today + timedelta(days=max_future_days)
 
@@ -1759,14 +1759,14 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No OPTIDX options found")
             return None, None
 
-        # Parse expiry dates
+        # Parse expiry dates from the symbol column
         opts["expiry_date"] = opts["symbol"].apply(parse_expiry_date_from_symbol)
         opts = opts.dropna(subset=["expiry_date"])
         if opts.empty:
             logger.warning(f"{index_name}: Could not parse expiry dates from symbols")
             return None, None
 
-        # Keep only future expiries within next max_future_days
+        # Keep only future expiries within the next max_future_days
         opts = opts[opts["expiry_date"] > today]
         opts = opts[opts["expiry_date"] <= future_limit]
         if opts.empty:
@@ -1778,10 +1778,11 @@ def get_current_atm_tokens(index_name):
         opts = opts[opts["expiry_date"] == nearest_expiry].copy()
         logger.info(f"{index_name}: Using expiry {nearest_expiry.strftime('%d%b%Y')}")
 
-        # Parse strikes
+        # Parse strikes – Angel One stores them as strings, already in rupees for NSE/BSE
         def parse_strike(strike_val):
             try:
                 s = float(strike_val)
+                # Some indices store strike in paise (e.g., MIDCPNIFTY), then s > 100000
                 if s > 100000:
                     return s / 100
                 return s
@@ -1791,49 +1792,25 @@ def get_current_atm_tokens(index_name):
         opts["strike_parsed"] = opts["strike"].apply(parse_strike)
         opts = opts[opts["strike_parsed"] > 0]
 
-        # Sort by distance to ATM
+        # Find nearest ATM strike
         opts["strike_diff"] = abs(opts["strike_parsed"] - atm)
         opts_sorted = opts.sort_values("strike_diff")
 
-        # ---- FALLBACK LOGIC ----
-        # Try with exact ATM, then with ±1 multiple
-        offsets = [0, mult, -mult]   # first try exact ATM, then +1, then -1
-        ce_token = None
-        pe_token = None
-        ce_symbol = None
-        pe_symbol = None
-        actual_strike = None
+        ce = opts_sorted[opts_sorted["symbol"].str.contains("CE", na=False)]
+        pe = opts_sorted[opts_sorted["symbol"].str.contains("PE", na=False)]
 
-        for offset in offsets:
-            target_strike = atm + offset
-            # If offset != 0, we need to re‑filter for that strike
-            if offset == 0:
-                temp_sorted = opts_sorted
-            else:
-                # Compute new diff for this target strike
-                opts_temp = opts.copy()
-                opts_temp["strike_diff"] = abs(opts_temp["strike_parsed"] - target_strike)
-                temp_sorted = opts_temp.sort_values("strike_diff")
-
-            ce_candidates = temp_sorted[temp_sorted["symbol"].str.contains("CE", na=False)]
-            pe_candidates = temp_sorted[temp_sorted["symbol"].str.contains("PE", na=False)]
-
-            if not ce_candidates.empty and not pe_candidates.empty:
-                ce_row = ce_candidates.iloc[0]
-                pe_row = pe_candidates.iloc[0]
-                ce_token = str(ce_row["token"])
-                pe_token = str(pe_row["token"])
-                ce_symbol = str(ce_row["symbol"])
-                pe_symbol = str(pe_row["symbol"])
-                actual_strike = float(ce_row["strike_parsed"])
-                logger.info(f"{index_name}: Using strike {actual_strike} (offset {offset})")
-                break
-            else:
-                logger.debug(f"{index_name}: Offset {offset} missing CE/PE, trying next...")
-
-        if ce_token is None or pe_token is None:
-            logger.warning(f"{index_name}: Could not find CE/PE tokens after trying offsets {offsets}")
+        if ce.empty or pe.empty:
+            logger.warning(f"{index_name}: No CE/PE options found near strike {atm}")
             return None, None
+
+        ce_row = ce.iloc[0]
+        pe_row = pe.iloc[0]
+
+        ce_token = str(ce_row["token"])
+        pe_token = str(pe_row["token"])
+        ce_symbol = str(ce_row["symbol"])
+        pe_symbol = str(pe_row["symbol"])
+        actual_strike = float(ce_row["strike_parsed"])
 
         expiry_str = nearest_expiry.strftime("%d%b%Y").upper()
 
@@ -2114,6 +2091,7 @@ def run_signal_engine_for_index(index_name):
             return
 
         now = time.time()
+        # Extended grace period to 5 minutes
         startup_grace = 300
         is_grace_period = (now - _bot_startup_time) < startup_grace
 
@@ -2169,6 +2147,7 @@ def run_signal_engine_for_index(index_name):
         ce_prem = latest_ticks[index_name]["ce_price"]
         pe_prem = latest_ticks[index_name]["pe_price"]
 
+        # Additional fallback to recent last_known_prices if current premium is 0
         if ce_prem <= 0 and (time.time() - last_known_prices[index_name].get("timestamp", 0)) < 30:
             ce_prem = last_known_prices[index_name].get("ce", 0)
         if pe_prem <= 0 and (time.time() - last_known_prices[index_name].get("timestamp", 0)) < 30:
@@ -2917,7 +2896,7 @@ def start_rest_api_poller():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         spot = latest_ticks[idx]["spot_price"]
-                        # Always store fetched CE/PE prices regardless of validation
+                        # FIXED: Always store fetched CE/PE prices regardless of validation
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
@@ -2994,7 +2973,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.3 (FIXED: Token Crash | SENSEX ETF | VIX | Premium + Fallback)",
+        "engine": "Multi-Index Options Bot v12.3 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -3012,7 +2991,7 @@ def home():
             "Market Analysis Exit Engine",
             "Trend Change Cooldown",
             "Trailing Stop Loss",
-            "FIXED: get_current_atm_tokens() with fallback to ±1 strike",
+            "FIXED: get_current_atm_tokens() now complete",
             "FIXED: SENSEX no longer fetches ETF (SENSEXBEES)",
             "FIXED: INDIAVIX uses dynamic search not hardcoded tokens",
             "FIXED: Safe None handling in refresh_all_tokens",
@@ -3099,8 +3078,7 @@ def health():
             "premium_fix": True,
             "token_auto_refresh": True,
             "sensex_etf_fix": True,
-            "vix_dynamic_search": True,
-            "fallback_strike": True
+            "vix_dynamic_search": True
         }
     }), status_code
 
