@@ -1,8 +1,8 @@
-# === VERSION 12.4 FINAL - FIXED: No future expiry within 60 days ===
-# - Increased expiry window to 365 days (accepts all available expiries)
-# - Improved parsing of 'expiry' column (handles malformed strings like '30JUN2612')
-# - Falls back to symbol‑based parsing with robust regex
-# - Keeps all other features (WebSocket, REST poller, premium storage)
+# === VERSION 12.5 FINAL - ALWAYS USE REST PREMIUMS, RELAXED VALIDATION ===
+# - Prefers REST‑fetched option prices over WebSocket (WebSocket often sends underlying price)
+# - Premium validation: accepts any premium >0 and < spot price (100% of spot)
+# - Extended expiry window to 5 years
+# - All other features intact
 
 import sys
 import logging
@@ -1148,12 +1148,13 @@ kill_switches = {idx: DrawdownKillSwitch(idx, INDEX_CONFIG[idx].get("max_daily_d
 # V11 CORE FUNCTIONS (PRESERVED)
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
+    """Relaxed: accept any positive premium less than spot price (100% of spot)."""
     if premium <= 0:
         return False
     if spot_price <= 0:
-        return 1 < premium < 10000
-    premium_pct = premium / spot_price
-    return 0.00001 < premium_pct < 0.60
+        return premium < 10000  # accept any positive value under 10000 as plausible
+    # Allow up to 100% of spot (some deep ITM options can be near spot)
+    return premium < spot_price
 
 def calculate_rsi(prices, period=14, smoothing=3):
     if len(prices) < period + 1: return 50.0
@@ -1680,16 +1681,9 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
     return round(iv, 4)
 
 # ============================================================================
-# TOKEN MANAGEMENT - FIXED (correct expiry parsing, accepts far expiries)
+# TOKEN MANAGEMENT - FIXED (accepts far expiries)
 # ============================================================================
 def parse_expiry_date_from_symbol(symbol_str):
-    """Extract and parse expiry date from Angel One option symbol.
-    Handles both 2‑digit and 4‑digit years, and stops at the year boundary.
-    Examples:
-        'NIFTY29DEC2630000PE' -> datetime(2026,12,29)
-        'NIFTY29DEC202630000PE' -> datetime(2026,12,29)
-    Returns NaT if not found.
-    """
     match = re.search(r'(\d{2})([A-Z]{3})(\d{2}|\d{4})(?=\D|$)', symbol_str)
     if not match:
         return pd.NaT
@@ -1702,7 +1696,6 @@ def parse_expiry_date_from_symbol(symbol_str):
     except Exception as e:
         logger.debug(f"Failed to parse date from '{symbol_str}': {e}")
         return pd.NaT
-
 
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -1731,7 +1724,6 @@ def get_current_atm_tokens(index_name):
         if df.empty:
             return None, None
 
-        # Filter for OPTIDX on the correct exchange
         mask = (
             (df["exch_seg"] == config["option_exchange"]) &
             (df["instrumenttype"] == "OPTIDX") &
@@ -1742,14 +1734,10 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No OPTIDX options found")
             return None, None
 
-        # ---- TRY to use the 'expiry' column first ----
         if "expiry" in opts.columns:
             def parse_expiry_col(exp_str):
                 if pd.isna(exp_str):
                     return pd.NaT
-                # Clean the expiry string: sometimes it looks like "30JUN2612"
-                # We want to extract the first 9 characters if they are DDMMMYYYY,
-                # or first 8 if DDMMMYY.
                 exp_str_clean = str(exp_str).strip()
                 # Try 9‑character pattern (DDMMMYYYY)
                 if len(exp_str_clean) >= 9:
@@ -1762,15 +1750,12 @@ def get_current_atm_tokens(index_name):
                 if len(exp_str_clean) >= 8:
                     maybe_date = exp_str_clean[:8]
                     try:
-                        # Convert 2‑digit year to 4‑digit
                         dt = pd.to_datetime(maybe_date, format='%d%b%y')
-                        # If year is e.g. 26, make it 2026
                         if dt.year < 2000:
                             dt = dt.replace(year=dt.year + 2000)
                         return dt
                     except:
                         pass
-                # Fallback to regex
                 match = re.search(r'(\d{2})([A-Z]{3})(\d{2}|\d{4})', exp_str_clean)
                 if match:
                     day, month, year = match.groups()
@@ -1785,7 +1770,6 @@ def get_current_atm_tokens(index_name):
             opts["expiry_date"] = opts["expiry"].apply(parse_expiry_col)
             opts = opts.dropna(subset=["expiry_date"])
 
-        # If expiry column not available or all rows invalid, fall back to symbol parsing
         if opts.empty or "expiry_date" not in opts.columns:
             logger.info(f"{index_name}: Falling back to symbol-based expiry parsing")
             opts["expiry_date"] = opts["symbol"].apply(parse_expiry_date_from_symbol)
@@ -1797,19 +1781,16 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: Sample symbols: {sample_symbols}")
             return None, None
 
-        # Keep only future expiries
         opts = opts[opts["expiry_date"] > today]
         opts = opts[opts["expiry_date"] <= future_limit]
         if opts.empty:
             logger.warning(f"{index_name}: No future expiry within {max_future_days} days")
             return None, None
 
-        # Pick the nearest expiry
         nearest_expiry = opts["expiry_date"].min()
         opts = opts[opts["expiry_date"] == nearest_expiry].copy()
         logger.info(f"{index_name}: Using expiry {nearest_expiry.strftime('%d%b%Y')}")
 
-        # Parse strikes
         def parse_strike(strike_val):
             try:
                 s = float(strike_val)
@@ -1826,7 +1807,6 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No valid strikes after parsing")
             return None, None
 
-        # Find nearest ATM strike
         opts["strike_diff"] = abs(opts["strike_parsed"] - atm)
         opts_sorted = opts.sort_values("strike_diff")
 
@@ -2408,11 +2388,14 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
                 return
 
+            # Use REST‑fetched premiums (already stored in latest_ticks)
             prem = ce_prem if "CE" in action else pe_prem if "PE" in action else 0
             min_prem = INDEX_CONFIG[index_name].get("min_premium", 5)
 
+            # If still zero, try refreshing tokens and re‑fetching
             if prem <= 0:
                 refresh_tokens_if_needed(index_name)
+                # Re‑fetch from last_known (which may have been updated by REST)
                 ce_prem = latest_ticks[index_name]["ce_price"]
                 pe_prem = latest_ticks[index_name]["pe_price"]
                 if ce_prem <= 0:
@@ -2428,9 +2411,14 @@ def run_signal_engine_for_index(index_name):
                     return
             else:
                 if prem <= 0 or prem < min_prem:
+                    # Log the actual value for debugging
+                    logger.warning(f"{index_name}: Premium invalid: Rs{prem} (min: {min_prem}) | CE={ce_prem} PE={pe_prem} spot={spot}")
                     market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem} (min: {min_prem})"
                     market_signal[index_name]["signal"] = "WAITING"
                     return
+
+            # If we reach here, premium is valid (positive and >= min_prem)
+            logger.info(f"{index_name}: Valid premium {prem} for {action}")
 
             if INDEX_CONFIG[index_name].get("greeks_enabled"):
                 greeks_check = greeks_analyzers[index_name].analyze(action)
@@ -2765,42 +2753,9 @@ def on_ws_data(wsapp, message):
                         tick_counter += 1
                         last_known_prices[idx]["spot"] = ltp
                         last_known_prices[idx]["timestamp"] = time.time()
-                elif token == INDEX_TOKENS[idx].get("ce_token"):
-                    if ltp > 0:
-                        latest_ticks[idx]["ce_price"] = ltp
-                        ce_price_histories[idx].append(ltp)
-                        last_known_prices[idx]["ce"] = ltp
-                        last_known_prices[idx]["timestamp"] = time.time()
-                    if vol > 0:
-                        latest_ticks[idx]["ce_volume"] = vol
-                        ce_volume_histories[idx].append(vol)
-                        ce_volume_series[idx].append(vol)
-                    if oi > 0:
-                        latest_ticks[idx]["ce_oi"] = oi
-                        ce_oi_histories[idx].append(oi)
-                        ce_oi_series[idx].append(oi)
-                    if bid > 0:
-                        latest_ticks[idx]["ce_bid"] = bid
-                    if ask > 0:
-                        latest_ticks[idx]["ce_ask"] = ask
-                elif token == INDEX_TOKENS[idx].get("pe_token"):
-                    if ltp > 0:
-                        latest_ticks[idx]["pe_price"] = ltp
-                        pe_price_histories[idx].append(ltp)
-                        last_known_prices[idx]["pe"] = ltp
-                        last_known_prices[idx]["timestamp"] = time.time()
-                    if vol > 0:
-                        latest_ticks[idx]["pe_volume"] = vol
-                        pe_volume_histories[idx].append(vol)
-                        pe_volume_series[idx].append(vol)
-                    if oi > 0:
-                        latest_ticks[idx]["pe_oi"] = oi
-                        pe_oi_histories[idx].append(oi)
-                        pe_oi_series[idx].append(oi)
-                    if bid > 0:
-                        latest_ticks[idx]["pe_bid"] = bid
-                    if ask > 0:
-                        latest_ticks[idx]["pe_ask"] = ask
+                # IMPORTANT: Do NOT update option prices from WebSocket – only REST poller sets them.
+                # WebSocket often sends underlying index prices instead of option premiums.
+                # So we skip ce_price/pe_price updates from WS.
             elif token == "99919017":
                 if ltp > 0:
                     latest_ticks["VIX"]["vix"] = ltp
@@ -2931,7 +2886,7 @@ def start_rest_api_poller():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         spot = latest_ticks[idx]["spot_price"]
-                        # FIXED: Always store fetched CE/PE prices regardless of validation
+                        # Fetch CE
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
@@ -2942,13 +2897,11 @@ def start_rest_api_poller():
                                 latest_ticks[idx]["ce_price"] = ce
                                 last_known_prices[idx]["ce"] = ce
                                 last_known_prices[idx]["timestamp"] = now
-                                if is_valid_option_premium(ce, spot, "CE"):
-                                    logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} CE stored despite invalid premium (spot={spot}) – price={ce}")
+                                logger.info(f"REST POLLER: {idx} CE fetched: {ce} (spot={spot})")
                             else:
                                 logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
 
+                        # Fetch PE
                         pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
                         pe = safe_ltp(pe_resp)
                         if pe is not None:
@@ -2959,17 +2912,15 @@ def start_rest_api_poller():
                                 latest_ticks[idx]["pe_price"] = pe
                                 last_known_prices[idx]["pe"] = pe
                                 last_known_prices[idx]["timestamp"] = now
-                                if is_valid_option_premium(pe, spot, "PE"):
-                                    logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} PE stored despite invalid premium (spot={spot}) – price={pe}")
+                                logger.info(f"REST POLLER: {idx} PE fetched: {pe} (spot={spot})")
                             else:
                                 logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
                     except Exception as e:
                         logger.debug(f"REST {idx} option fetch error: {e}")
                 else:
-                    logger.info(f"REST POLLER: {idx} tokens missing, attempting refresh...")
-                    get_current_atm_tokens(idx)
+                    if token_refresh_counter % 10 == 0:
+                        logger.info(f"REST POLLER: {idx} tokens missing, attempting refresh...")
+                        get_current_atm_tokens(idx)
 
             try:
                 run_all_signals()
@@ -3008,27 +2959,22 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.4 (Fixed expiry parsing, accepts far expiries)",
+        "engine": "Multi-Index Options Bot v12.5 - Always uses REST premiums",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
         "features": [
             "8-Timeframe Multi-Timeframe Analysis",
             "PCR + OI Signal Filtering",
-            "Greeks Integration (Delta < 0.6, IV Rank)",
-            "Max Daily Drawdown Kill Switch (-3%)",
+            "Greeks Integration",
+            "Max Daily Drawdown Kill Switch",
             "NIFTY-BANKNIFTY Correlation Filter",
-            "Regime Detection (Trending/Ranging/Volatile)",
-            "Volume Profile + VWAP Signal Enhancement",
+            "Regime Detection",
+            "Volume Profile + VWAP",
             "Kelly Criterion Position Sizing",
-            "Slippage/Spread Modeling",
-            "Real-time Sharpe/Sortino/Calmar Tracking",
-            "Market Analysis Exit Engine",
-            "Trend Change Cooldown",
-            "Trailing Stop Loss",
-            "FIXED: No future expiry within 60 days (now accepts up to 5 years)",
-            "FIXED: Improved expiry column parsing",
-            "FIXED: Premium storage always active"
+            "FIXED: Premiums always fetched via REST (WebSocket only for spot/VIX)",
+            "FIXED: Relaxed premium validation (accepts up to 100% of spot)",
+            "FIXED: Extended expiry window to 5 years"
         ]
     })
 
@@ -3058,7 +3004,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.4-final",
+        "version": "12.5-final",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -3094,7 +3040,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.4-final",
+        "version": "12.5-final",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
@@ -3107,7 +3053,7 @@ def health():
             "sharpe_sortino": True,
             "premium_fix": True,
             "token_auto_refresh": True,
-            "expiry_parsing": True
+            "rest_premiums_only": True
         }
     }), status_code
 
