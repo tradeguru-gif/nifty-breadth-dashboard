@@ -1130,10 +1130,11 @@ def run_signal_engine_for_index(index_name):
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
                         safety_state[index_name]["consecutive_sl"] += 1
-                        if safety_state[index_name]["consecutive_sl"] >= 3:
-                            safety_state[index_name]["circuit_breaker"] = True
-                            safety_state[index_name]["circuit_breaker_until"] = now + 1800  # 30 min
-                            circuit_triggered = True
+                        # Replace with:
+if safety_state[index_name]["consecutive_sl"] >= 3:
+    safety_state[index_name]["circuit_breaker"] = True
+    safety_state[index_name]["circuit_breaker_until"] = now + 1800
+    circuit_triggered = True
                     if circuit_triggered:
                         # No telegram, just log
                         logger.warning(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
@@ -1319,8 +1320,10 @@ def run_signal_engine_for_index(index_name):
     else:
         adx = 20
     with _latest_ticks_lock:
-        vix = latest_ticks["VIX"]["vix"]
-    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])    
+        # Replace with:
+with _latest_ticks_lock:
+    vix = latest_ticks["VIX"]["vix"]
+ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])   
     if ml_prob < 0.4 and "STRONG" not in action:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"ML filter: probability {ml_prob:.2f} < 0.4"
@@ -1522,7 +1525,6 @@ def on_ws_data(wsapp, message):
                         with _tick_counter_lock:
                             tick_counter += 1
                     break
-            # Option premiums
                         # Option premiums
             with _index_tokens_lock:
                 index_tokens_snapshot = list(INDEX_TOKENS.items())
@@ -1541,7 +1543,6 @@ def on_ws_data(wsapp, message):
                         with _last_known_lock:
                             last_known_prices[idx]["ce"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
-                        # Track incremental option volume
                         with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
@@ -1561,10 +1562,10 @@ def on_ws_data(wsapp, message):
                         with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
- if token == "99919017" and ltp>0:
-    with _latest_ticks_lock:
-        latest_ticks["VIX"]["vix"] = ltp
-        vix_history.append(ltp)
+            if token == "99919017" and ltp>0:
+                with _latest_ticks_lock:
+                    latest_ticks["VIX"]["vix"] = ltp
+                    vix_history.append(ltp)
         if tick_counter % 5 == 0 and tick_counter>0:
             run_all_signals()
     except Exception as e:
