@@ -1,4 +1,4 @@
-# === VERSION 13.0 - NO TOKEN FETCHING, PURE REST, HARDCODED TOKENS ===
+# === VERSION 13.1 - DIRECT REST API, NO LIBRARY LTP CALLS ===
 import sys
 import logging
 import os
@@ -6,8 +6,6 @@ import time
 import threading
 import json
 import requests
-import pandas as pd
-import numpy as np
 import sqlite3
 import math
 from collections import deque
@@ -50,14 +48,12 @@ def init_db():
     conn.close()
 init_db()
 
-from SmartApi import SmartConnect
-
 # ============================================================================
-# HARDCODED TOKENS (from your successful run on 2026-06-09)
+# HARDCODED TOKENS (from your successful run)
 # ============================================================================
 INDEX_CONFIG = {
     "NIFTY": {
-        "token": "99926000",
+        "spot_token": "99926000",
         "exchange": "NSE",
         "symbol": "NIFTY",
         "lot_size": 50,
@@ -69,7 +65,7 @@ INDEX_CONFIG = {
         "pe_symbol": "NIFTY23200PE"
     },
     "BANKNIFTY": {
-        "token": "99926009",
+        "spot_token": "99926009",
         "exchange": "NSE",
         "symbol": "BANKNIFTY",
         "lot_size": 25,
@@ -81,7 +77,7 @@ INDEX_CONFIG = {
         "pe_symbol": "BANKNIFTY55100PE"
     },
     "FINNIFTY": {
-        "token": "99926037",
+        "spot_token": "99926037",
         "exchange": "NSE",
         "symbol": "FINNIFTY",
         "lot_size": 40,
@@ -93,7 +89,7 @@ INDEX_CONFIG = {
         "pe_symbol": "FINNIFTY25100PE"
     },
     "MIDCPNIFTY": {
-        "token": "99926074",
+        "spot_token": "99926074",
         "exchange": "NSE",
         "symbol": "MIDCPNIFTY",
         "lot_size": 75,
@@ -105,7 +101,7 @@ INDEX_CONFIG = {
         "pe_symbol": "MIDCPNIFTY14125PE"
     },
     "SENSEX": {
-        "token": "99919000",
+        "spot_token": "99919000",
         "exchange": "BSE",
         "symbol": "SENSEX",
         "lot_size": 15,
@@ -121,7 +117,6 @@ INDEX_CONFIG = {
 # price storage
 price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
 latest_ticks = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0} for idx in INDEX_CONFIG}
-latest_ticks["VIX"] = 15.0
 
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_trades": 0} for idx in INDEX_CONFIG}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "highest": 0, "entry_time": 0} for idx in INDEX_CONFIG}
@@ -130,86 +125,86 @@ last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 market_signal = {idx: {"signal": "WAITING", "alert_message": ""} for idx in INDEX_CONFIG}
 
 # ============================================================================
-# AUTHENTICATION
+# AUTHENTICATION (direct REST)
 # ============================================================================
-auth_cache = {"token": None, "timestamp": 0, "obj": None}
+auth_cache = {"token": None, "timestamp": 0, "feed_token": None}
 _auth_lock = threading.Lock()
 _api_last_call = 0
 _api_min_interval = 0.5
 _api_lock = threading.Lock()
 
-def rate_limited_api_call(func, *args, **kwargs):
-    global _api_last_call
+def rate_limited_call():
     with _api_lock:
         elapsed = time.time() - _api_last_call
         if elapsed < _api_min_interval:
             time.sleep(_api_min_interval - elapsed)
-        result = func(*args, **kwargs)
-        _api_last_call = time.time()
-        return result
 
 def get_auth_token():
     with _auth_lock:
         now = time.time()
         if auth_cache["token"] and now - auth_cache["timestamp"] < 3300:
-            return auth_cache["token"], auth_cache["obj"]
+            return auth_cache["token"], auth_cache["feed_token"]
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        # Use SmartConnect only for login, then extract token
+        from SmartApi import SmartConnect
         obj = SmartConnect(api_key=ANGEL_API_KEY)
         session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
         if not session.get("status"):
-            return None, None
+            raise Exception("Login failed")
         auth_token = session["data"]["jwtToken"]
-        auth_cache.update({"token": auth_token, "timestamp": now, "obj": obj})
+        feed_token = obj.getfeedToken()
+        auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now})
         logger.info("Auth token refreshed")
-        return auth_token, obj
+        return auth_token, feed_token
 
-def safe_ltp(resp):
-    if not resp or not resp.get("status"):
-        return None
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        if "fetched" in data and data["fetched"]:
-            fetched = data["fetched"]
-            if isinstance(fetched, list) and len(fetched) > 0:
-                return float(fetched[0].get("ltp", 0))
-            elif isinstance(fetched, dict):
-                return float(fetched.get("ltp", 0))
-        elif "ltp" in data:
-            return float(data["ltp"])
-    elif isinstance(data, list) and len(data) > 0:
-        return float(data[0].get("ltp", 0))
+def get_ltp(exchange, tradingsymbol, symboltoken, auth_token):
+    """Direct REST call to get LTP."""
+    url = "https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getLtpData"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-UserType": "USER",
+        "X-SourceID": "WEB",
+        "X-ClientLocalIP": "127.0.0.1",
+        "X-ClientPublicIP": "106.193.147.98",  # can be any public IP
+        "X-MACAddress": "00:00:00:00:00:00",
+        "X-PrivateKey": ANGEL_API_KEY
+    }
+    payload = {
+        "exchange": exchange,
+        "tradingsymbol": tradingsymbol,
+        "symboltoken": symboltoken
+    }
+    rate_limited_call()
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("status") and data.get("data"):
+            ltp = data["data"].get("ltp")
+            if ltp:
+                return float(ltp)
+    logger.warning(f"LTP failed: {exchange} {tradingsymbol} {symboltoken} -> {resp.text[:200]}")
     return None
 
-def get_spot_price(idx, obj):
+def get_spot_price(idx, auth_token):
     cfg = INDEX_CONFIG[idx]
-    try:
-        resp = rate_limited_api_call(obj.ltpData, cfg["exchange"], cfg["symbol"], cfg["token"])
-        ltp = safe_ltp(resp)
-        if ltp and ltp > 0:
-            if ltp > 100000:
-                ltp /= 100
-            return ltp
-    except Exception as e:
-        logger.debug(f"Spot error {idx}: {e}")
-    return None
+    ltp = get_ltp(cfg["exchange"], cfg["symbol"], cfg["spot_token"], auth_token)
+    if ltp and ltp > 100000:
+        ltp /= 100
+    return ltp
 
-def get_option_price(idx, side, obj):
+def get_option_price(idx, side, auth_token):
     cfg = INDEX_CONFIG[idx]
     token = cfg["ce_token"] if side == "CE" else cfg["pe_token"]
     symbol = cfg["ce_symbol"] if side == "CE" else cfg["pe_symbol"]
-    try:
-        resp = rate_limited_api_call(obj.ltpData, cfg["option_exchange"], symbol, token)
-        ltp = safe_ltp(resp)
-        if ltp and ltp > 0:
-            if ltp > 100000:
-                ltp /= 100
-            return ltp
-    except Exception as e:
-        logger.debug(f"Option {idx} {side} error: {e}")
-    return None
+    ltp = get_ltp(cfg["option_exchange"], symbol, token, auth_token)
+    if ltp and ltp > 100000:
+        ltp /= 100
+    return ltp
 
 # ============================================================================
-# SIMPLE SIGNAL ENGINE
+# SIMPLE SIGNAL ENGINE (RSI based)
 # ============================================================================
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -243,7 +238,6 @@ def run_signal_engine():
         ce = latest_ticks[idx]["ce"]
         pe = latest_ticks[idx]["pe"]
 
-        # Simple RSI‑based signal
         rsi = calculate_rsi(prices)
         atr = calculate_atr(prices)
         now = time.time()
@@ -265,7 +259,7 @@ def run_signal_engine():
             market_signal[idx]["signal"] = "BLOCKED"
             continue
 
-        # decide action
+        # signal generation
         action = "NO_TRADE"
         if rsi < 30 and ce > cfg["min_premium"]:
             action = "BUY_CE"
@@ -319,7 +313,7 @@ def run_signal_engine():
         })
 
 # ============================================================================
-# REST POLLER (only data source)
+# REST POLLER (direct API calls)
 # ============================================================================
 def is_market_open():
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -327,37 +321,36 @@ def is_market_open():
     return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
 
 def rest_poller():
-    logger.info("REST poller started")
+    logger.info("REST poller started (direct API)")
     while True:
         try:
             if not is_market_open():
                 time.sleep(10)
                 continue
-            auth_token, obj = get_auth_token()
-            if not obj:
+            auth_token, _ = get_auth_token()
+            if not auth_token:
                 time.sleep(10)
                 continue
 
-            # fetch spot and option prices for all indices
+            # fetch all data
             for idx in INDEX_CONFIG:
                 # spot
-                spot = get_spot_price(idx, obj)
+                spot = get_spot_price(idx, auth_token)
                 if spot:
                     latest_ticks[idx]["spot"] = spot
                     price_histories[idx].append(spot)
 
                 # CE
-                ce = get_option_price(idx, "CE", obj)
+                ce = get_option_price(idx, "CE", auth_token)
                 if ce:
                     latest_ticks[idx]["ce"] = ce
+
                 # PE
-                pe = get_option_price(idx, "PE", obj)
+                pe = get_option_price(idx, "PE", auth_token)
                 if pe:
                     latest_ticks[idx]["pe"] = pe
 
-            # run signal engine
             run_signal_engine()
-
             time.sleep(10)
         except Exception as e:
             logger.error(f"REST poller error: {e}")
@@ -368,17 +361,18 @@ def rest_poller():
 # ============================================================================
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "healthy", "version": "13.0", "indices": list(INDEX_CONFIG.keys()), "market_open": is_market_open()})
+    return jsonify({"status": "healthy", "version": "13.1", "indices": list(INDEX_CONFIG.keys()), "market_open": is_market_open()})
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
+    # convert deques to lists for JSON
     return jsonify({
         "timestamp": datetime.now().isoformat(),
         "signals": market_signal,
         "portfolios": portfolio_state,
         "ticks": latest_ticks,
         "market_open": is_market_open(),
-        "version": "13.0"
+        "version": "13.1"
     })
 
 @app.route("/api/health")
@@ -390,6 +384,5 @@ def health():
 # ============================================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    # start REST poller in background
     threading.Thread(target=rest_poller, daemon=True).start()
     app.run(host="0.0.0.0", port=port, debug=False)
