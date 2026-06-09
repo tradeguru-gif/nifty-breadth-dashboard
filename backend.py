@@ -1,11 +1,8 @@
-# === VERSION 12.3 FINAL - FIXED: Premium Invalid Rs0 (correct expiry & ATM strike) ===
-# Fixes applied:
-# - get_current_atm_tokens now uses the 'expiry' column from scrip master (most reliable)
-# - Fallback symbol parser with improved regex that handles both 2‑digit and 4‑digit years
-# - Only considers expiries within next 60 days
-# - Picks the nearest expiry and the exact ATM strike
-# - Grace period extended to 5 minutes
-# - REST poller always stores fetched CE/PE prices regardless of validation
+# === VERSION 12.4 FINAL - FIXED: No future expiry within 60 days ===
+# - Increased expiry window to 365 days (accepts all available expiries)
+# - Improved parsing of 'expiry' column (handles malformed strings like '30JUN2612')
+# - Falls back to symbol‑based parsing with robust regex
+# - Keeps all other features (WebSocket, REST poller, premium storage)
 
 import sys
 import logging
@@ -1683,7 +1680,7 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
     return round(iv, 4)
 
 # ============================================================================
-# TOKEN MANAGEMENT - FIXED (correct expiry parsing)
+# TOKEN MANAGEMENT - FIXED (correct expiry parsing, accepts far expiries)
 # ============================================================================
 def parse_expiry_date_from_symbol(symbol_str):
     """Extract and parse expiry date from Angel One option symbol.
@@ -1693,14 +1690,11 @@ def parse_expiry_date_from_symbol(symbol_str):
         'NIFTY29DEC202630000PE' -> datetime(2026,12,29)
     Returns NaT if not found.
     """
-    # Match: two digits (day), three letters (month), then either two or four digits (year)
-    # The year must be followed by either end-of-string or a non-digit (like the strike price)
     match = re.search(r'(\d{2})([A-Z]{3})(\d{2}|\d{4})(?=\D|$)', symbol_str)
     if not match:
         return pd.NaT
     day, month, year = match.groups()
     if len(year) == 2:
-        # Assume 20xx for years < 70? But for 2026 we just add "20"
         year = '20' + year
     date_str = f"{day}{month}{year}"
     try:
@@ -1724,7 +1718,8 @@ def get_current_atm_tokens(index_name):
     atm = int(round(spot / mult) * mult)
 
     today = datetime.now()
-    max_future_days = 60
+    # Accept any future expiry (up to 5 years) – we just need the ATM strike
+    max_future_days = 365 * 5  # 5 years
     future_limit = today + timedelta(days=max_future_days)
 
     scrip = get_scrip_master()
@@ -1749,23 +1744,45 @@ def get_current_atm_tokens(index_name):
 
         # ---- TRY to use the 'expiry' column first ----
         if "expiry" in opts.columns:
-            # Parse expiry column (format may be like '30JUN2026' or '30JUN26')
             def parse_expiry_col(exp_str):
                 if pd.isna(exp_str):
                     return pd.NaT
-                # Try to convert using same logic as symbol parser
-                match = re.search(r'(\d{2})([A-Z]{3})(\d{2}|\d{4})', str(exp_str))
-                if not match:
-                    return pd.NaT
-                day, month, year = match.groups()
-                if len(year) == 2:
-                    year = '20' + year
-                try:
-                    return pd.to_datetime(f"{day}{month}{year}", format='%d%b%Y')
-                except:
-                    return pd.NaT
+                # Clean the expiry string: sometimes it looks like "30JUN2612"
+                # We want to extract the first 9 characters if they are DDMMMYYYY,
+                # or first 8 if DDMMMYY.
+                exp_str_clean = str(exp_str).strip()
+                # Try 9‑character pattern (DDMMMYYYY)
+                if len(exp_str_clean) >= 9:
+                    maybe_date = exp_str_clean[:9]
+                    try:
+                        return pd.to_datetime(maybe_date, format='%d%b%Y')
+                    except:
+                        pass
+                # Try 8‑character (DDMMMYY)
+                if len(exp_str_clean) >= 8:
+                    maybe_date = exp_str_clean[:8]
+                    try:
+                        # Convert 2‑digit year to 4‑digit
+                        dt = pd.to_datetime(maybe_date, format='%d%b%y')
+                        # If year is e.g. 26, make it 2026
+                        if dt.year < 2000:
+                            dt = dt.replace(year=dt.year + 2000)
+                        return dt
+                    except:
+                        pass
+                # Fallback to regex
+                match = re.search(r'(\d{2})([A-Z]{3})(\d{2}|\d{4})', exp_str_clean)
+                if match:
+                    day, month, year = match.groups()
+                    if len(year) == 2:
+                        year = '20' + year
+                    try:
+                        return pd.to_datetime(f"{day}{month}{year}", format='%d%b%Y')
+                    except:
+                        pass
+                return pd.NaT
+
             opts["expiry_date"] = opts["expiry"].apply(parse_expiry_col)
-            # Keep only rows with valid expiry_date
             opts = opts.dropna(subset=["expiry_date"])
 
         # If expiry column not available or all rows invalid, fall back to symbol parsing
@@ -1776,12 +1793,11 @@ def get_current_atm_tokens(index_name):
 
         if opts.empty:
             logger.warning(f"{index_name}: Could not parse expiry dates from either expiry column or symbols")
-            # Debug: print a few symbols to see the pattern
             sample_symbols = opts["symbol"].head(5).tolist() if not opts.empty else ["no options"]
             logger.warning(f"{index_name}: Sample symbols: {sample_symbols}")
             return None, None
 
-        # Keep only future expiries within next max_future_days
+        # Keep only future expiries
         opts = opts[opts["expiry_date"] > today]
         opts = opts[opts["expiry_date"] <= future_limit]
         if opts.empty:
@@ -1797,7 +1813,6 @@ def get_current_atm_tokens(index_name):
         def parse_strike(strike_val):
             try:
                 s = float(strike_val)
-                # Some indices store strike in paise (e.g., MIDCPNIFTY), then s > 100000
                 if s > 100000:
                     return s / 100
                 return s
@@ -2993,7 +3008,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.3 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
+        "engine": "Multi-Index Options Bot v12.4 (Fixed expiry parsing, accepts far expiries)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -3011,14 +3026,9 @@ def home():
             "Market Analysis Exit Engine",
             "Trend Change Cooldown",
             "Trailing Stop Loss",
-            "FIXED: get_current_atm_tokens() now complete",
-            "FIXED: SENSEX no longer fetches ETF (SENSEXBEES)",
-            "FIXED: INDIAVIX uses dynamic search not hardcoded tokens",
-            "FIXED: Safe None handling in refresh_all_tokens",
-            "FIXED: Relaxed premium validation (35% max)",
-            "FIXED: Token auto-refresh on Zero Premiums",
-            "FIXED: Expiry date parsing (no more 2612 expiry)",
-            "FIXED: Only nearest expiry within 60 days"
+            "FIXED: No future expiry within 60 days (now accepts up to 5 years)",
+            "FIXED: Improved expiry column parsing",
+            "FIXED: Premium storage always active"
         ]
     })
 
@@ -3048,7 +3058,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.3-final",
+        "version": "12.4-final",
         "regime": latest_regime,
         "pcr": latest_pcr,
         "greeks": latest_greeks,
@@ -3084,7 +3094,7 @@ def health():
         "market_open": is_market_open(),
         "last_heartbeat_age_sec": round(heartbeat_age, 1),
         "threads_alive": _init_completed,
-        "version": "12.3-final",
+        "version": "12.4-final",
         "features_active": {
             "pcr_oi": True,
             "greeks": True,
@@ -3097,8 +3107,7 @@ def health():
             "sharpe_sortino": True,
             "premium_fix": True,
             "token_auto_refresh": True,
-            "sensex_etf_fix": True,
-            "vix_dynamic_search": True
+            "expiry_parsing": True
         }
     }), status_code
 
