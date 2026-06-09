@@ -1,4 +1,4 @@
-# === VERSION 12.5 - FIXED: Multi‑timeframe candles, trend detection, signal alerts ===
+# === VERSION 12.6 - FULLY CORRECTED: Multi‑timeframe candles + SENSEX enabled ===
 import sys
 import logging
 import os
@@ -40,7 +40,7 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 DB_PATH = "trading_data.db"
 
 # ----------------------------------------------------------------------
-# DATABASE (kept minimal for brevity, but all tables exist)
+# DATABASE (minimal)
 # ----------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -58,7 +58,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION (SENSEX disabled)
+# INDEX CONFIGURATION (ALL INDICES ACTIVE, INCLUDING SENSEX)
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -95,11 +95,11 @@ INDEX_CONFIG = {
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": False,   # DISABLED
+        "lot_size": 15, "expiry_weekday": 4, "active": True,   # NOW ACTIVE
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100,
         "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4,
         "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
-        "greeks_enabled": False, "pcr_enabled": False
+        "greeks_enabled": True, "pcr_enabled": True
     }
 }
 
@@ -125,7 +125,7 @@ latest_ticks = {idx: {"spot_price": 0.0, "ce_price": 0.0, "pe_price": 0.0,
 latest_ticks["VIX"] = {"vix": 15.0}
 
 # ----------------------------------------------------------------------
-# MULTI‑TIMEFRAME CANDLE AGGREGATION (FIX)
+# MULTI‑TIMEFRAME CANDLE AGGREGATION (for all indices)
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min", "10min", "15min", "20min", "30min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "10min":600, "15min":900, "20min":1200, "30min":1800}
@@ -159,12 +159,18 @@ def update_candle(idx, price, volume, timestamp):
                 _current_candle[idx][tf]["volume"] += volume
 
 # ----------------------------------------------------------------------
-# SENTIMENT & TREND FUNCTIONS (using candles)
+# TREND & SENTIMENT FUNCTIONS (using candles)
 # ----------------------------------------------------------------------
+def calculate_ema(prices, period):
+    if not prices: return 0
+    if len(prices) < period: return sum(prices)/len(prices)
+    alpha = 2/(period+1)
+    ema = sum(prices[:period])/period
+    for p in prices[period:]:
+        ema = alpha*p + (1-alpha)*ema
+    return ema
+
 def get_trend_score(index_name, tf_name, prices_list):
-    """
-    prices_list is a list of close prices extracted from candles.
-    """
     min_bars = {"1min":60, "2min":60, "3min":60, "5min":60,
                 "10min":60, "15min":60, "20min":80, "30min":100}.get(tf_name, 60)
     if len(prices_list) < min_bars:
@@ -174,12 +180,11 @@ def get_trend_score(index_name, tf_name, prices_list):
     ema21 = calculate_ema(prices_list, EMA_MEDIUM)
     ema50 = calculate_ema(prices_list, EMA_LONG) if len(prices_list) >= EMA_LONG else ema21
     price = prices_list[-1]
-    # check sideways (simple range)
+    # check sideways
     recent = prices_list[-30:]
     price_range = (max(recent)-min(recent))/sum(recent)*len(recent) if sum(recent) else 0
     if price_range < 0.005:
         return "SIDEWAYS", 0
-    # bull/bear based on EMAs
     if tf_name in ["1min","2min","3min"]:
         if ema9 > ema21 and price > ema9:
             return "BULLISH", w
@@ -196,7 +201,7 @@ def get_trend_score(index_name, tf_name, prices_list):
         if ema9 < ema21 and price < ema9:
             return "BEARISH", -(w-5)
         return "NEUTRAL", 0
-    else:  # larger timeframes
+    else:
         if ema9 > ema21 > ema50:
             return "BULLISH", w-5
         if ema9 < ema21 < ema50:
@@ -204,7 +209,6 @@ def get_trend_score(index_name, tf_name, prices_list):
         return "NEUTRAL", 0
 
 def compute_sentiment(index_name):
-    # Get close prices from candles for each timeframe
     sentiment_scores = []
     for tf in TIMEFRAMES:
         candles = list(candle_histories[index_name][tf])
@@ -220,9 +224,6 @@ def compute_sentiment(index_name):
     sentiment = max(0, min(100, sentiment))
     return sentiment
 
-# ----------------------------------------------------------------------
-# OTHER INDICATORS (unchanged)
-# ----------------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period+1: return 50.0
     gains, losses = [], []
@@ -235,49 +236,16 @@ def calculate_rsi(prices, period=14):
     if avg_loss == 0: return 100.0
     return 100 - (100/(1+avg_gain/avg_loss))
 
-def calculate_ema(prices, period):
-    if not prices: return 0
-    if len(prices) < period: return sum(prices)/len(prices)
-    alpha = 2/(period+1)
-    ema = sum(prices[:period])/period
-    for p in prices[period:]:
-        ema = alpha*p + (1-alpha)*ema
-    return ema
-
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow+signal: return 0.0,0.0,0.0
-    def ema(arr, p):
-        if not arr: return 0
-        alpha=2/(p+1); val=arr[0]
-        for x in arr[1:]: val=alpha*x+(1-alpha)*val
-        return val
-    ema_fast = ema(prices[-fast:], fast)
-    ema_slow = ema(prices[-slow:], slow)
-    macd = ema_fast - ema_slow
-    hist = []
-    for i in range(signal,0,-1):
-        if len(prices)>=slow+i:
-            ef=ema(prices[-(fast+i):-i], fast)
-            es=ema(prices[-(slow+i):-i], slow)
-            hist.append(ef-es)
-    sig = ema(hist, signal) if hist else macd
-    return macd, sig, macd-sig
-
 def calculate_atr(prices, period=14):
     if len(prices) < period+1: return 5.0
     tr = [abs(prices[i]-prices[i-1]) for i in range(1,len(prices))]
     return sum(tr[-period:])/period
 
-def get_nifty_spot_cached():
-    # reuse existing spot cache
-    return latest_ticks.get("NIFTY", {}).get("spot_price", 0) or 0
-
 def get_nifty_pcr():
-    # simplified – use a constant for demo
-    return 1.0
+    return 1.0  # simplified; can be enhanced
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION, TOKEN MANAGEMENT (unchanged from v12.1)
+# AUTHENTICATION & TOKEN MANAGEMENT (including SENSEX)
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -333,7 +301,7 @@ def get_index_spot(index_name):
     return None
 
 def get_vix_value():
-    return 15.0  # simplified
+    return 15.0
 
 _scrip_cache = {"data": None, "timestamp": 0}
 _scrip_lock = threading.Lock()
@@ -365,11 +333,12 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 def get_current_atm_tokens(index_name):
-    # simplified for brevity – reuse working logic from v12.1
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"): return None, None
     spot = get_index_spot(index_name)
-    if not spot or spot<=0: return None, None
+    if not spot or spot<=0:
+        logger.warning(f"{index_name} spot unavailable")
+        return None, None
     mult = config["atm_strike_multiple"]
     atm = int(round(spot/mult)*mult)
     next_expiry = get_next_expiry_date(index_name)
@@ -406,6 +375,7 @@ def get_current_atm_tokens(index_name):
                                 "expiry": expiry, "expiry_date": nearest,
                                 "ce_symbol": ce_symbol, "pe_symbol": pe_symbol
                             })
+                            logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} expiry={expiry}")
                             return ce_token, pe_token
         except Exception as e:
             logger.warning(f"{index_name} token fetch error: {e}")
@@ -417,7 +387,7 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# SIGNAL ENGINE (simplified but uses sentiment from candles)
+# SIGNAL ENGINE (uses sentiment from candles)
 # ----------------------------------------------------------------------
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0} for idx in INDEX_CONFIG}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0,
@@ -510,7 +480,6 @@ def run_signal_engine_for_index(index_name):
         daily_trade_count[index_name] += 1
         msg = f"🚨 SIGNAL {action} {index_name} | Spot:{spot:.0f} Prem:{prem:.2f} SL:{sl:.2f} Tgt:{target:.2f} | Sentiment:{sentiment:.0f}"
         logger.info(msg)
-        # send telegram if configured
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             try:
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -521,12 +490,11 @@ def run_signal_engine_for_index(index_name):
             "entry_price": prem, "stop_loss": sl, "target": target, "confidence": sentiment
         })
     else:
-        # No action, just show waiting message
         market_signal[index_name]["alert_message"] = f"Sentiment {sentiment:.0f} - {signal_type}"
         market_signal[index_name]["signal"] = "NO_TRADE"
 
 # ----------------------------------------------------------------------
-# WEBSOCKET CALLBACKS (with candle aggregation)
+# WEBSOCKET HANDLER (spot only, builds candles)
 # ----------------------------------------------------------------------
 ws_running = False
 sws = None
@@ -539,7 +507,6 @@ def on_ws_open(wsapp):
     last_heartbeat = time.time()
     logger.info("WebSocket connected, subscribing...")
     refresh_all_tokens()
-    # build subscription list (spot only for simplicity, options via REST)
     token_list = []
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
@@ -581,20 +548,17 @@ def on_ws_data(wsapp, message):
                 except: ltp = 0
             if ltp>100000: ltp/=100
             vol = tick.get("volume") or tick.get("v") or 0
-            # Update spot prices and aggregate candles
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
                     if ltp>0:
                         latest_ticks[idx]["spot_price"] = ltp
                         price_histories[idx].append(ltp)
-                        # update candles for this index
                         update_candle(idx, ltp, vol, time.time())
                         tick_counter += 1
                     break
             if token == "99919017" and ltp>0:
                 latest_ticks["VIX"]["vix"] = ltp
                 vix_history.append(ltp)
-        # run signal engine every few ticks
         if tick_counter % 5 == 0 and tick_counter>0:
             for idx in INDEX_CONFIG:
                 if INDEX_CONFIG[idx].get("active"):
@@ -602,9 +566,6 @@ def on_ws_data(wsapp, message):
     except Exception as e:
         logger.error(f"WS data error: {e}")
 
-# ----------------------------------------------------------------------
-# WEBSOCKET THREAD
-# ----------------------------------------------------------------------
 def start_angel_websocket():
     global sws, ws_running
     while True:
@@ -629,7 +590,7 @@ def start_angel_websocket():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# REST API POLLER (for option premiums)
+# REST API POLLER (fetches option premiums)
 # ----------------------------------------------------------------------
 def is_market_open():
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -654,7 +615,6 @@ def start_rest_api_poller():
             if not auth_obj:
                 time.sleep(10)
                 continue
-            # fetch option premiums for all active indices
             for idx, tokens in INDEX_TOKENS.items():
                 if not INDEX_CONFIG[idx].get("active"): continue
                 if tokens.get("ce_token") and tokens.get("pe_token"):
@@ -708,7 +668,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.5 (Multi‑timeframe candles fixed)",
+        "engine": "Multi-Index Options Bot v12.6 (SENSEX enabled, candles fixed)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -726,7 +686,7 @@ def live_signals():
         "portfolios": portfolio_state,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.5"
+        "version": "12.6"
     })
 
 @app.route("/api/health")
