@@ -5,6 +5,7 @@
 # - Picks the nearest expiry and the exact ATM strike
 # - Grace period extended to 5 minutes
 # - REST poller always stores fetched CE/PE prices regardless of validation
+# - NEW: Fallback to next nearest strike (±1 multiple) if CE or PE missing at exact ATM
 
 import sys
 import logging
@@ -18,11 +19,13 @@ import numpy as np
 import sqlite3
 import math
 import socket
+import re
 from collections import deque, defaultdict
 from datetime import datetime, timedelta, time as dt_time
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
+import html as html_module
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,6 +72,10 @@ DB_PATH = "trading_data.db"
 # ============================================================================
 # DATABASE INITIALIZATION - V12 ENHANCED TABLES
 # ============================================================================
+def get_ist_now():
+    """Return current Indian Standard Time (UTC+5:30)."""
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -1422,7 +1429,7 @@ def get_index_spot(index_name):
             if ltp is not None:
                 if ltp > 100000: 
                     ltp /= 100
-                if 50000 < ltp < 100000:
+                if 50000 < ltp < 150000:
                     last_known_prices[index_name]["spot"] = ltp
                     last_known_prices[index_name]["timestamp"] = time.time()
                     return ltp
@@ -1492,7 +1499,15 @@ _scrip_lock = threading.Lock()
 def get_scrip_master():
     with _scrip_lock:
         now = time.time()
-        if _scrip_cache["data"] and (now - _scrip_cache["timestamp"] < 86400):
+        ist_now = get_ist_now()
+        current_ist_date = ist_now.strftime("%Y-%m-%d")
+        cache_valid = False
+        if _scrip_cache["data"] and _scrip_cache["timestamp"]:
+            cache_ist = datetime.utcfromtimestamp(_scrip_cache["timestamp"]) + timedelta(hours=5, minutes=30)
+            cache_ist_date = cache_ist.strftime("%Y-%m-%d")
+            if cache_ist_date == current_ist_date and (now - _scrip_cache["timestamp"] < 21600):
+                cache_valid = True
+        if cache_valid:
             return _scrip_cache["data"]
         try:
             url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -1509,7 +1524,7 @@ def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config:
         return None
-    today = datetime.now()
+    today = get_ist_now()
     weekday = today.weekday()
     expiry_weekday = config["expiry_weekday"]
     days_ahead = expiry_weekday - weekday
@@ -1522,7 +1537,7 @@ def is_expiry_day(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config: 
         return False
-    today = datetime.now().strftime("%d%b%Y").upper()
+    today = get_ist_now().strftime("%d%b%Y").upper()
     tokens = INDEX_TOKENS.get(index_name, {})
     expiry = tokens.get("expiry", "")
     return today == expiry
@@ -1681,22 +1696,27 @@ def _estimate_iv(option_price, spot, strike, tte, option_type):
     return round(iv, 4)
 
 # ============================================================================
-# TOKEN MANAGEMENT - FIXED (correct expiry parsing)
+# TOKEN MANAGEMENT - FIXED (correct expiry parsing + FALLBACK)
 # ============================================================================
 def parse_expiry_date_from_symbol(symbol_str):
     """Extract and parse expiry date from Angel One option symbol.
     Examples: 'NIFTY11JUN2630000CE' -> datetime(2026,6,11)
               'BANKNIFTY11JUN2643500PE' -> datetime(2026,6,11)
     Returns NaT if not found."""
-    import re
-    # Pattern: either DDMMMYY or DDMMMYYYY (e.g., 11JUN26 or 11JUN2026)
-    match = re.search(r'(\d{2}[A-Z]{3}(\d{2}|\d{4}))', symbol_str)
+    # Try full 4-digit year first (DDMMMYYYY) -> e.g., 11JUN2026
+    match = re.search(r'(\d{2}[A-Z]{3}\d{4})', symbol_str)
+    if match:
+        try:
+            return pd.to_datetime(match.group(1), format='%d%b%Y')
+        except:
+            return pd.NaT
+    # Try 2-digit year (DDMMMYY) -> e.g., 11JUN26 (7 chars)
+    match = re.search(r'(\d{2}[A-Z]{3}\d{2})', symbol_str)
     if not match:
         return pd.NaT
     date_part = match.group(1)
-    # Convert to standard format
-    if len(date_part) == 8:  # DDMMMYY -> e.g., 11JUN26
-        date_part = date_part[:5] + '20' + date_part[5:]
+    # Convert YY to YYYY: 11JUN26 -> 11JUN2026
+    date_part = date_part[:5] + '20' + date_part[5:]
     try:
         return pd.to_datetime(date_part, format='%d%b%Y')
     except:
@@ -1715,8 +1735,7 @@ def get_current_atm_tokens(index_name):
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
 
-    today = datetime.now()
-    # Look for expiries within next 60 days (to avoid far‑future options)
+    today = get_ist_now()
     max_future_days = 60
     future_limit = today + timedelta(days=max_future_days)
 
@@ -1740,14 +1759,14 @@ def get_current_atm_tokens(index_name):
             logger.warning(f"{index_name}: No OPTIDX options found")
             return None, None
 
-        # Parse expiry dates from the symbol column
+        # Parse expiry dates
         opts["expiry_date"] = opts["symbol"].apply(parse_expiry_date_from_symbol)
         opts = opts.dropna(subset=["expiry_date"])
         if opts.empty:
             logger.warning(f"{index_name}: Could not parse expiry dates from symbols")
             return None, None
 
-        # Keep only future expiries within the next max_future_days
+        # Keep only future expiries within next max_future_days
         opts = opts[opts["expiry_date"] > today]
         opts = opts[opts["expiry_date"] <= future_limit]
         if opts.empty:
@@ -1759,11 +1778,10 @@ def get_current_atm_tokens(index_name):
         opts = opts[opts["expiry_date"] == nearest_expiry].copy()
         logger.info(f"{index_name}: Using expiry {nearest_expiry.strftime('%d%b%Y')}")
 
-        # Parse strikes – Angel One stores them as strings, already in rupees for NSE/BSE
+        # Parse strikes
         def parse_strike(strike_val):
             try:
                 s = float(strike_val)
-                # Some indices store strike in paise (e.g., MIDCPNIFTY), then s > 100000
                 if s > 100000:
                     return s / 100
                 return s
@@ -1773,38 +1791,63 @@ def get_current_atm_tokens(index_name):
         opts["strike_parsed"] = opts["strike"].apply(parse_strike)
         opts = opts[opts["strike_parsed"] > 0]
 
-        # Find nearest ATM strike
+        # Sort by distance to ATM
         opts["strike_diff"] = abs(opts["strike_parsed"] - atm)
         opts_sorted = opts.sort_values("strike_diff")
 
-        ce = opts_sorted[opts_sorted["symbol"].str.contains("CE", na=False)]
-        pe = opts_sorted[opts_sorted["symbol"].str.contains("PE", na=False)]
+        # ---- FALLBACK LOGIC ----
+        # Try with exact ATM, then with ±1 multiple
+        offsets = [0, mult, -mult]   # first try exact ATM, then +1, then -1
+        ce_token = None
+        pe_token = None
+        ce_symbol = None
+        pe_symbol = None
+        actual_strike = None
 
-        if ce.empty or pe.empty:
-            logger.warning(f"{index_name}: No CE/PE options found near strike {atm}")
+        for offset in offsets:
+            target_strike = atm + offset
+            # If offset != 0, we need to re‑filter for that strike
+            if offset == 0:
+                temp_sorted = opts_sorted
+            else:
+                # Compute new diff for this target strike
+                opts_temp = opts.copy()
+                opts_temp["strike_diff"] = abs(opts_temp["strike_parsed"] - target_strike)
+                temp_sorted = opts_temp.sort_values("strike_diff")
+
+            ce_candidates = temp_sorted[temp_sorted["symbol"].str.contains("CE", na=False)]
+            pe_candidates = temp_sorted[temp_sorted["symbol"].str.contains("PE", na=False)]
+
+            if not ce_candidates.empty and not pe_candidates.empty:
+                ce_row = ce_candidates.iloc[0]
+                pe_row = pe_candidates.iloc[0]
+                ce_token = str(ce_row["token"])
+                pe_token = str(pe_row["token"])
+                ce_symbol = str(ce_row["symbol"])
+                pe_symbol = str(pe_row["symbol"])
+                actual_strike = float(ce_row["strike_parsed"])
+                logger.info(f"{index_name}: Using strike {actual_strike} (offset {offset})")
+                break
+            else:
+                logger.debug(f"{index_name}: Offset {offset} missing CE/PE, trying next...")
+
+        if ce_token is None or pe_token is None:
+            logger.warning(f"{index_name}: Could not find CE/PE tokens after trying offsets {offsets}")
             return None, None
-
-        ce_row = ce.iloc[0]
-        pe_row = pe.iloc[0]
-
-        ce_token = str(ce_row["token"])
-        pe_token = str(pe_row["token"])
-        ce_symbol = str(ce_row["symbol"])
-        pe_symbol = str(pe_row["symbol"])
-        actual_strike = float(ce_row["strike_parsed"])
 
         expiry_str = nearest_expiry.strftime("%d%b%Y").upper()
 
-        INDEX_TOKENS[index_name].update({
-            "ce_token": ce_token,
-            "pe_token": pe_token,
-            "atm_strike": actual_strike,
-            "expiry": expiry_str,
-            "expiry_date": nearest_expiry,
-            "ce_symbol": ce_symbol,
-            "pe_symbol": pe_symbol,
-            "last_refresh": time.time()
-        })
+        with _token_lock:
+            INDEX_TOKENS[index_name].update({
+                "ce_token": ce_token,
+                "pe_token": pe_token,
+                "atm_strike": actual_strike,
+                "expiry": expiry_str,
+                "expiry_date": nearest_expiry,
+                "ce_symbol": ce_symbol,
+                "pe_symbol": pe_symbol,
+                "last_refresh": time.time()
+            })
 
         logger.info(f"{index_name}: Tokens set - CE:{ce_token} PE:{pe_token} Strike:{actual_strike} Expiry:{expiry_str}")
         return ce_token, pe_token
@@ -1966,8 +2009,9 @@ def send_telegram_alert(msg):
     if not TELEGRAM_AVAILABLE or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: 
         return
     try:
+        safe_msg = html_module.escape(msg)
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=3)
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": safe_msg, "parse_mode": "HTML"}, timeout=3)
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
@@ -2039,10 +2083,7 @@ def get_action_side(action):
     return None
 
 def check_trend_change_cooldown(index_name, new_action, current_time):
-    current_side = get_action_side(signal_state[index_name]["action"])
     new_side = get_action_side(new_action)
-    if current_side is not None and signal_state[index_name]["action"] != "HOLD":
-        return True, 0
     prev_side = signal_state[index_name].get("prev_action_side")
     if prev_side is not None and new_side is not None and prev_side != new_side:
         cooldown_until = current_time + 60
@@ -2073,7 +2114,6 @@ def run_signal_engine_for_index(index_name):
             return
 
         now = time.time()
-        # Extended grace period to 5 minutes
         startup_grace = 300
         is_grace_period = (now - _bot_startup_time) < startup_grace
 
@@ -2129,7 +2169,6 @@ def run_signal_engine_for_index(index_name):
         ce_prem = latest_ticks[index_name]["ce_price"]
         pe_prem = latest_ticks[index_name]["pe_price"]
 
-        # Additional fallback to recent last_known_prices if current premium is 0
         if ce_prem <= 0 and (time.time() - last_known_prices[index_name].get("timestamp", 0)) < 30:
             ce_prem = last_known_prices[index_name].get("ce", 0)
         if pe_prem <= 0 and (time.time() - last_known_prices[index_name].get("timestamp", 0)) < 30:
@@ -2342,7 +2381,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["trend_change_cooldown_remaining"] = 0
                 return
 
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = get_ist_now().strftime("%Y-%m-%d")
             if last_trade_date[index_name] != today:
                 daily_trade_count[index_name] = 0
                 last_trade_date[index_name] = today
@@ -2484,7 +2523,7 @@ def run_signal_engine_for_index(index_name):
             "trend_15min": market_sentiment[index_name]["trend_15min"],
             "trend_20min": market_sentiment[index_name]["trend_20min"],
             "trend_30min": market_sentiment[index_name]["trend_30min"],
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": get_ist_now().isoformat(),
             "entry_price": signal_state[index_name]["entry_price"] if signal_state[index_name]["action"] != "HOLD" else 0.0,
             "stop_loss": signal_state[index_name]["stop_loss"] if signal_state[index_name]["action"] != "HOLD" else 0.0,
             "target": signal_state[index_name]["target"] if signal_state[index_name]["action"] != "HOLD" else 0.0,
@@ -2531,6 +2570,7 @@ def on_ws_open(wsapp):
     global sws, ws_running, last_heartbeat
     logger.info("="*60)
     logger.info("WEBSOCKET CONNECTED - SUBSCRIBING TO TOKENS")
+    logger.info("NOTE: Mode 1 (LTP) may not send Volume/OI. Use Mode 2 for full quotes if needed.")
     logger.info("="*60)
 
     try:
@@ -2763,7 +2803,7 @@ def start_angel_websocket():
     global sws, ws_running, last_heartbeat
     logger.info("="*60)
     logger.info("WEBSOCKET THREAD STARTED")
-    logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Current IST time: {get_ist_now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Market open check: {is_market_open()}")
     logger.info("="*60)
 
@@ -2802,7 +2842,7 @@ def start_angel_websocket():
 # REST API POLLER (V11 PRESERVED WITH V12 ENHANCEMENTS)
 # ============================================================================
 def is_market_open():
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    now_ist = get_ist_now()
     current_time = now_ist.time()
     is_weekday = now_ist.weekday() < 5
     market_open = dt_time(9, 10)
@@ -2813,6 +2853,7 @@ def is_market_open():
 def start_rest_api_poller():
     global last_heartbeat
     logger.info("REST API poller started - PRIMARY DATA SOURCE")
+    logger.info("NOTE: ltpData() only returns LTP. Volume/OI require quote API or WS Mode 2.")
     auth_obj = None
     auth_time = 0
     spot_cache = {idx: {"price": 0, "time": 0} for idx in INDEX_CONFIG}
@@ -2827,7 +2868,7 @@ def start_rest_api_poller():
                 time.sleep(5)
                 poll_count += 1
                 if poll_count % 60 == 0:
-                    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+                    now_ist = get_ist_now()
                     logger.info(f"Market CLOSED | IST: {now_ist.strftime('%H:%M')} | Waiting for 09:15 IST...")
                 continue
             poll_count = 0
@@ -2876,7 +2917,7 @@ def start_rest_api_poller():
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         spot = latest_ticks[idx]["spot_price"]
-                        # FIXED: Always store fetched CE/PE prices regardless of validation
+                        # Always store fetched CE/PE prices regardless of validation
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
                         if ce is not None:
@@ -2953,7 +2994,7 @@ def start_backgrounds():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.3 (FIXED: Token Crash | SENSEX ETF | VIX | Premium)",
+        "engine": "Multi-Index Options Bot v12.3 (FIXED: Token Crash | SENSEX ETF | VIX | Premium + Fallback)",
         "indices": list(INDEX_CONFIG.keys()),
         "market_open": is_market_open(),
         "timestamp": time.time(),
@@ -2971,7 +3012,7 @@ def home():
             "Market Analysis Exit Engine",
             "Trend Change Cooldown",
             "Trailing Stop Loss",
-            "FIXED: get_current_atm_tokens() now complete",
+            "FIXED: get_current_atm_tokens() with fallback to ±1 strike",
             "FIXED: SENSEX no longer fetches ETF (SENSEXBEES)",
             "FIXED: INDIAVIX uses dynamic search not hardcoded tokens",
             "FIXED: Safe None handling in refresh_all_tokens",
@@ -3000,7 +3041,7 @@ def live_signals():
         }
 
     return jsonify({
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_now().isoformat(),
         "signals": market_signal,
         "sentiment": sentiment_data,
         "portfolios": portfolio_state,
@@ -3058,7 +3099,8 @@ def health():
             "premium_fix": True,
             "token_auto_refresh": True,
             "sensex_etf_fix": True,
-            "vix_dynamic_search": True
+            "vix_dynamic_search": True,
+            "fallback_strike": True
         }
     }), status_code
 
@@ -3069,7 +3111,7 @@ def analytics(index_name):
 
     return jsonify({
         "index": index_name,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_now().isoformat(),
         "regime": latest_regime.get(index_name, {}),
         "pcr": latest_pcr.get(index_name, {}),
         "greeks": latest_greeks.get(index_name, {}),
@@ -3096,7 +3138,7 @@ def analytics(index_name):
 @app.route("/api/correlation")
 def correlation_endpoint():
     return jsonify({
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_now().isoformat(),
         "nifty_banknifty": latest_correlation,
         "nifty_samples": len(nifty_price_series),
         "banknifty_samples": len(banknifty_price_series)
@@ -3105,7 +3147,7 @@ def correlation_endpoint():
 @app.route("/api/performance")
 def performance_endpoint():
     return jsonify({
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_now().isoformat(),
         "metrics": latest_metrics,
         "drawdown_status": {k: {
             "current_drawdown": v.current_drawdown,
