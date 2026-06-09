@@ -1541,7 +1541,7 @@ def on_ws_data(wsapp, message):
                         with _last_known_lock:
                             last_known_prices[idx]["ce"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
-                    # Track incremental option volume
+                        # Track incremental option volume
                         with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
@@ -1558,13 +1558,13 @@ def on_ws_data(wsapp, message):
                         with _last_known_lock:
                             last_known_prices[idx]["pe"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
-                                                with _prev_vol_lock:
+                        with _prev_vol_lock:
                             _prev_option_volume[token] = vol
                     break
-            if token == "99919017" and ltp>0:
-                with _latest_ticks_lock:
-                    latest_ticks["VIX"]["vix"] = ltp
-                    vix_history.append(ltp)
+ if token == "99919017" and ltp>0:
+    with _latest_ticks_lock:
+        latest_ticks["VIX"]["vix"] = ltp
+        vix_history.append(ltp)
         if tick_counter % 5 == 0 and tick_counter>0:
             run_all_signals()
     except Exception as e:
