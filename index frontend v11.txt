@@ -95,12 +95,6 @@ body{background:#08111f;color:#fff;font-family:'Segoe UI',system-ui,-apple-syste
 .param-value.entry{color:#4da3ff;}
 .param-value.inactive{color:#546e7a;font-size:0.85rem;}
 
-/* PnL Row */
-.pnl-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;}
-.pnl-box{background:#0d1a2d;padding:10px;border-radius:10px;text-align:center;border:1px solid #1d3557;}
-.pnl-box .param-label{color:#8da9c4;font-size:0.65rem;text-transform:uppercase;margin-bottom:4px;}
-.pnl-box .param-value{font-size:1.05rem;font-weight:800;}
-
 /* Mini Metrics */
 .mini-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}
 .mini-metric{background:#16263d;padding:8px;border-radius:10px;text-align:center;border:1px solid #1d3557;}
@@ -192,7 +186,6 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
     .v12-metrics-row{grid-template-columns:repeat(2,1fr);}
     .perf-grid{grid-template-columns:repeat(2,1fr);}
     .pcr-greeks-row{grid-template-columns:repeat(2,1fr);}
-    .pnl-row{grid-template-columns:repeat(3,1fr);}
 }
 @media (max-width: 600px) {
     .mini-metrics{grid-template-columns:repeat(2,1fr);}
@@ -205,9 +198,9 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
     .vwap-row{grid-template-columns:1fr;}
     .perf-grid{grid-template-columns:repeat(2,1fr);}
     .pcr-greeks-row{grid-template-columns:repeat(2,1fr);}
-    .pnl-row{grid-template-columns:1fr;}
 }
 </style>
+<base target="_blank">
 <base target="_blank">
 </head>
 <body>
@@ -245,7 +238,6 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
 <div class="stat-card"><h3>Market Status</h3><p id="marketStatus" class="yellow">CHECKING...</p></div>
 <div class="stat-card"><h3>Active Signals</h3><p id="activeSignals" class="blue">0</p></div>
 <div class="stat-card"><h3>Total Trades Today</h3><p id="totalTrades" class="purple">0</p></div>
-<div class="stat-card"><h3>Today's PnL</h3><p id="globalPnl" class="yellow">₹0</p></div>
 <div class="stat-card"><h3>WS Status</h3><p id="wsStatus" class="red">OFFLINE</p></div>
 <div class="stat-card"><h3>Last Tick</h3><p id="lastTickTime" class="yellow">--</p></div>
 <div class="stat-card"><h3>Engine Version</h3><p id="engineVersion" class="blue">v12.0</p></div>
@@ -294,7 +286,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
     const INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"];
     const TIMEFRAMES = ["1min", "2min", "3min", "5min", "10min", "15min", "20min", "30min"];
 
-    let lastSignals = {};          // stores last announced action per index
+    let lastSignals = {};
     let speechEnabled = false;
     let synth = window.speechSynthesis;
     let selectedVoice = null;
@@ -302,98 +294,6 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
     let fetchInterval = null;
     let wakeLock = null;
 
-    // --- Speech Queue System (no interruption) ---
-    let speechQueue = [];
-    let isSpeaking = false;
-
-    function processSpeechQueue() {
-        if (!speechEnabled || isSpeaking || speechQueue.length === 0) return;
-        const text = speechQueue.shift();
-        isSpeaking = true;
-        const utter = new SpeechSynthesisUtterance(text);
-        if (selectedVoice) utter.voice = selectedVoice;
-        utter.rate = 0.95;
-        utter.pitch = 1.1;
-        utter.volume = 1;
-        utter.onend = () => {
-            isSpeaking = false;
-            processSpeechQueue();
-        };
-        utter.onerror = () => {
-            isSpeaking = false;
-            processSpeechQueue();
-        };
-        synth.speak(utter);
-    }
-
-    function speak(phrase) {
-        if (!speechEnabled || !synth) return;
-        speechQueue.push(phrase);
-        processSpeechQueue();
-    }
-
-    // --- Voice selection (female preferred) ---
-    function loadVoices() {
-        if (!synth) return;
-        const tryLoad = () => {
-            let voices = synth.getVoices();
-            if (voices.length > 0) pickBestVoice(voices);
-            else setTimeout(tryLoad, 100);
-        };
-        tryLoad();
-        synth.onvoiceschanged = () => pickBestVoice(synth.getVoices());
-    }
-
-    function pickBestVoice(voices) {
-        const preferred = ["Google UK English Female", "Microsoft Zira", "Samantha", "Google US English"];
-        for (let name of preferred) {
-            let found = voices.find(v => v.name.includes(name));
-            if (found) { selectedVoice = found; return; }
-        }
-        selectedVoice = voices.find(v => v.lang && v.lang.startsWith("en")) || voices[0];
-    }
-
-    // --- Beeps and test sounds ---
-    async function playBeep(frequency = 800, duration = 0.3, type = "sine") {
-        if (!audioContext) return;
-        try {
-            if (audioContext.state === "suspended") await audioContext.resume();
-            const osc = audioContext.createOscillator();
-            const gain = audioContext.createGain();
-            osc.type = type;
-            osc.frequency.value = frequency;
-            gain.gain.setValueAtTime(0, audioContext.currentTime);
-            gain.gain.linearRampToValueAtTime(0.4, audioContext.currentTime + 0.05);
-            gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
-            osc.connect(gain);
-            gain.connect(audioContext.destination);
-            osc.start();
-            osc.stop(audioContext.currentTime + duration);
-        } catch(e) {}
-    }
-
-    // --- Announce a signal change (concise, only once per change) ---
-    function announceSignalChange(indexName, newAction) {
-        if (!speechEnabled) return;
-        // map action to spoken phrase
-        let phrase = "";
-        if (newAction === "LOW_BUY_CE") phrase = `${indexName}: Slow Buy CE`;
-        else if (newAction === "BUY_CE") phrase = `${indexName}: Buy CE`;
-        else if (newAction === "STRONG_BUY_CE") phrase = `${indexName}: Strong Buy CE`;
-        else if (newAction === "LOW_BUY_PE") phrase = `${indexName}: Slow Buy PE`;
-        else if (newAction === "BUY_PE") phrase = `${indexName}: Buy PE`;
-        else if (newAction === "STRONG_BUY_PE") phrase = `${indexName}: Strong Buy PE`;
-        else if (newAction === "HOLD") phrase = `Exit ${indexName}`;
-        else return; // ignore other actions (ACTIVE, COOLDOWN, etc.)
-
-        // Only announce if the action has changed from the last known one
-        if (lastSignals[indexName] !== newAction) {
-            lastSignals[indexName] = newAction;
-            speak(phrase);
-        }
-    }
-
-    // --- UI and data fetching (unchanged from your original) ---
     function init() {
         createIndexCards();
         document.getElementById("enableAudio").addEventListener("click", enableSpeech);
@@ -409,6 +309,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         fetchInterval = setInterval(fetchData, 2000);
     }
 
+    // V12: Enhanced card creation with all new metrics
     function createIndexCards() {
         const grid = document.getElementById("indicesGrid");
         INDICES.forEach(idx => {
@@ -430,6 +331,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                     <div class="index-status status-waiting" id="status-${idx}">WAITING</div>
                 </div>
 
+                <!-- V12: Kill Switch Indicator (per card) -->
                 <div style="display:none;margin-bottom:8px;padding:6px 10px;background:#1a0005;border:1px solid #ff1744;border-radius:8px;font-size:0.75rem;color:#ff5252;font-weight:700;" id="kill-switch-${idx}">
                     🛑 KILL SWITCH ACTIVE — Drawdown: <span id="kill-dd-${idx}">0</span>%
                 </div>
@@ -441,46 +343,75 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                     <div class="cooldown-indicator" id="cooldown-${idx}">⏱ Trend Change Cooldown Active</div>
                 </div>
 
-                <!-- V12: Live PnL Display -->
-                <div class="pnl-row">
-                    <div class="pnl-box">
-                        <div class="param-label">Live PnL</div>
-                        <div class="param-value inactive" id="live-pnl-${idx}">--</div>
-                    </div>
-                    <div class="pnl-box">
-                        <div class="param-label">Daily PnL</div>
-                        <div class="param-value inactive" id="daily-pnl-${idx}">--</div>
-                    </div>
-                    <div class="pnl-box">
-                        <div class="param-label">Total PnL</div>
-                        <div class="param-value inactive" id="total-pnl-${idx}">--</div>
-                    </div>
-                </div>
-
+                <!-- V12: V12 Metrics Row (PCR, IV Rank, Liquidity, Kelly) -->
                 <div class="v12-metrics-row">
-                    <div class="v12-metric"><h5>PCR Signal</h5><p id="pcr-signal-${idx}" class="metric-yellow">--</p></div>
-                    <div class="v12-metric"><h5>IV Rank</h5><p id="iv-rank-${idx}" class="metric-blue">--</p></div>
-                    <div class="v12-metric"><h5>Liquidity</h5><p id="liquidity-${idx}" class="metric-green">--</p></div>
-                    <div class="v12-metric"><h5>Kelly Risk</h5><p id="kelly-risk-${idx}" class="metric-blue">--</p></div>
+                    <div class="v12-metric">
+                        <h5>PCR Signal</h5>
+                        <p id="pcr-signal-${idx}" class="metric-yellow">--</p>
+                    </div>
+                    <div class="v12-metric">
+                        <h5>IV Rank</h5>
+                        <p id="iv-rank-${idx}" class="metric-blue">--</p>
+                    </div>
+                    <div class="v12-metric">
+                        <h5>Liquidity</h5>
+                        <p id="liquidity-${idx}" class="metric-green">--</p>
+                    </div>
+                    <div class="v12-metric">
+                        <h5>Kelly Risk</h5>
+                        <p id="kelly-risk-${idx}" class="metric-blue">--</p>
+                    </div>
                 </div>
 
+                <!-- V12: PCR & Greeks Mini Panel -->
                 <div class="pcr-greeks-row">
-                    <div class="pcr-greeks-item"><h5>PCR OI</h5><p id="pcr-oi-${idx}">--</p></div>
-                    <div class="pcr-greeks-item"><h5>Delta CE</h5><p id="delta-ce-${idx}">--</p></div>
-                    <div class="pcr-greeks-item"><h5>Delta PE</h5><p id="delta-pe-${idx}">--</p></div>
-                    <div class="pcr-greeks-item"><h5>Slippage</h5><p id="slippage-${idx}">--</p></div>
+                    <div class="pcr-greeks-item">
+                        <h5>PCR OI</h5>
+                        <p id="pcr-oi-${idx}">--</p>
+                    </div>
+                    <div class="pcr-greeks-item">
+                        <h5>Delta CE</h5>
+                        <p id="delta-ce-${idx}">--</p>
+                    </div>
+                    <div class="pcr-greeks-item">
+                        <h5>Delta PE</h5>
+                        <p id="delta-pe-${idx}">--</p>
+                    </div>
+                    <div class="pcr-greeks-item">
+                        <h5>Slippage</h5>
+                        <p id="slippage-${idx}">--</p>
+                    </div>
                 </div>
 
+                <!-- V12: VWAP Row -->
                 <div class="vwap-row">
-                    <div class="vwap-item"><h5>VWAP</h5><p id="vwap-${idx}">--</p></div>
-                    <div class="vwap-item"><h5>POC</h5><p id="poc-${idx}">--</p></div>
-                    <div class="vwap-item"><h5>Value Area</h5><p id="va-${idx}" style="font-size:0.7rem;">--</p></div>
+                    <div class="vwap-item">
+                        <h5>VWAP</h5>
+                        <p id="vwap-${idx}">--</p>
+                    </div>
+                    <div class="vwap-item">
+                        <h5>POC</h5>
+                        <p id="poc-${idx}">--</p>
+                    </div>
+                    <div class="vwap-item">
+                        <h5>Value Area</h5>
+                        <p id="va-${idx}" style="font-size:0.7rem;">--</p>
+                    </div>
                 </div>
 
                 <div class="trade-params" id="params-${idx}">
-                    <div class="param"><div class="param-label">Entry Price</div><div class="param-value entry inactive" id="entry-${idx}">--</div></div>
-                    <div class="param"><div class="param-label">Stop Loss</div><div class="param-value sl inactive" id="sl-${idx}">--</div></div>
-                    <div class="param"><div class="param-label">Target</div><div class="param-value target inactive" id="target-${idx}">--</div></div>
+                    <div class="param">
+                        <div class="param-label">Entry Price</div>
+                        <div class="param-value entry inactive" id="entry-${idx}">--</div>
+                    </div>
+                    <div class="param">
+                        <div class="param-label">Stop Loss</div>
+                        <div class="param-value sl inactive" id="sl-${idx}">--</div>
+                    </div>
+                    <div class="param">
+                        <div class="param-label">Target</div>
+                        <div class="param-value target inactive" id="target-${idx}">--</div>
+                    </div>
                 </div>
 
                 <div class="mini-metrics">
@@ -493,9 +424,43 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 <div class="sentiment-bar"><div class="sentiment-fill" id="sentiment-bar-${idx}" style="width:50%"></div></div>
                 <div class="sentiment-label"><span>BEARISH</span><span>NEUTRAL</span><span>BULLISH</span></div>
 
-                <div style="margin-top:8px;"><div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:3px;"><span>Confidence</span><span id="conf-text-${idx}">0%</span></div><div class="confidence-bar"><div class="conf-fill" id="conf-fill-${idx}"></div></div></div>
+                <div style="margin-top:8px;">
+                    <div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:3px;">
+                        <span>Confidence</span><span id="conf-text-${idx}">0%</span>
+                    </div>
+                    <div class="confidence-bar"><div class="conf-fill" id="conf-fill-${idx}"></div></div>
+                </div>
 
-                <div class="perf-panel"><h4>📈 Performance Metrics</h4><div class="perf-grid"><div class="perf-item"><h5>Sharpe</h5><p id="sharpe-${idx}" class="blue">--</p></div><div class="perf-item"><h5>Sortino</h5><p id="sortino-${idx}" class="blue">--</p></div><div class="perf-item"><h5>Win Rate</h5><p id="winrate-${idx}" class="green">--</p></div><div class="perf-item"><h5>Profit Factor</h5><p id="pf-${idx}" class="yellow">--</p></div><div class="perf-item"><h5>Max DD</h5><p id="maxdd-${idx}" class="red">--</p></div><div class="perf-item"><h5>Expectancy</h5><p id="expectancy-${idx}" class="green">--</p></div></div></div>
+                <!-- V12: Performance Metrics Panel -->
+                <div class="perf-panel">
+                    <h4>📈 Performance Metrics</h4>
+                    <div class="perf-grid">
+                        <div class="perf-item">
+                            <h5>Sharpe</h5>
+                            <p id="sharpe-${idx}" class="blue">--</p>
+                        </div>
+                        <div class="perf-item">
+                            <h5>Sortino</h5>
+                            <p id="sortino-${idx}" class="blue">--</p>
+                        </div>
+                        <div class="perf-item">
+                            <h5>Win Rate</h5>
+                            <p id="winrate-${idx}" class="green">--</p>
+                        </div>
+                        <div class="perf-item">
+                            <h5>Profit Factor</h5>
+                            <p id="pf-${idx}" class="yellow">--</p>
+                        </div>
+                        <div class="perf-item">
+                            <h5>Max DD</h5>
+                            <p id="maxdd-${idx}" class="red">--</p>
+                        </div>
+                        <div class="perf-item">
+                            <h5>Expectancy</h5>
+                            <p id="expectancy-${idx}" class="green">--</p>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="trend-pills" id="trends-${idx}">
                     ${trendPillsHTML}
@@ -505,21 +470,103 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         });
     }
 
-    function enableSpeech() {
+    function loadVoices() {
+        if (!synth) return;
+        const tryLoad = () => {
+            let voices = synth.getVoices();
+            if (voices.length > 0) pickBestVoice(voices);
+            else setTimeout(tryLoad, 100);
+        };
+        tryLoad();
+        synth.onvoiceschanged = () => pickBestVoice(synth.getVoices());
+    }
+
+    function pickBestVoice(voices) {
+        const preferred = ["Google UK English Female", "Microsoft Zira", "Samantha", "Google US English"];
+        for (let name of preferred) {
+            let found = voices.find(v => v.name.includes(name));
+            if (found) { selectedVoice = found; return; }
+        }
+        selectedVoice = voices.find(v => v.lang && v.lang.startsWith("en")) || voices[0];
+    }
+
+    async function playBeep(frequency = 800, duration = 0.3, type = "sine") {
+        if (!audioContext) return;
+        try {
+            if (audioContext.state === "suspended") await audioContext.resume();
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            osc.type = type;
+            osc.frequency.value = frequency;
+            gain.gain.setValueAtTime(0, audioContext.currentTime);
+            gain.gain.linearRampToValueAtTime(0.4, audioContext.currentTime + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioContext.destination);
+            osc.start();
+            osc.stop(audioContext.currentTime + duration);
+        } catch(e) {}
+    }
+
+    function speak(phrase) {
+        if (!speechEnabled || !synth) return;
+        try {
+            synth.cancel();
+            const utter = new SpeechSynthesisUtterance(phrase);
+            if (selectedVoice) utter.voice = selectedVoice;
+            utter.rate = 0.95;
+            synth.speak(utter);
+        } catch(e) {}
+    }
+
+    // V12: Enhanced announcement with regime and kill switch info
+    function announceSignal(indexName, action, sentiment, confidence, alertMsg, exitReason, regime) {
+        let phrase = "";
+
+        if (action === "BUY_CE" || action === "STRONG_BUY_CE" || action === "LOW_BUY_CE") {
+            const strength = action.includes("STRONG") ? "Strong" : action.includes("LOW") ? "Weak" : "Consider";
+            playBeep(1200, 0.15, "sine");
+            setTimeout(() => playBeep(1400, 0.2, "sine"), 150);
+            setTimeout(() => playBeep(1600, 0.35, "sine"), 350);
+            phrase = `${strength} Call Buy Signal on ${indexName}. Regime: ${regime}. Sentiment ${Math.round(sentiment)}. Confidence ${Math.round(confidence)} percent. ${alertMsg}`;
+        } else if (action === "BUY_PE" || action === "STRONG_BUY_PE" || action === "LOW_BUY_PE") {
+            const strength = action.includes("STRONG") ? "Strong" : action.includes("LOW") ? "Weak" : "Consider";
+            playBeep(600, 0.15, "triangle");
+            setTimeout(() => playBeep(450, 0.2, "triangle"), 150);
+            setTimeout(() => playBeep(300, 0.35, "triangle"), 350);
+            phrase = `${strength} Put Buy Signal on ${indexName}. Regime: ${regime}. Sentiment ${Math.round(sentiment)}. Confidence ${Math.round(confidence)} percent. ${alertMsg}`;
+        } else if (action.includes("EXIT") || action === "HOLD") {
+            if (lastSignals[indexName] && lastSignals[indexName].action !== "HOLD") {
+                playBeep(400, 0.3, "sawtooth");
+                setTimeout(() => playBeep(300, 0.4, "sawtooth"), 300);
+                if (exitReason) {
+                    phrase = `Position closed on ${indexName}. Reason: ${exitReason}. System returned to hold state.`;
+                } else {
+                    phrase = `Position closed on ${indexName}. System returned to hold state.`;
+                }
+            }
+        } else if (action === "KILL_SWITCH") {
+            playBeep(200, 0.5, "sawtooth");
+            setTimeout(() => playBeep(150, 0.7, "sawtooth"), 400);
+            phrase = `ALERT. Kill switch activated on ${indexName}. Trading halted due to maximum drawdown.`;
+        }
+
+        if (phrase && speechEnabled) setTimeout(() => speak(phrase), 500);
+    }
+
+    async function enableSpeech() {
         speechEnabled = true;
         document.getElementById("enableAudio").innerText = "🔊 Audio ACTIVE";
         document.getElementById("enableAudio").style.background = "#00c853";
         document.getElementById("audioStatus").innerText = "Audio Status: ENGAGED";
         document.getElementById("audioStatus").style.color = "#00ff88";
-        playBeep(900, 0.25);
-        speak("Multi index signal bot version 12 audio alerts online.");
+        await playBeep(900, 0.25);
+        speak("Multi index signal bot version 12 audio alerts online. PCR, Greeks, Regime, and Kill Switch monitoring active.");
     }
 
     function stopAudio() {
         if (synth) synth.cancel();
         speechEnabled = false;
-        isSpeaking = false;
-        speechQueue = [];
         document.getElementById("enableAudio").innerText = "🔊 Enable Audio";
         document.getElementById("enableAudio").style.background = "#1d4ed8";
         document.getElementById("audioStatus").innerText = "Audio Status: BYPASSED";
@@ -527,29 +574,12 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
     }
 
     function testAllVoices() {
-    if (!speechEnabled) { showToast("Activate audio pipeline first."); return; }
-    // Clear any previous speech and queue
-    if (synth) synth.cancel();
-    speechQueue = [];
-    isSpeaking = false;
-    // Announce each signal with 4 seconds gap
-    setTimeout(() => announceSignalChange("NIFTY", "BUY_CE"), 500);
-    setTimeout(() => announceSignalChange("NIFTY", "STRONG_BUY_CE"), 4500);
-    setTimeout(() => announceSignalChange("NIFTY", "LOW_BUY_CE"), 8500);
-    setTimeout(() => announceSignalChange("NIFTY", "HOLD"), 500);
-    setTimeout(() => announceSignalChange("NIFTY", "BUY_PE"), 500);
-    setTimeout(() => announceSignalChange("NIFTY", "STRONG_BUY_PE"), 4500);
-    setTimeout(() => announceSignalChange("NIFTY", "LOW_BUY_PE"), 8500);
-    setTimeout(() => announceSignalChange("BANKNIFTY", "STRONG_BUY_PE"), 12500);
-    setTimeout(() => announceSignalChange("BANKNIFTY", "BUY_PE"), 16500);
-    setTimeout(() => announceSignalChange("BANKNIFTY", "HOLD"), 20500);
-    setTimeout(() => announceSignalChange("BANKNIFTY", "LOW_BUY_CE"), 24500);
-    setTimeout(() => announceSignalChange("FINNIFTY", "STRONG_BUY_PE"), 12500);
-    setTimeout(() => announceSignalChange("SENSEX", "HOLD"), 16500);
-    setTimeout(() => announceSignalChange("MIDCPNIFTY", "STRONG_BUY_CE"), 20500);
-    setTimeout(() => announceSignalChange("SENSEX", "LOW_BUY_CE"), 24500);
-    showToast("Testing all voice alerts – you should hear 15 messages.");
-}
+        if (!speechEnabled) { showToast("Activate audio pipeline first."); return; }
+        setTimeout(() => announceSignal("NIFTY", "BUY_CE", 75, 85, "All factors aligned", "", "trending"), 0);
+        setTimeout(() => announceSignal("BANKNIFTY", "STRONG_BUY_PE", 20, 92, "Extreme bearish", "", "strong_trend"), 4000);
+        setTimeout(() => announceSignal("NIFTY", "HOLD", 50, 0, "", "Trend Reversal: 6 of 8 timeframes bearish", "ranging"), 8000);
+        setTimeout(() => announceSignal("NIFTY", "KILL_SWITCH", 50, 0, "", "", "volatile"), 12000);
+    }
 
     function showToast(msg) {
         const toast = document.getElementById("toastMsg");
@@ -576,7 +606,6 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         }
     }
 
-    // --- helper functions for UI classes (unchanged from your original) ---
     function getSignalClass(action) {
         if (action === "STRONG_BUY_CE") return "strong-ce";
         if (action === "BUY_CE" || action === "LOW_BUY_CE") return "consider-ce";
@@ -636,22 +665,15 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         return `regime-${regime || "unknown"}`;
     }
 
-    // --- Helper: Update PnL element with color ---
-    function updatePnlElement(el, value) {
-        if (!el) return;
-        const val = Number(value) || 0;
-        el.innerText = "₹" + Math.round(val).toLocaleString("en-IN");
-        el.classList.remove("inactive", "green", "red");
-        el.classList.add(val >= 0 ? "green" : "red");
-    }
-
-    // --- Main UI update (your original logic, only voice part replaced) ---
+    // V12: Main UI update function with all V12 enhancements
     function updateUI(json) {
         const signals = json.signals || {};
         const sentiments = json.sentiment || {};
         const portfolios = json.portfolios || {};
         const tokens = json.tokens || {};
         const debug = json.debug || {};
+
+        // V12: New data sources
         const regimes = json.regime || {};
         const pcrData = json.pcr || {};
         const greeksData = json.greeks || {};
@@ -662,31 +684,26 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         const kellyData = json.kelly || {};
         const correlationData = json.correlation || {};
 
+        // Global stats
         let activeCount = 0;
         let totalTrades = 0;
         let anyKillSwitch = false;
-        let globalDailyPnl = 0;
-        let globalLivePnl = 0;
-
         INDICES.forEach(idx => {
             const sig = signals[idx] || {};
             if (sig.signal && sig.signal !== "WAITING" && sig.signal !== "HOLD" && sig.signal !== "COOLDOWN") activeCount++;
-            const port = portfolios[idx] || {};
-            totalTrades += port.daily_trades || 0;
-            globalDailyPnl += port.daily_pnl || 0;
-            globalLivePnl += (port.live_pnl || port.unrealized_pnl || 0);
+            totalTrades += (portfolios[idx] || {}).daily_trades || 0;
             if (drawdownData[idx] && drawdownData[idx].kill_switch_active) anyKillSwitch = true;
         });
 
-        // --- Global PnL Update ---
-        const globalPnlEl = document.getElementById("globalPnl");
-        globalPnlEl.innerText = "₹" + Math.round(globalDailyPnl).toLocaleString("en-IN");
-        globalPnlEl.className = globalDailyPnl >= 0 ? "green" : "red";
-
+        // V12: Global kill switch banner
         const killBanner = document.getElementById("globalKillSwitch");
-        if (anyKillSwitch) killBanner.classList.add("visible");
-        else killBanner.classList.remove("visible");
+        if (anyKillSwitch) {
+            killBanner.classList.add("visible");
+        } else {
+            killBanner.classList.remove("visible");
+        }
 
+        // V12: Global performance bar
         const perfBar = document.getElementById("globalPerfBar");
         if (performanceData && Object.keys(performanceData).length > 0) {
             perfBar.style.display = "grid";
@@ -709,7 +726,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 document.getElementById("globalWinRate").innerText = (totalWinRate / count).toFixed(1) + "%";
                 document.getElementById("globalProfitFactor").innerText = (totalPF / count).toFixed(2);
                 document.getElementById("globalMaxDD").innerText = (totalMaxDD / count).toFixed(1) + "%";
-                document.getElementById("globalExpectancy").innerText = "₹" + Math.round(totalExpectancy / count).toLocaleString("en-IN");
+                document.getElementById("globalExpectancy").innerText = "₹" + Math.round(totalExpectancy / count).toLocaleString();
             }
         } else {
             perfBar.style.display = "none";
@@ -722,11 +739,18 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         document.getElementById("marketStatus").innerText = json.market_open ? "OPEN" : "CLOSED";
         document.getElementById("marketStatus").className = json.market_open ? "green" : "yellow";
         document.getElementById("lastTickTime").innerText = debug.ticks || 0;
-        if (json.version) document.getElementById("engineVersion").innerText = json.version;
+        if (json.version) {
+            document.getElementById("engineVersion").innerText = json.version;
+        }
 
+        // Update each index card
         INDICES.forEach(idx => {
             const sig = signals[idx] || {};
             const sent = sentiments[idx] || {};
+            const port = portfolios[idx] || {};
+            const tok = tokens[idx] || {};
+
+            // V12 data
             const regime = regimes[idx] || {};
             const pcr = pcrData[idx] || {};
             const greeks = greeksData[idx] || {};
@@ -735,43 +759,24 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
             const dd = drawdownData[idx] || {};
             const slip = slippageData[idx] || {};
             const kelly = kellyData[idx] || {};
-            const port = portfolios[idx] || {};
 
-            const actionRaw = (sig.signal || "WAITING").toUpperCase();
-
-            // --- Voice announcement on signal change (only for relevant actions) ---
-            let announceAction = null;
-            if (actionRaw === "LOW_BUY_CE") announceAction = "LOW_BUY_CE";
-            else if (actionRaw === "BUY_CE") announceAction = "BUY_CE";
-            else if (actionRaw === "STRONG_BUY_CE") announceAction = "STRONG_BUY_CE";
-            else if (actionRaw === "LOW_BUY_PE") announceAction = "LOW_BUY_PE";
-            else if (actionRaw === "BUY_PE") announceAction = "BUY_PE";
-            else if (actionRaw === "STRONG_BUY_PE") announceAction = "STRONG_BUY_PE";
-            else if (actionRaw === "HOLD") announceAction = "HOLD";
-
-            if (announceAction) {
-                announceSignalChange(idx, announceAction);
-            }
-
-            // --- PnL Update (per index) ---
-            updatePnlElement(document.getElementById(`live-pnl-${idx}`), port.live_pnl || port.unrealized_pnl || 0);
-            updatePnlElement(document.getElementById(`daily-pnl-${idx}`), port.daily_pnl || 0);
-            updatePnlElement(document.getElementById(`total-pnl-${idx}`), port.total_pnl || 0);
-
-            // --- UI updates (all original code preserved) ---
+            const action = (sig.signal || "WAITING").toUpperCase();
             const sentiment = sent.score || 50;
             const confidence = sig.confidence || 0;
             const alertMsg = sig.alert_message || "";
             const exitReason = sig.exit_reason || "";
             const trendCooldown = sig.trend_change_cooldown_remaining || 0;
             const regimeName = regime.regime || "unknown";
+            const regimeScore = regime.regime_score || 50;
 
+            // V12: Regime badge
             const regimeBadge = document.getElementById(`regime-${idx}`);
             if (regimeBadge) {
                 regimeBadge.className = `regime-badge ${getRegimeClass(regimeName)}`;
                 regimeBadge.innerText = regimeName.replace(/_/g, " ").toUpperCase();
             }
 
+            // V12: Kill switch per card
             const killSwitchCard = document.getElementById(`kill-switch-${idx}`);
             if (killSwitchCard) {
                 if (dd.kill_switch_active) {
@@ -782,32 +787,38 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 }
             }
 
+            // Status badge
             const statusEl = document.getElementById(`status-${idx}`);
-            statusEl.className = `index-status ${getStatusClass(actionRaw)}`;
-            statusEl.innerText = actionRaw === "WAITING" ? "WAITING" : actionRaw.replace(/_/g, " ");
+            statusEl.className = `index-status ${getStatusClass(action)}`;
+            statusEl.innerText = action === "WAITING" ? "WAITING" : action.replace(/_/g, " ");
 
+            // Signal pill
             const pill = document.getElementById(`pill-${idx}`);
-            pill.innerText = getSignalDisplayText(actionRaw);
-            pill.className = `signal-pill ${getSignalClass(actionRaw)}`;
+            pill.innerText = getSignalDisplayText(action);
+            pill.className = `signal-pill ${getSignalClass(action)}`;
 
+            // Reason text
             document.getElementById(`reason-${idx}`).innerText = alertMsg || "Scanning market conditions...";
 
+            // Exit reason display
             const exitReasonBox = document.getElementById(`exit-reason-${idx}`);
-            if (exitReason && actionRaw === "HOLD") {
+            if (exitReason && action === "HOLD") {
                 exitReasonBox.innerText = `📊 Last Exit: ${exitReason}`;
                 exitReasonBox.classList.add("visible");
             } else {
                 exitReasonBox.classList.remove("visible");
             }
 
+            // Trend change cooldown
             const cooldownBox = document.getElementById(`cooldown-${idx}`);
-            if (trendCooldown > 0 && actionRaw === "COOLDOWN") {
+            if (trendCooldown > 0 && action === "COOLDOWN") {
                 cooldownBox.innerText = `⏱ Trend Change Cooldown: ${trendCooldown}s remaining`;
                 cooldownBox.classList.add("visible");
             } else {
                 cooldownBox.classList.remove("visible");
             }
 
+            // V12: Update V12 metrics row
             const pcrSignalEl = document.getElementById(`pcr-signal-${idx}`);
             if (pcrSignalEl) {
                 const pcrSig = pcr.pcr_signal || "neutral";
@@ -835,6 +846,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 kellyRiskEl.innerText = kr !== undefined ? kr.toFixed(2) + "%" : "--";
             }
 
+            // V12: PCR & Greeks row
             const pcrOiEl = document.getElementById(`pcr-oi-${idx}`);
             if (pcrOiEl) pcrOiEl.innerText = pcr.pcr_oi !== undefined ? pcr.pcr_oi.toFixed(2) : "--";
 
@@ -850,6 +862,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 slippageEl.innerText = avgSpread !== undefined ? avgSpread.toFixed(3) + "%" : "--";
             }
 
+            // V12: VWAP row
             const vwapEl = document.getElementById(`vwap-${idx}`);
             if (vwapEl) vwapEl.innerText = vp.vwap ? vp.vwap.toFixed(1) : "--";
 
@@ -865,6 +878,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 }
             }
 
+            // Trade params
             const entryEl = document.getElementById(`entry-${idx}`);
             const slEl = document.getElementById(`sl-${idx}`);
             const targetEl = document.getElementById(`target-${idx}`);
@@ -893,16 +907,21 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                 targetEl.classList.add("inactive");
             }
 
-            document.getElementById(`spot-${idx}`).innerText = sig.spot_price ? Math.round(sig.spot_price).toLocaleString("en-IN") : "--";
+            // Metrics
+            document.getElementById(`spot-${idx}`).innerText = sig.spot_price ? Math.round(sig.spot_price).toLocaleString() : "--";
             document.getElementById(`ce-${idx}`).innerText = sig.ce_price ? sig.ce_price.toFixed(2) : "--";
             document.getElementById(`pe-${idx}`).innerText = sig.pe_price ? sig.pe_price.toFixed(2) : "--";
             document.getElementById(`sentiment-${idx}`).innerText = Math.round(sentiment);
             document.getElementById(`sentiment-${idx}`).style.color = sentiment >= 55 ? "#00ff88" : sentiment <= 45 ? "#ff5252" : "#ffd600";
 
+            // Sentiment bar
             document.getElementById(`sentiment-bar-${idx}`).style.width = sentiment + "%";
+
+            // Confidence bar
             document.getElementById(`conf-text-${idx}`).innerText = confidence.toFixed(1) + "%";
             document.getElementById(`conf-fill-${idx}`).style.width = Math.min(confidence, 100) + "%";
 
+            // V12: Performance metrics panel
             const sharpeEl = document.getElementById(`sharpe-${idx}`);
             if (sharpeEl) {
                 sharpeEl.innerText = perf.sharpe !== undefined ? perf.sharpe.toFixed(2) : "--";
@@ -935,10 +954,11 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
 
             const expectancyEl = document.getElementById(`expectancy-${idx}`);
             if (expectancyEl) {
-                expectancyEl.innerText = perf.expectancy !== undefined ? "₹" + Math.round(perf.expectancy).toLocaleString("en-IN") : "--";
+                expectancyEl.innerText = perf.expectancy !== undefined ? "₹" + Math.round(perf.expectancy).toLocaleString() : "--";
                 expectancyEl.className = perf.expectancy > 0 ? "metric-green" : "metric-red";
             }
 
+            // 8 timeframe trend pills
             TIMEFRAMES.forEach(tf => {
                 const trend = sent[`trend_${tf}`] || "NEUTRAL";
                 const pillEl = document.getElementById(`trend-${idx}-${tf}`);
@@ -947,8 +967,16 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                     pillEl.innerText = `${tf}: ${trend}`;
                 }
             });
+
+            // Audio on signal change
+            const signalKey = action + "_" + sentiment + "_" + alertMsg + "_" + exitReason;
+            if (lastSignals[idx] !== signalKey && (action.includes("BUY_") || action === "KILL_SWITCH" || (action === "HOLD" && lastSignals[idx] && lastSignals[idx].includes("BUY_")))) {
+                announceSignal(idx, action, sentiment, confidence, alertMsg, exitReason, regimeName);
+            }
+            lastSignals[idx] = { action: action, key: signalKey };
         });
 
+        // Timestamp
         const dtStr = json.timestamp ? new Date(json.timestamp) : new Date();
         const displayTime = dtStr.toLocaleTimeString("en-IN", { hour12: false }) + " IST";
         document.getElementById("timestamp").innerText = "Last Sync: " + displayTime;
@@ -958,6 +986,8 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
         try {
             const res = await fetch(HEALTH_URL, { cache: "no-store" });
             const data = await res.json();
+
+            // V12: Enhanced health check with features
             let featuresText = "";
             if (data.features_active) {
                 const features = data.features_active;
@@ -966,6 +996,7 @@ button:disabled{opacity:0.5;cursor:not-allowed;}
                     featuresText += `\n  ${key}: ${val ? "✅" : "❌"}`;
                 }
             }
+
             alert(`Engine Diagnostics v${data.version || '??'}:
 Status: ${data.status}
 WS Running: ${data.ws_running}
