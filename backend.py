@@ -620,7 +620,7 @@ def get_nifty_pcr():
     return pcr_cache["value"]
 
 def get_current_atm_tokens():
-    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
+    global CE_TOKEN, PE_TOKEN, CE_SYMBOL, PE_SYMBOL, ATM_STRIKE, EXPIRY_DATE
     spot = get_nifty_spot_cached()
     if not spot:
         logger.warning("Could not get Nifty spot.")
@@ -666,6 +666,8 @@ def get_current_atm_tokens():
             return None, None
         CE_TOKEN = str(ce.iloc[0]["token"])
         PE_TOKEN = str(pe.iloc[0]["token"])
+        CE_SYMBOL = str(ce.iloc[0]["symbol"])
+        PE_SYMBOL = str(pe.iloc[0]["symbol"])
         ATM_STRIKE = atm_strike
         EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
         logger.info(f"Resolved: CE={CE_TOKEN}, PE={PE_TOKEN}, Expiry={EXPIRY_DATE}")
@@ -881,7 +883,7 @@ def on_connect(ws_app, response):
 # WEBSOCKET ENGINE (SINGLE DEFINITION)
 # --------------------------------------------------
 def start_websocket_engine():
-    global sws, ws_running
+    global sws, ws_running, CE_TOKEN, PE_TOKEN
     logger.info("WebSocket engine thread started")
     while engine_active:
         try:
