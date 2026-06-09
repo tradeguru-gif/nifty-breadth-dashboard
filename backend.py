@@ -1,4 +1,4 @@
-# === VERSION 12.6 - FINAL WORKING: Premium Fixed, No WebSocket Overwrite, No Memory Leak ===
+# === VERSION 12.7 - FINAL: Restored v12.1 token logic + premium fix ===
 import sys
 import logging
 import os
@@ -40,7 +40,7 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 DB_PATH = "trading_data.db"
 
 # ============================================================================
-# DATABASE (simplified, kept from v12.1)
+# DATABASE (simplified)
 # ============================================================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -56,27 +56,57 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================================
-# INDEX CONFIG
+# INDEX CONFIGURATION
 # ============================================================================
 INDEX_CONFIG = {
-    "NIFTY": {"token": "99926000", "exchange": "NSE", "symbol": "NIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
-              "min_premium": 5, "atm_strike_multiple": 50, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
-              "max_daily_drawdown_pct": 3.0, "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True},
-    "BANKNIFTY":{"token":"99926009","exchange":"NSE","symbol":"BANKNIFTY","lot_size":25,"expiry_weekday":3,"active":True,
-                 "min_premium":5,"atm_strike_multiple":100,"option_exchange":"NFO","ws_exchange_type":1,"option_ws_exchange_type":2,
-                 "max_daily_drawdown_pct":3.0,"correlation_pair":"NIFTY","greeks_enabled":True,"pcr_enabled":True},
-    "FINNIFTY": {"token":"99926037","exchange":"NSE","symbol":"FINNIFTY","lot_size":40,"expiry_weekday":1,"active":True,
-                 "min_premium":5,"atm_strike_multiple":50,"option_exchange":"NFO","ws_exchange_type":1,"option_ws_exchange_type":2,
-                 "max_daily_drawdown_pct":3.0,"correlation_pair":None,"greeks_enabled":True,"pcr_enabled":True},
-    "MIDCPNIFTY":{"token":"99926074","exchange":"NSE","symbol":"MIDCPNIFTY","lot_size":75,"expiry_weekday":3,"active":True,
-                  "min_premium":5,"atm_strike_multiple":25,"option_exchange":"NFO","ws_exchange_type":1,"option_ws_exchange_type":2,
-                  "max_daily_drawdown_pct":3.0,"correlation_pair":None,"greeks_enabled":False,"pcr_enabled":True},
-    "SENSEX":    {"token":"99919000","exchange":"BSE","symbol":"SENSEX","lot_size":15,"expiry_weekday":4,"active":True,
-                  "min_premium":5,"atm_strike_multiple":100,"option_exchange":"BFO","ws_exchange_type":3,"option_ws_exchange_type":4,
-                  "max_daily_drawdown_pct":3.0,"correlation_pair":None,"greeks_enabled":True,"pcr_enabled":True}
+    "NIFTY": {
+        "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
+        "lot_size": 50, "expiry_weekday": 3, "active": True,
+        "min_premium": 5, "atm_strike_multiple": 50,
+        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
+        "max_daily_drawdown_pct": 3.0, "correlation_pair": "BANKNIFTY",
+        "greeks_enabled": True, "pcr_enabled": True
+    },
+    "BANKNIFTY": {
+        "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY",
+        "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "min_premium": 5, "atm_strike_multiple": 100,
+        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
+        "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY",
+        "greeks_enabled": True, "pcr_enabled": True
+    },
+    "FINNIFTY": {
+        "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY",
+        "lot_size": 40, "expiry_weekday": 1, "active": True,
+        "min_premium": 5, "atm_strike_multiple": 50,
+        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
+        "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
+        "greeks_enabled": True, "pcr_enabled": True
+    },
+    "MIDCPNIFTY": {
+        "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY",
+        "lot_size": 75, "expiry_weekday": 3, "active": True,
+        "min_premium": 5, "atm_strike_multiple": 25,
+        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2,
+        "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
+        "greeks_enabled": False, "pcr_enabled": True
+    },
+    "SENSEX": {
+        "token": "99919000", "exchange": "BSE", "symbol": "SENSEX",
+        "lot_size": 15, "expiry_weekday": 4, "active": True,
+        "min_premium": 5, "atm_strike_multiple": 100,
+        "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4,
+        "max_daily_drawdown_pct": 3.0, "correlation_pair": None,
+        "greeks_enabled": True, "pcr_enabled": True
+    }
 }
 
-INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "ce_symbol": "", "pe_symbol": "", "last_refresh": 0} for idx in INDEX_CONFIG}
+INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, 
+                       "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": "",
+                       "last_refresh": 0} 
+                for idx in INDEX_CONFIG}
+
+# Price caches
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_CONFIG}
 price_histories = {idx: deque(maxlen=5000) for idx in INDEX_CONFIG}
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
@@ -108,6 +138,9 @@ def rate_limited_api_call(func, *args, **kwargs):
         _api_last_call = time.time()
         return result
 
+# ============================================================================
+# SENTIMENT & SIGNAL CORE (kept from v12.1)
+# ============================================================================
 TIMEFRAMES = ["1min","2min","3min","5min","10min","15min","20min","30min"]
 TIMEFRAME_WEIGHTS = {"1min":8,"2min":8,"3min":8,"5min":12,"10min":12,"15min":14,"20min":14,"30min":24}
 EMA_SHORT, EMA_MEDIUM, EMA_LONG = 9, 21, 50
@@ -127,12 +160,12 @@ for tf in TIMEFRAMES:
     for idx in INDEX_CONFIG:
         market_sentiment[idx][f"trend_{tf}"] = "NEUTRAL"
 
-signal_state = {idx: {"action":"HOLD","entry_price":0,"stop_loss":0,"target":0,"lots":1,"cooldown":0,"highest":0,"entry_time":0} for idx in INDEX_CONFIG}
+signal_state = {idx: {"action":"HOLD","entry_price":0,"stop_loss":0,"target":0,"lots":1,"cooldown":0,"highest":0,"entry_time":0,"prev_action_side":None,"trend_change_cooldown":0} for idx in INDEX_CONFIG}
 portfolio_state = {idx: {"equity":100000.0,"open_positions":0,"daily_trades":0} for idx in INDEX_CONFIG}
 daily_drawdown = {idx: {"peak_equity":100000.0} for idx in INDEX_CONFIG}
-market_signal = {idx: {"signal":"WAITING","sentiment_score":50,"alert_message":""} for idx in INDEX_CONFIG}
+market_signal = {idx: {"signal":"WAITING","sentiment_score":50,"alert_message":"","entry_price":0,"stop_loss":0,"target":0,"exit_reason":"","trend_change_cooldown_remaining":0} for idx in INDEX_CONFIG}
 safety_state = {idx: {"consecutive_sl":0,"circuit_breaker":False,"circuit_breaker_until":0} for idx in INDEX_CONFIG}
-signal_buffer = {idx: {"ce_count":0,"pe_count":0} for idx in INDEX_CONFIG}
+signal_buffer = {idx: {"ce_count":0,"pe_count":0,"consecutive_ce":0,"consecutive_pe":0} for idx in INDEX_CONFIG}
 daily_trade_count = {idx:0 for idx in INDEX_CONFIG}
 last_trade_date = {idx:"" for idx in INDEX_CONFIG}
 
@@ -140,10 +173,9 @@ last_trade_date = {idx:"" for idx in INDEX_CONFIG}
 # UTILITIES
 # ============================================================================
 def is_valid_option_premium(premium, spot_price, side):
-    """Relaxed: accept any positive premium less than 2x spot (covers all real options)"""
     if premium <= 0: return False
     if spot_price <= 0: return premium < 10000
-    return premium < 2 * spot_price  # options are always less than underlying
+    return premium < 2 * spot_price   # options are always worth less than underlying
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period+1: return 50.0
@@ -214,7 +246,7 @@ def calculate_bollinger(prices, period=20):
 
 def is_sideways(prices):
     if len(prices)<30: return False,0
-    upper, sma, lower = calculate_bollinger(prices)
+    upper,sma,lower = calculate_bollinger(prices)
     if upper and sma>0:
         band_width = (upper-lower)/sma
         if band_width < 0.008: return True, band_width
@@ -270,7 +302,14 @@ def compute_sentiment(index_name):
 def get_signal_from_sentiment(index_name, sentiment):
     for k,(low,high,label,action) in SENTIMENT_SCORES.items():
         if low<=sentiment<=high:
-            return action, label, sentiment
+            trend_30m = market_sentiment[index_name].get("trend_30min","NEUTRAL")
+            trend_20m = market_sentiment[index_name].get("trend_20min","NEUTRAL")
+            if "LOW" in action:
+                if "CE" in action and trend_30m=="BEARISH" and trend_20m=="BEARISH":
+                    return "NO_TRADE",label,sentiment
+                if "PE" in action and trend_30m=="BULLISH" and trend_20m=="BULLISH":
+                    return "NO_TRADE",label,sentiment
+            return action,label,sentiment
     return "NO_TRADE","UNKNOWN",sentiment
 
 # ============================================================================
@@ -282,7 +321,7 @@ _auth_lock = threading.Lock()
 def get_auth_token():
     with _auth_lock:
         now = time.time()
-        if auth_cache["token"] and (now - auth_cache["timestamp"] < 3300):
+        if auth_cache["token"] and now - auth_cache["timestamp"] < 3300:
             return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
         totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
         obj = SmartConnect(api_key=ANGEL_API_KEY)
@@ -365,51 +404,100 @@ def get_next_expiry_date(index_name):
     weekday = today.weekday()
     expiry_weekday = config["expiry_weekday"]
     days_ahead = expiry_weekday - weekday
-    if days_ahead <=0: days_ahead+=7
+    if days_ahead <= 0: days_ahead += 7
     return today + timedelta(days=days_ahead)
 
+# ============================================================================
+# TOKEN FETCHING (restored from v12.1)
+# ============================================================================
 def get_current_atm_tokens(index_name):
-    config = INDEX_CONFIG[index_name]
-    if not config.get("active"): return None,None
+    config = INDEX_CONFIG.get(index_name)
+    if not config or not config.get("active"):
+        return None, None
+
     spot = get_index_spot(index_name)
-    if not spot or spot<=0: return None,None
+    if not spot or spot <= 0:
+        logger.warning(f"{index_name} spot unavailable")
+        return None, None
+
     mult = config["atm_strike_multiple"]
-    atm = int(round(spot/mult)*mult)
+    atm = int(round(spot / mult) * mult)
+
+    # Get next expiry date
     next_expiry = get_next_expiry_date(index_name)
+    if not next_expiry:
+        return None, None
     expiry_str = next_expiry.strftime("%d%b%Y").upper()
+
     scrip = get_scrip_master()
-    if scrip:
+    if scrip and isinstance(scrip, list) and len(scrip) > 0:
         try:
             df = pd.DataFrame(scrip)
-            opts = df[(df["name"]==config["symbol"]) & (df["instrumenttype"]=="OPTIDX") & (df["exch_seg"]==config["option_exchange"])]
+            if df.empty:
+                raise ValueError("Empty scrip master")
+
+            # Filter for options on this index
+            opts = df[(df["name"] == config["symbol"]) &
+                      (df["instrumenttype"] == "OPTIDX") &
+                      (df["exch_seg"] == config["option_exchange"])].copy()
+
+            if opts.empty:
+                raise ValueError("No options in scrip master")
+
+            # Try to use expiry column if exists
             if "expiry" in opts.columns:
-                opts = opts[opts["expiry"]==expiry_str]
+                opts = opts[opts["expiry"] == expiry_str]
             else:
+                # Fallback to symbol contains expiry string (first 5 chars)
                 opts = opts[opts["symbol"].str.contains(expiry_str[:5], na=False)]
-            if not opts.empty:
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce")/100
-                opts = opts.dropna(subset=["strike"])
-                opts["strike_diff"] = abs(opts["strike"] - atm)
-                opts_sorted = opts.sort_values("strike_diff")
-                ce = opts_sorted[opts_sorted["symbol"].str.contains("CE", na=False)]
-                pe = opts_sorted[opts_sorted["symbol"].str.contains("PE", na=False)]
-                if not ce.empty and not pe.empty:
-                    ce_token = str(ce.iloc[0]["token"])
-                    pe_token = str(pe.iloc[0]["token"])
-                    ce_symbol = str(ce.iloc[0]["symbol"])
-                    pe_symbol = str(pe.iloc[0]["symbol"])
-                    actual_strike = float(ce.iloc[0]["strike"])
-                    INDEX_TOKENS[index_name].update({
-                        "ce_token":ce_token,"pe_token":pe_token,"atm_strike":actual_strike,
-                        "expiry":expiry_str,"ce_symbol":ce_symbol,"pe_symbol":pe_symbol,
-                        "last_refresh":time.time()
-                    })
-                    logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} strike={actual_strike}")
-                    return ce_token, pe_token
+
+            if opts.empty:
+                raise ValueError(f"No options for expiry {expiry_str}")
+
+            # Parse strikes (Angel stores as string, sometimes in paise)
+            opts["strike_num"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
+            opts = opts.dropna(subset=["strike_num"])
+            if opts.empty:
+                raise ValueError("No valid strikes")
+
+            # Find nearest strike to ATM
+            opts["strike_diff"] = abs(opts["strike_num"] - atm)
+            opts_sorted = opts.sort_values("strike_diff")
+
+            ce = opts_sorted[opts_sorted["symbol"].str.contains("CE", na=False)]
+            pe = opts_sorted[opts_sorted["symbol"].str.contains("PE", na=False)]
+
+            if ce.empty or pe.empty:
+                raise ValueError("CE or PE not found")
+
+            ce_row = ce.iloc[0]
+            pe_row = pe.iloc[0]
+
+            ce_token = str(ce_row["token"])
+            pe_token = str(pe_row["token"])
+            ce_symbol = str(ce_row["symbol"])
+            pe_symbol = str(pe_row["symbol"])
+            actual_strike = float(ce_row["strike_num"])
+
+            INDEX_TOKENS[index_name].update({
+                "ce_token": ce_token,
+                "pe_token": pe_token,
+                "atm_strike": actual_strike,
+                "expiry": expiry_str,
+                "expiry_date": next_expiry,
+                "ce_symbol": ce_symbol,
+                "pe_symbol": pe_symbol,
+                "last_refresh": time.time()
+            })
+
+            logger.info(f"{index_name} tokens from scrip: CE={ce_token} PE={pe_token} Strike={actual_strike}")
+            return ce_token, pe_token
+
         except Exception as e:
-            logger.error(f"{index_name} token fetch error: {e}")
-    # fallback search
-    _,_,obj = get_auth_token()
+            logger.warning(f"{index_name} scrip master path failed: {e}, trying API fallback")
+
+    # API fallback (searchScrip)
+    _, _, obj = get_auth_token()
     if obj:
         try:
             ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
@@ -417,15 +505,42 @@ def get_current_atm_tokens(index_name):
             ce_token = str(ce_resp["data"][0]["symboltoken"]) if ce_resp and ce_resp.get("data") else None
             pe_token = str(pe_resp["data"][0]["symboltoken"]) if pe_resp and pe_resp.get("data") else None
             if ce_token and pe_token:
-                INDEX_TOKENS[index_name].update({"ce_token":ce_token,"pe_token":pe_token,"atm_strike":atm,"expiry":expiry_str,"last_refresh":time.time()})
+                INDEX_TOKENS[index_name].update({
+                    "ce_token": ce_token,
+                    "pe_token": pe_token,
+                    "atm_strike": atm,
+                    "expiry": expiry_str,
+                    "expiry_date": next_expiry,
+                    "ce_symbol": f"{config['symbol']}{atm}CE",
+                    "pe_symbol": f"{config['symbol']}{atm}PE",
+                    "last_refresh": time.time()
+                })
+                logger.info(f"{index_name} tokens via search: CE={ce_token} PE={pe_token}")
                 return ce_token, pe_token
-        except: pass
-    return None,None
+        except Exception as e:
+            logger.error(f"Search fallback error {index_name}: {e}")
+
+    return None, None
 
 def refresh_all_tokens():
     for idx in INDEX_CONFIG:
         if INDEX_CONFIG[idx].get("active"):
-            get_current_atm_tokens(idx)
+            try:
+                get_current_atm_tokens(idx)
+            except Exception as e:
+                logger.error(f"Token refresh failed for {idx}: {e}")
+
+def refresh_tokens_if_needed(index_name):
+    tokens = INDEX_TOKENS.get(index_name)
+    if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
+        logger.info(f"{index_name}: Tokens missing, refreshing...")
+        get_current_atm_tokens(index_name)
+        return
+    # Also refresh if last_refresh is very old (e.g., > 6 hours)
+    last_refresh = tokens.get("last_refresh", 0)
+    if time.time() - last_refresh > 21600:  # 6 hours
+        logger.info(f"{index_name}: Refreshing tokens (age > 6h)")
+        get_current_atm_tokens(index_name)
 
 # ============================================================================
 # SIGNAL ENGINE (simplified but complete)
@@ -438,13 +553,13 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["alert_message"] = f"Collecting data ({len(prices)}/30)"
             market_signal[index_name]["signal"] = "WAITING"
             return
+
         now = time.time()
         spot = prices[-1] if prices else last_known_prices[index_name].get("spot",0)
         if spot>0:
             last_known_prices[index_name]["spot"] = spot
         ce_prem = latest_ticks[index_name]["ce_price"]
         pe_prem = latest_ticks[index_name]["pe_price"]
-        # fallback to last known
         if ce_prem<=0: ce_prem = last_known_prices[index_name].get("ce",0)
         if pe_prem<=0: pe_prem = last_known_prices[index_name].get("pe",0)
 
@@ -454,7 +569,7 @@ def run_signal_engine_for_index(index_name):
         atr = calculate_atr(prices)
         vix = latest_ticks["VIX"]["vix"]
 
-        # check kill switch
+        # kill switch
         daily_peak = daily_drawdown[index_name]["peak_equity"]
         current_equity = portfolio_state[index_name]["equity"]
         if current_equity > daily_peak:
@@ -539,7 +654,6 @@ def run_signal_engine_for_index(index_name):
                     "current_pnl": round(pnl,2)
                 })
             else:
-                # premium became zero -> exit
                 reset_signal_state(index_name, now, "PREMIUM_ZERO")
             return
 
@@ -632,10 +746,10 @@ def run_signal_engine_for_index(index_name):
 def reset_signal_state(index_name, current_time, exit_reason=""):
     signal_state[index_name].update({
         "action":"HOLD","entry_price":0,"stop_loss":0,"target":0,"lots":1,
-        "cooldown":current_time+60,"highest":0,"entry_time":0
+        "cooldown":current_time+60,"highest":0,"entry_time":0,
+        "exit_reason":exit_reason
     })
     portfolio_state[index_name]["open_positions"] = 0
-    market_signal[index_name]["exit_reason"] = exit_reason
 
 def save_portfolio_equity(index_name):
     try:
@@ -670,7 +784,7 @@ def on_ws_open(wsapp):
     last_heartbeat = time.time()
     logger.info("WebSocket connected")
     refresh_all_tokens()
-    # subscribe to spot indices and VIX only (no option tokens)
+    # subscribe only to spot indices and VIX
     token_list = []
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
@@ -679,7 +793,7 @@ def on_ws_open(wsapp):
     if token_list and sws:
         try:
             sws.subscribe("admin", 1, token_list)
-            logger.info(f"Subscribed to spot tokens")
+            logger.info("Subscribed to spot tokens")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
@@ -788,6 +902,10 @@ def start_rest_api_poller():
             # fetch option premiums
             for idx, tokens in INDEX_TOKENS.items():
                 if not INDEX_CONFIG[idx].get("active"): continue
+                # ensure tokens exist
+                if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                    get_current_atm_tokens(idx)
+                    tokens = INDEX_TOKENS[idx]  # refresh reference
                 if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
                     try:
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
@@ -808,9 +926,6 @@ def start_rest_api_poller():
                             logger.debug(f"REST PE {idx}: {pe}")
                     except Exception as e:
                         logger.debug(f"REST fetch error {idx}: {e}")
-                else:
-                    # try to refresh tokens once
-                    get_current_atm_tokens(idx)
             # fetch VIX
             vix = get_vix_value()
             if vix:
@@ -846,7 +961,7 @@ def start_backgrounds():
 # ============================================================================
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status":"healthy","engine":"v12.6 - Premium Fixed","indices":list(INDEX_CONFIG.keys()),"market_open":is_market_open()})
+    return jsonify({"status":"healthy","engine":"v12.7 - Token Fix + Premium Fix","indices":list(INDEX_CONFIG.keys()),"market_open":is_market_open()})
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
@@ -857,7 +972,7 @@ def live_signals():
         "tokens": INDEX_TOKENS,
         "market_open": is_market_open(),
         "debug": {"ws_running": ws_running, "ticks": tick_counter},
-        "version": "12.6"
+        "version": "12.7"
     })
 
 @app.route("/api/health")
