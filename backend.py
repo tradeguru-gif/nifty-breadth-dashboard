@@ -1130,11 +1130,10 @@ def run_signal_engine_for_index(index_name):
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
                         safety_state[index_name]["consecutive_sl"] += 1
-                        # Replace with:
-if safety_state[index_name]["consecutive_sl"] >= 3:
-    safety_state[index_name]["circuit_breaker"] = True
-    safety_state[index_name]["circuit_breaker_until"] = now + 1800
-    circuit_triggered = True
+                        if safety_state[index_name]["consecutive_sl"] >= 3:
+                            safety_state[index_name]["circuit_breaker"] = True
+                            safety_state[index_name]["circuit_breaker_until"] = now + 1800
+                            circuit_triggered = True
                     if circuit_triggered:
                         # No telegram, just log
                         logger.warning(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
@@ -1220,7 +1219,6 @@ if safety_state[index_name]["consecutive_sl"] >= 3:
             return
 
     # Daily reset
-        # Daily reset
     today = datetime.now(IST).strftime("%Y-%m-%d")
     with _trade_count_lock:
         if last_trade_date[index_name] != today:
@@ -1320,10 +1318,8 @@ if safety_state[index_name]["consecutive_sl"] >= 3:
     else:
         adx = 20
     with _latest_ticks_lock:
-        # Replace with:
-with _latest_ticks_lock:
-    vix = latest_ticks["VIX"]["vix"]
-ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])   
+        vix = latest_ticks["VIX"]["vix"]
+    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
     if ml_prob < 0.4 and "STRONG" not in action:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"ML filter: probability {ml_prob:.2f} < 0.4"
@@ -1462,7 +1458,6 @@ def on_ws_open(wsapp):
         if cfg.get("active"):
             token_list.append({"exchangeType": cfg["ws_exchange_type"], "tokens": [cfg["token"]]})
     # Option tokens (CE/PE) for real‑time premiums
-        # Option tokens (CE/PE) for real‑time premiums
     with _index_tokens_lock:
         index_tokens_snapshot = list(INDEX_TOKENS.items())
     for idx, tokens in index_tokens_snapshot:
@@ -1525,7 +1520,7 @@ def on_ws_data(wsapp, message):
                         with _tick_counter_lock:
                             tick_counter += 1
                     break
-                        # Option premiums
+            # Option premiums
             with _index_tokens_lock:
                 index_tokens_snapshot = list(INDEX_TOKENS.items())
             for idx, tokens in index_tokens_snapshot:
@@ -1621,7 +1616,6 @@ def start_rest_api_poller():
                 time.sleep(10)
                 continue
             # Fallback fetch for any index that may have missing WebSocket updates
-                        # Fallback fetch for any index that may have missing WebSocket updates
             with _index_tokens_lock:
                 index_tokens_snapshot = list(INDEX_TOKENS.items())
             for idx, tokens in index_tokens_snapshot:
