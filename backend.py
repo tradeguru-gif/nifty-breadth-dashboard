@@ -938,7 +938,7 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-    # VIX spike removed (commented)
+    # VIX spike removed
     return False, ""
 
 # ----------------------------------------------------------------------
@@ -1437,7 +1437,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET (unchanged)
+# WEBSOCKET (subscribes to spot + option tokens)
 # ----------------------------------------------------------------------
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat
@@ -1455,7 +1455,7 @@ def on_ws_open(wsapp):
         if not INDEX_CONFIG[idx].get("active"): continue
         if tokens.get("ce_token") and tokens.get("pe_token"):
             token_list.append({"exchangeType": INDEX_CONFIG[idx]["option_ws_exchange_type"], "tokens": [tokens["ce_token"], tokens["pe_token"]]})
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
+    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX placeholder
     if token_list and sws:
         try:
             sws.subscribe("admin", 3, token_list)
@@ -1638,7 +1638,7 @@ def start_rest_api_poller():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS (started once in main)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -1653,7 +1653,7 @@ def _start_background_threads():
             logger.info("Background threads started")
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES
+# FLASK ROUTES (health endpoint exempt from API key)
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
