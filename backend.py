@@ -717,106 +717,133 @@ def get_vix_value():
 _scrip_cache = {"data": None, "timestamp": 0}
 _scrip_lock = threading.Lock()
 
+import pandas as pd
+from datetime import datetime, timedelta
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
+
 def parse_expiry_date(expiry_str):
-    """Try multiple formats."""
+    """Return pd.Timestamp for reliable comparisons."""
     if not expiry_str:
-        return None
+        return pd.NaT
     formats = ["%d%b%Y", "%d%b%y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d", "%d/%m/%Y"]
     for fmt in formats:
         try:
-            return datetime.strptime(expiry_str, fmt)
+            dt = datetime.strptime(expiry_str, fmt)
+            return pd.Timestamp(dt)
         except:
             continue
+    # Fallback regex
     import re
     match = re.search(r'(\d{2})([A-Za-z]{3})(\d{2,4})', expiry_str)
     if match:
         day, mon, year = match.groups()
-        if len(year)==2: year = "20"+year
+        if len(year) == 2:
+            year = "20" + year
         try:
-            return datetime.strptime(f"{day}{mon}{year}", "%d%b%Y")
+            dt = datetime.strptime(f"{day}{mon}{year}", "%d%b%Y")
+            return pd.Timestamp(dt)
         except:
             pass
-    return None
-
-def get_scrip_master():
-    with _scrip_lock:
-        now = time.time()
-        if _scrip_cache["data"] and (now - _scrip_cache["timestamp"] < 86400):
-            return _scrip_cache["data"]
-        try:
-            url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
-            data = requests.get(url, timeout=30).json()
-            _scrip_cache["data"] = data
-            _scrip_cache["timestamp"] = now
-            logger.info("Scrip master refreshed")
-            return data
-        except Exception as e:
-            logger.error(f"Scrip master failed: {e}")
-            return _scrip_cache["data"] or []
+    return pd.NaT
 
 def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
-    if not config: return None
-    # Return naive datetime (no timezone) for consistent comparisons
-    today = datetime.now(IST).replace(tzinfo=None)
+    if not config:
+        return None
+    today = datetime.now(IST).replace(tzinfo=None)  # naive datetime
     weekday = today.weekday()
     expiry_weekday = config["expiry_weekday"]
     days_ahead = expiry_weekday - weekday
-    if days_ahead <= 0: days_ahead += 7
-    return today + timedelta(days=days_ahead)
+    if days_ahead <= 0:
+        days_ahead += 7
+    next_expiry = today + timedelta(days=days_ahead)
+    return pd.Timestamp(next_expiry)   # return Timestamp
 
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("active"): return None, None
+    if not config or not config.get("active"):
+        return None, None
+
     spot = get_index_spot(index_name)
-    if not spot or spot<=0: return None, None
+    if not spot or spot <= 0:
+        return None, None
+
     mult = config["atm_strike_multiple"]
-    atm = int(round(spot/mult)*mult)
+    atm = int(round(spot / mult) * mult)
+
     next_expiry = get_next_expiry_date(index_name)
-    if not next_expiry: return None, None
+    if next_expiry is None:
+        return None, None
+
     expiry = next_expiry.strftime("%d%b%Y").upper()
     scrip = get_scrip_master()
-    if scrip:
-        try:
-            df = pd.DataFrame(scrip)
-            opts = df[(df["name"]==config["symbol"]) & (df["instrumenttype"]=="OPTIDX") & (df["exch_seg"]==config["option_exchange"])]
-            if not opts.empty:
-                opts = opts.copy()  # <-- FIX 1: avoid SettingWithCopyWarning
-                opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
-                opts = opts.dropna(subset=["expiry_date"])
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce")/100
-                opts = opts.dropna(subset=["strike"])
-                # FIX 2: compare naive datetime with naive datetime (remove timezone)
-                now_naive = datetime.now(IST).replace(tzinfo=None)
-                future = opts[opts["expiry_date"] >= now_naive]
-                if not future.empty:
-                    nearest = future["expiry_date"].min()
-                    atm_opts = future[(future["strike"]==atm) & (future["expiry_date"]==nearest)]
-                    if atm_opts.empty:
-                        same_exp = future[future["expiry_date"]==nearest]
-                        if not same_exp.empty:
-                            diff = (same_exp["strike"]-atm).abs()
-                            atm_opts = same_exp.loc[[diff.idxmin()]]
-                    if not atm_opts.empty:
-                        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
-                        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
-                        if not ce.empty and not pe.empty:
-                            ce_token = str(ce.iloc[0]["token"])
-                            pe_token = str(pe.iloc[0]["token"])
-                            ce_symbol = str(ce.iloc[0]["symbol"])
-                            pe_symbol = str(pe.iloc[0]["symbol"])
-                            with _index_tokens_lock:
-                                INDEX_TOKENS[index_name].update({
-                                    "ce_token": ce_token, "pe_token": pe_token, "atm_strike": atm,
-                                    "expiry": expiry, "expiry_date": nearest,
-                                    "ce_symbol": ce_symbol, "pe_symbol": pe_symbol
-                                })
-                            logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} expiry={expiry}")
-                            return ce_token, pe_token
-        except Exception as e:
-            logger.warning(f"{index_name} token fetch error: {e}")
-    return None, None
+    if not scrip:
+        return None, None
 
+    try:
+        df = pd.DataFrame(scrip)
+        # Filter and force a true copy immediately
+        opts = df.loc[
+            (df["name"] == config["symbol"]) &
+            (df["instrumenttype"] == "OPTIDX") &
+            (df["exch_seg"] == config["option_exchange"])
+        ].copy()
+
+        if opts.empty:
+            return None, None
+
+        # Add expiry_date column safely (opts is already a copy)
+        opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
+        opts = opts.dropna(subset=["expiry_date"])
+        opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
+        opts = opts.dropna(subset=["strike"])
+
+        # Compare using pd.Timestamp
+        now_ts = pd.Timestamp(datetime.now(IST).replace(tzinfo=None))
+        future = opts[opts["expiry_date"] >= now_ts]
+        if future.empty:
+            return None, None
+
+        nearest = future["expiry_date"].min()
+        atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
+        if atm_opts.empty:
+            same_exp = future[future["expiry_date"] == nearest]
+            if not same_exp.empty:
+                diff = (same_exp["strike"] - atm).abs()
+                atm_opts = same_exp.loc[[diff.idxmin()]]
+
+        if atm_opts.empty:
+            return None, None
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+        if ce.empty or pe.empty:
+            return None, None
+
+        ce_token = str(ce.iloc[0]["token"])
+        pe_token = str(pe.iloc[0]["token"])
+        ce_symbol = str(ce.iloc[0]["symbol"])
+        pe_symbol = str(pe.iloc[0]["symbol"])
+
+        with _index_tokens_lock:
+            INDEX_TOKENS[index_name].update({
+                "ce_token": ce_token,
+                "pe_token": pe_token,
+                "atm_strike": atm,
+                "expiry": expiry,
+                "expiry_date": nearest,   # already a Timestamp
+                "ce_symbol": ce_symbol,
+                "pe_symbol": pe_symbol
+            })
+
+        logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} expiry={expiry}")
+        return ce_token, pe_token
+
+    except Exception as e:
+        logger.warning(f"{index_name} token fetch error: {e}")
+        return None, None
 _last_token_refresh_time = 0
 def refresh_all_tokens():
     global _last_token_refresh_time
