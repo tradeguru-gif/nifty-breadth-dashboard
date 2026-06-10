@@ -33,9 +33,6 @@ ALLOWED_ORIGINS = [
 ]
 CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
 
-from dotenv import load_dotenv
-load_dotenv()
-
 # Optional API key (set environment variable API_KEY)
 API_KEY = os.getenv("API_KEY", "")
 

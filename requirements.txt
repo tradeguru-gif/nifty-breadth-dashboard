@@ -10,3 +10,4 @@ smartapi-python
 websocket-client
 logzero
 pytz
+python-dotenv
