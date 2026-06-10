@@ -1,4 +1,4 @@
-# === VERSION 12.13 - FORCED WEBSOCKET STARTUP (FULL BOT) ===
+# === VERSION 12.11 - FULLY CORRECTED: No ADX, Trend‑change cooldown, VIX removed, All signals retained ===
 import sys
 import logging
 import os
@@ -19,14 +19,12 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("backend")
-logger.setLevel(logging.INFO)
-
-logger.info("=== BACKEND MODULE LOADED (v12.13) ===")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Restrict CORS to your frontend domain only
 ALLOWED_ORIGINS = [
     "http://index-options.co",
     "https://index-options.co",
@@ -35,11 +33,13 @@ ALLOWED_ORIGINS = [
 ]
 CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
 
+# Optional API key (set environment variable API_KEY)
 API_KEY = os.getenv("API_KEY", "")
+
 application = app
 
 # ----------------------------------------------------------------------
-# ENVIRONMENT
+# ENVIRONMENT (Telegram removed)
 # ----------------------------------------------------------------------
 ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
 ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
@@ -47,12 +47,12 @@ ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
 ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
-    logger.warning("Some Angel One credentials are missing. WebSocket will retry until market open.")
+    raise ValueError("Missing critical Angel One environment variables")
 
 DB_PATH = "trading_data.db"
 
 # ----------------------------------------------------------------------
-# DATABASE (full schema)
+# DATABASE (full schema, now populated)
 # ----------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -71,19 +71,13 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS signal_state (index_name TEXT PRIMARY KEY, action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL)""")
     conn.commit()
     conn.close()
-    logger.info("Database initialized")
 init_db()
 
 from SmartApi import SmartConnect
-try:
-    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-    logger.info("SmartWebSocketV2 imported successfully")
-except ImportError as e:
-    logger.error(f"SmartWebSocketV2 import failed: {e}")
-    SmartWebSocketV2 = None
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION (all active, SENSEX enabled)
+# INDEX CONFIGURATION (all active)
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -118,11 +112,10 @@ INDEX_CONFIG = {
     }
 }
 
+# Pre‑compute set of index tokens for fast price normalisation
 INDEX_TOKENS_SET = {cfg["token"] for cfg in INDEX_CONFIG.values()}
 
-# ----------------------------------------------------------------------
-# LOCKS (as before)
-# ----------------------------------------------------------------------
+# Global state with locks
 _latest_ticks_lock = threading.Lock()
 _market_signal_lock = threading.Lock()
 _portfolio_state_lock = threading.Lock()
@@ -160,8 +153,8 @@ latest_ticks = {idx: {"spot_price": 0.0, "ce_price": 0.0, "pe_price": 0.0,
                 for idx in INDEX_CONFIG}
 latest_ticks["VIX"] = {"vix": 15.0}
 
-_prev_volume = {idx: 0 for idx in INDEX_CONFIG}
-_prev_option_volume = {}
+_prev_volume = {idx: 0 for idx in INDEX_CONFIG}        # for spot incremental volume
+_prev_option_volume = {}                               # {token: prev_volume}
 tick_counter = 0
 ws_running = False
 sws = None
@@ -180,6 +173,7 @@ _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_CONFIG}
 _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_CONFIG}
 
 def update_candle(idx, price, volume, timestamp):
+    """Incremental volume: volume is cumulative daily volume – compute tick volume."""
     with _prev_vol_lock:
         tick_vol = max(0, volume - _prev_volume.get(idx, 0))
         _prev_volume[idx] = volume
@@ -202,7 +196,7 @@ def update_candle(idx, price, volume, timestamp):
                 _current_candle[idx][tf]["volume"] += tick_vol
 
 # ----------------------------------------------------------------------
-# TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (ADX removed, using EMA + RSI + MACD)
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices: return 0
@@ -245,7 +239,9 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     return macd, sig, macd-sig
 
 def calculate_atr(highs, lows, closes, period=14):
-    if len(closes) < period+1: return 5.0
+    """True Range based ATR."""
+    if len(closes) < period+1:
+        return 5.0
     tr = []
     for i in range(1, len(closes)):
         if len(highs) > i and highs[i] > 0 and lows[i] > 0:
@@ -257,13 +253,20 @@ def calculate_atr(highs, lows, closes, period=14):
             tr.append(abs(closes[i] - closes[i-1]))
     return sum(tr[-period:])/period if len(tr)>=period else 5.0
 
+def calculate_bollinger(prices, period=20, std_dev=2):
+    if len(prices)<period: return None,None,None
+    sma = sum(prices[-period:])/period
+    var = sum((p-sma)**2 for p in prices[-period:])/period
+    std = math.sqrt(var)
+    return sma+std_dev*std, sma, sma-std_dev*std
+
 def calculate_vwap(prices, volumes):
     if not prices or not volumes: return prices[-1] if prices else 0
     s_vol = sum(volumes)
     return sum(p*v for p,v in zip(prices, volumes))/s_vol if s_vol else prices[-1]
 
 # ----------------------------------------------------------------------
-# PERSISTENCE
+# PERSISTENCE FUNCTIONS
 # ----------------------------------------------------------------------
 def save_portfolio_state(idx):
     with sqlite3.connect(DB_PATH) as conn:
@@ -301,8 +304,353 @@ def load_persisted_state():
                     })
                 portfolio_state[idx]["open_positions"] = 1
     conn.close()
+    # Set daily peak for ALL indices after loading
     for idx in INDEX_CONFIG:
         daily_drawdown[idx]["peak_equity"] = portfolio_state[idx]["equity"]
+
+# ----------------------------------------------------------------------
+# GREEKS (unchanged)
+# ----------------------------------------------------------------------
+def get_option_greeks(index_name):
+    config = INDEX_CONFIG.get(index_name)
+    if not config or not config.get("greeks_enabled"): return None
+    with _index_tokens_lock:
+        tokens = INDEX_TOKENS.get(index_name)
+        if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"): return None
+    _, _, obj = get_auth_token()
+    if not obj: return _estimate_greeks_fallback(index_name)
+    try:
+        with _index_tokens_lock:
+            expiry_str = tokens.get("expiry", "")
+        if not expiry_str: return _estimate_greeks_fallback(index_name)
+        greeks_payload = {"name": config["symbol"], "expirydate": expiry_str}
+        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
+        try: local_ip = socket.gethostbyname(socket.gethostname())
+        except: local_ip = "127.0.0.1"
+        headers = {"Authorization": f"Bearer {auth_cache.get('token', '')}", "Content-Type": "application/json",
+                   "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
+                   "X-ClientLocalIP": local_ip, "X-ClientPublicIP": local_ip, "X-MACAddress": "00:00:00:00:00:00",
+                   "X-PrivateKey": ANGEL_API_KEY}
+        resp = requests.post(url, json=greeks_payload, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") and data.get("data"):
+                greeks_list = data["data"]
+                with _index_tokens_lock:
+                    atm_strike = tokens.get("atm_strike", 0)
+                ce_greeks = pe_greeks = None
+                for g in greeks_list:
+                    strike = float(g.get("strikePrice",0))
+                    opt_type = g.get("optionType","")
+                    if abs(strike - atm_strike) < config.get("atm_strike_multiple",50)*0.5:
+                        if opt_type == "CE": ce_greeks = g
+                        elif opt_type == "PE": pe_greeks = g
+                if ce_greeks and pe_greeks:
+                    ce_iv = float(ce_greeks.get("impliedVolatility",0))/100 if float(ce_greeks.get("impliedVolatility",0))>1 else float(ce_greeks.get("impliedVolatility",0))
+                    pe_iv = float(pe_greeks.get("impliedVolatility",0))/100 if float(pe_greeks.get("impliedVolatility",0))>1 else float(pe_greeks.get("impliedVolatility",0))
+                    # Compute IV rank from stored history
+                    conn = sqlite3.connect(DB_PATH)
+                    hist = conn.execute("SELECT ce_iv FROM greeks_history WHERE index_name=? ORDER BY timestamp DESC LIMIT 50", (index_name,)).fetchall()
+                    conn.close()
+                    iv_list = [h[0] for h in hist if h[0]>0] + [ce_iv]
+                    if len(iv_list) > 20:
+                        iv_rank = (ce_iv - min(iv_list)) / (max(iv_list)-min(iv_list)) * 100 if max(iv_list)!=min(iv_list) else 50
+                        iv_percentile = sum(1 for iv in iv_list if iv < ce_iv) / len(iv_list) * 100
+                    else:
+                        iv_rank = iv_percentile = 50
+                    greeks_data = {
+                        "ce_iv": ce_iv, "pe_iv": pe_iv,
+                        "ce_delta": float(ce_greeks.get("delta",0)), "pe_delta": float(pe_greeks.get("delta",0)),
+                        "ce_gamma": float(ce_greeks.get("gamma",0)), "pe_gamma": float(pe_greeks.get("gamma",0)),
+                        "ce_theta": float(ce_greeks.get("theta",0)), "pe_theta": float(pe_greeks.get("theta",0)),
+                        "ce_vega": float(ce_greeks.get("vega",0)), "pe_vega": float(pe_greeks.get("vega",0)),
+                        "iv_rank": iv_rank, "iv_percentile": iv_percentile
+                    }
+                    with sqlite3.connect(DB_PATH) as conn:
+                        c = conn.cursor()
+                        c.execute("INSERT INTO greeks_history (timestamp, index_name, ce_iv, pe_iv, ce_delta, pe_delta, ce_gamma, pe_gamma, ce_theta, pe_theta, ce_vega, pe_vega, iv_rank, iv_percentile) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (time.time(), index_name, greeks_data["ce_iv"], greeks_data["pe_iv"],
+                                   greeks_data["ce_delta"], greeks_data["pe_delta"], greeks_data["ce_gamma"], greeks_data["pe_gamma"],
+                                   greeks_data["ce_theta"], greeks_data["pe_theta"], greeks_data["ce_vega"], greeks_data["pe_vega"],
+                                   iv_rank, iv_percentile))
+                    return greeks_data
+        return _estimate_greeks_fallback(index_name)
+    except Exception as e:
+        logger.debug(f"Greeks API error {index_name}: {e}")
+        return _estimate_greeks_fallback(index_name)
+
+def _estimate_greeks_fallback(index_name):
+    with _latest_ticks_lock:
+        ce_price = latest_ticks[index_name]["ce_price"]
+        pe_price = latest_ticks[index_name]["pe_price"]
+        spot = latest_ticks[index_name]["spot_price"]
+    if ce_price>0 and pe_price>0 and spot>0:
+        with _index_tokens_lock:
+            strike = INDEX_TOKENS.get(index_name, {}).get("atm_strike", spot)
+        time_to_expiry = 0.02
+        moneyness = (spot - strike)/spot
+        ce_delta = max(0.05, min(0.95, 0.5 + moneyness*5))
+        pe_delta = max(-0.95, min(-0.05, -0.5 + (-moneyness)*5))
+        return {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":ce_delta, "pe_delta":pe_delta,
+                "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1,
+                "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50}
+    return None
+
+# ----------------------------------------------------------------------
+# ML FILTER (unchanged)
+# ----------------------------------------------------------------------
+class MLSignalFilter:
+    def __init__(self):
+        self.model = None
+        self.features = []
+        self.is_trained = False
+    def load_model(self):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT model, features FROM ml_models ORDER BY created_at DESC LIMIT 1").fetchone()
+            conn.close()
+            if row:
+                self.model = pickle.loads(row[0])
+                self.features = json.loads(row[1])
+                self.is_trained = True
+                return True
+        except: pass
+        return False
+    def predict(self, feature_vector):
+        if not self.is_trained or self.model is None: return 0.5
+        try:
+            prob = self.model.predict_proba([feature_vector])[0][1]
+            return prob
+        except: return 0.5
+ml_filter = MLSignalFilter()
+ml_filter.load_model()
+
+# ----------------------------------------------------------------------
+# KELLY CRITERION
+# ----------------------------------------------------------------------
+class KellyCriterion:
+    def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
+        self.index_name = index_name
+        self.kelly_fraction = kelly_fraction
+        self.min_trades = min_trades
+        self.alpha = 1.0
+        self.beta = 1.0
+        self.trade_returns = deque(maxlen=100)
+        self.win_count = 0
+        self.loss_count = 0
+        self.avg_win = 0.0
+        self.avg_loss = 0.0
+    def update(self, trade_pnl_pct):
+        self.trade_returns.append(trade_pnl_pct)
+        if trade_pnl_pct > 0:
+            self.win_count += 1
+            self.alpha += 1
+        else:
+            self.loss_count += 1
+            self.beta += 1
+        wins = [r for r in self.trade_returns if r>0]
+        losses = [r for r in self.trade_returns if r<=0]
+        if wins: self.avg_win = sum(wins)/len(wins)
+        if losses: self.avg_loss = abs(sum(losses)/len(losses))
+    def calculate(self):
+        total = self.win_count + self.loss_count
+        if total < self.min_trades: return 0.01, 0.5, self.avg_win, self.avg_loss
+        p = self.alpha/(self.alpha+self.beta)
+        q = 1-p
+        if self.avg_loss == 0: return 0.01, p, self.avg_win, self.avg_loss
+        b = self.avg_win/self.avg_loss if self.avg_loss>0 else 1.0
+        if b == 0: return 0.01, p, self.avg_win, self.avg_loss
+        kelly_full = (p*b - q)/b
+        kelly_full = max(0, min(kelly_full, 0.5))
+        return kelly_full * self.kelly_fraction, p, self.avg_win, self.avg_loss
+    def get_recommended_risk_pct(self):
+        kelly, win_rate, avg_win, avg_loss = self.calculate()
+        risk_pct = min(kelly*100, 2.0)
+        risk_pct = max(0.3, risk_pct)
+        return risk_pct, win_rate, avg_win, avg_loss
+kelly_trackers = {idx: KellyCriterion(idx) for idx in INDEX_CONFIG}
+
+# ----------------------------------------------------------------------
+# PERFORMANCE TRACKER
+# ----------------------------------------------------------------------
+class PerformanceTracker:
+    def __init__(self, index_name, risk_free_rate=0.0):
+        self.index_name = index_name
+        self.risk_free_rate = risk_free_rate
+        self.returns = deque(maxlen=252)
+        self.equity_curve = deque(maxlen=252)
+        self.trade_pnls = deque(maxlen=100)
+        self.peak_equity = 0.0
+        self.max_drawdown = 0.0
+    def add_return(self, daily_return_pct, equity):
+        self.returns.append(daily_return_pct)
+        self.equity_curve.append(equity)
+        if equity > self.peak_equity: self.peak_equity = equity
+        drawdown = (self.peak_equity - equity)/self.peak_equity if self.peak_equity>0 else 0
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+    def add_trade(self, pnl):
+        self.trade_pnls.append(pnl)
+    def calculate_sharpe(self):
+        if len(self.returns)<10: return 0.0
+        arr = np.array(list(self.returns))
+        excess = arr - self.risk_free_rate
+        std = np.std(excess, ddof=1)
+        if std==0 or np.isnan(std): return 0.0
+        return np.mean(excess)/std * np.sqrt(252)
+    def calculate_sortino(self):
+        if len(self.returns)<10: return 0.0
+        arr = np.array(list(self.returns))
+        excess = arr - self.risk_free_rate
+        downside = excess[excess<0]
+        if len(downside)==0: return float('inf') if np.mean(excess)>0 else 0.0
+        downside_std = np.std(downside, ddof=1)
+        if downside_std==0 or np.isnan(downside_std): return 0.0
+        return np.mean(excess)/downside_std * np.sqrt(252)
+    def calculate_calmar(self):
+        if len(self.returns)<10 or self.max_drawdown==0: return 0.0
+        annual_return = np.mean(list(self.returns))*252
+        return annual_return/self.max_drawdown
+    def calculate_win_rate(self):
+        if not self.trade_pnls: return 0.0
+        wins = sum(1 for p in self.trade_pnls if p>0)
+        return wins/len(self.trade_pnls)*100
+    def calculate_profit_factor(self):
+        if not self.trade_pnls: return 0.0
+        gross_profit = sum(p for p in self.trade_pnls if p>0)
+        gross_loss = abs(sum(p for p in self.trade_pnls if p<0))
+        if gross_loss==0: return float('inf') if gross_profit>0 else 0.0
+        return gross_profit/gross_loss
+    def calculate_expectancy(self):
+        if not self.trade_pnls: return 0.0
+        win_rate = self.calculate_win_rate()/100
+        wins = [p for p in self.trade_pnls if p>0]
+        losses = [p for p in self.trade_pnls if p<0]
+        avg_win = sum(wins)/len(wins) if wins else 0
+        avg_loss = abs(sum(losses)/len(losses)) if losses else 1
+        if avg_loss==0: return 0.0
+        return (win_rate*avg_win) - ((1-win_rate)*avg_loss)
+    def get_all_metrics(self):
+        return {
+            "sharpe": round(self.calculate_sharpe(),3),
+            "sortino": round(self.calculate_sortino(),3),
+            "calmar": round(self.calculate_calmar(),3),
+            "win_rate": round(self.calculate_win_rate(),2),
+            "profit_factor": round(self.calculate_profit_factor(),3),
+            "max_drawdown": round(self.max_drawdown*100,2),
+            "avg_trade": round(np.mean(list(self.trade_pnls)),2) if self.trade_pnls else 0.0,
+            "expectancy": round(self.calculate_expectancy(),3),
+            "total_trades": len(self.trade_pnls)
+        }
+performance_trackers = {idx: PerformanceTracker(idx) for idx in INDEX_CONFIG}
+
+# ----------------------------------------------------------------------
+# CORRELATION FILTER (thread‑safe)
+# ----------------------------------------------------------------------
+class CorrelationFilter:
+    def __init__(self):
+        self.nifty_returns = deque(maxlen=50)
+        self.banknifty_returns = deque(maxlen=50)
+        self.divergence_threshold = 0.2
+        self._lock = threading.Lock()
+    def update(self, nifty_price, banknifty_price):
+        with self._lock:
+            if nifty_price>0 and banknifty_price>0:
+                self.nifty_returns.append(nifty_price)
+                self.banknifty_returns.append(banknifty_price)
+    def calculate(self):
+        with self._lock:
+            if len(self.nifty_returns)<20: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
+            n_arr = np.array(list(self.nifty_returns))
+            b_arr = np.array(list(self.banknifty_returns))
+            n_ret = np.diff(n_arr)/n_arr[:-1]
+            b_ret = np.diff(b_arr)/b_arr[:-1]
+            if len(n_ret)<10: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
+            corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0,1] if len(n_ret)>=20 else 0
+            corr_50 = np.corrcoef(n_ret, b_ret)[0,1] if len(n_ret)>=20 else 0
+            cov = np.cov(n_ret, b_ret)[0,1] if len(n_ret)>=2 else 0
+            var_n = np.var(n_ret) if len(n_ret)>=2 else 1
+            beta = cov/var_n if var_n>0 else 1.0
+            if np.isnan(corr_20): corr_20=0
+            if np.isnan(corr_50): corr_50=0
+            if np.isnan(beta): beta=1.0
+            return {"correlation_20":round(corr_20,3), "correlation_50":round(corr_50,3), "beta":round(beta,3)}
+    def analyze(self, index_name, action):
+        corr_data = self.calculate()
+        corr_20 = corr_data["correlation_20"]
+        beta_adjustment = 1.0
+        block_reason = None
+        if corr_20 < 0.1:
+            block_reason = f"Very low correlation {corr_20:.2f}"
+            beta_adjustment = 0.5
+        elif corr_20 < 0.2:
+            logger.debug(f"Low correlation {corr_20:.2f} - reducing size")
+            beta_adjustment = 0.8
+        if corr_20 < -0.2:
+            block_reason = f"Negative correlation {corr_20:.2f}"
+            beta_adjustment = 0.5
+        if corr_data["beta"] > 1.5: beta_adjustment *= 0.8
+        elif corr_data["beta"] < 0.5: beta_adjustment *= 1.2
+        return {"beta_adjustment": beta_adjustment, "block_reason": block_reason}
+correlation_filter = CorrelationFilter()
+
+# ----------------------------------------------------------------------
+# VOLUME PROFILE & VWAP ENGINE (spot only)
+# ----------------------------------------------------------------------
+class VolumeProfileEngine:
+    def __init__(self, index_name):
+        self.index_name = index_name
+        self.price_volume = deque(maxlen=1000)
+    def update(self, price, volume):
+        if price>0 and volume>0: self.price_volume.append((price, volume))
+    def calculate_vwap(self):
+        if not self.price_volume: return 0.0
+        total_pv = sum(p*v for p,v in self.price_volume)
+        total_v = sum(v for p,v in self.price_volume)
+        return total_pv/total_v if total_v>0 else 0.0
+    def calculate_volume_profile(self, num_bins=20):
+        if len(self.price_volume)<50: return {"poc":0, "vah":0, "val":0}
+        prices = [p for p,v in self.price_volume]
+        volumes = [v for p,v in self.price_volume]
+        min_p, max_p = min(prices), max(prices)
+        if max_p==min_p: return {"poc":min_p, "vah":max_p, "val":min_p}
+        bin_size = (max_p-min_p)/num_bins
+        bins = defaultdict(float)
+        for p,v in self.price_volume:
+            bin_idx = int((p-min_p)/bin_size) if bin_size>0 else 0
+            bins[min_p + bin_idx*bin_size] += v
+        poc = max(bins.items(), key=lambda x: x[1])[0]
+        total_vol = sum(bins.values())
+        target_vol = total_vol*0.7
+        sorted_bins = sorted(bins.items())
+        vah = poc
+        val = poc
+        current_vol = bins[poc]
+        idx = [i for i,(p,_) in enumerate(sorted_bins) if p==poc][0]
+        above, below = idx+1, idx-1
+        while current_vol < target_vol and (above < len(sorted_bins) or below >=0):
+            above_vol = sorted_bins[above][1] if above<len(sorted_bins) else 0
+            below_vol = sorted_bins[below][1] if below>=0 else 0
+            if above_vol >= below_vol and above<len(sorted_bins):
+                current_vol += above_vol
+                vah = sorted_bins[above][0]
+                above +=1
+            elif below>=0:
+                current_vol += below_vol
+                val = sorted_bins[below][0]
+                below -=1
+            else: break
+        return {"poc":poc, "vah":vah, "val":val}
+    def analyze(self, current_price, current_volume):
+        vwap = self.calculate_vwap()
+        profile = self.calculate_volume_profile()
+        signal = "neutral"
+        strength = 0
+        if current_price > vwap*1.002: signal, strength = "above_vwap", 10
+        elif current_price < vwap*0.998: signal, strength = "below_vwap", -10
+        if profile["vah"]>0 and current_price > profile["vah"]: signal, strength = "above_value_area", 15
+        elif profile["val"]>0 and current_price < profile["val"]: signal, strength = "below_value_area", -15
+        return {"signal":signal, "strength":strength, "vwap":vwap, "poc":profile["poc"], "vah":profile["vah"], "val":profile["val"]}
+volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
 # AUTHENTICATION & TOKEN MANAGEMENT
@@ -354,6 +702,7 @@ def get_index_spot(index_name):
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
         ltp = safe_ltp(resp)
         if ltp and ltp>0:
+            # Only divide by 100 for **equity cash** (not indices)
             if ltp > 100000 and config.get("instrumenttype") != "INDEX":
                 ltp /= 100
             return ltp
@@ -362,13 +711,16 @@ def get_index_spot(index_name):
     return None
 
 def get_vix_value():
+    # VIX is not used; keep placeholder
     return 15.0
 
 _scrip_cache = {"data": None, "timestamp": 0}
 _scrip_lock = threading.Lock()
 
 def parse_expiry_date(expiry_str):
-    if not expiry_str: return None
+    """Try multiple formats."""
+    if not expiry_str:
+        return None
     formats = ["%d%b%Y", "%d%b%y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d", "%d/%m/%Y"]
     for fmt in formats:
         try:
@@ -402,12 +754,11 @@ def get_scrip_master():
             logger.error(f"Scrip master failed: {e}")
             return _scrip_cache["data"] or []
 
-IST = pytz.timezone("Asia/Kolkata")
-
 def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config: return None
-    today = datetime.now(IST)
+    # Return naive datetime (no timezone) for consistent comparisons
+    today = datetime.now(IST).replace(tzinfo=None)
     weekday = today.weekday()
     expiry_weekday = config["expiry_weekday"]
     days_ahead = expiry_weekday - weekday
@@ -430,11 +781,14 @@ def get_current_atm_tokens(index_name):
             df = pd.DataFrame(scrip)
             opts = df[(df["name"]==config["symbol"]) & (df["instrumenttype"]=="OPTIDX") & (df["exch_seg"]==config["option_exchange"])]
             if not opts.empty:
+                opts = opts.copy()  # <-- FIX 1: avoid SettingWithCopyWarning
                 opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
                 opts = opts.dropna(subset=["expiry_date"])
                 opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce")/100
                 opts = opts.dropna(subset=["strike"])
-                future = opts[opts["expiry_date"] >= datetime.now(IST)]
+                # FIX 2: compare naive datetime with naive datetime (remove timezone)
+                now_naive = datetime.now(IST).replace(tzinfo=None)
+                future = opts[opts["expiry_date"] >= now_naive]
                 if not future.empty:
                     nearest = future["expiry_date"].min()
                     atm_opts = future[(future["strike"]==atm) & (future["expiry_date"]==nearest)]
@@ -475,7 +829,7 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# SENTIMENT & SIGNAL GRADES
+# SENTIMENT MAPPING (grades preserved)
 # ----------------------------------------------------------------------
 SENTIMENT_SCORES = {
     "STRONG_BULLISH": (85, 100, "STRONG BULLISH", "STRONG_BUY_CE"),
@@ -500,6 +854,7 @@ def get_sentiment_label(sentiment):
     return "UNKNOWN"
 
 def compute_sentiment(index_name):
+    """Simpler trend detection using EMA + RSI + MACD, no ADX."""
     sentiment_scores = []
     min_bars_per_tf = {"1min":30, "2min":20, "3min":20, "5min":15,
                        "10min":10, "15min":10, "20min":8, "30min":5}
@@ -511,13 +866,21 @@ def compute_sentiment(index_name):
         closes = [c["close"] for c in candles]
         if len(closes) < 60:
             continue
+
+        # EMA trend
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
         ema50 = calculate_ema(closes, 50) if len(closes)>=50 else ema21
         price = closes[-1]
+
+        # RSI
         rsi = calculate_rsi(closes)
+        # MACD
         macd, _, _ = calculate_macd(closes)
+
+        # Score based on combination
         score = 0
+        # EMA alignment
         if ema9 > ema21 > ema50 and price > ema9:
             score += TIMEFRAME_WEIGHTS[tf]
         elif ema9 < ema21 < ema50 and price < ema9:
@@ -526,11 +889,21 @@ def compute_sentiment(index_name):
             score += TIMEFRAME_WEIGHTS[tf] - 5
         elif ema9 < ema21 and price < ema9:
             score -= TIMEFRAME_WEIGHTS[tf] - 5
-        if rsi > 60: score += 5
-        elif rsi < 40: score -= 5
-        if macd > 0: score += 5
-        elif macd < 0: score -= 5
+
+        # RSI boost
+        if rsi > 60:
+            score += 5
+        elif rsi < 40:
+            score -= 5
+
+        # MACD boost
+        if macd > 0:
+            score += 5
+        elif macd < 0:
+            score -= 5
+
         sentiment_scores.append(score)
+
     if not sentiment_scores:
         return 50
     total = sum(sentiment_scores)
@@ -538,11 +911,13 @@ def compute_sentiment(index_name):
     return max(0, min(100, sentiment))
 
 # ----------------------------------------------------------------------
-# EXIT LOGIC
+# EXIT LOGIC (VIX removed)
 # ----------------------------------------------------------------------
 def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem):
-    if len(prices_spot) < 60: return False, ""
+    if len(prices_spot) < 60:
+        return False, ""
     exit_reason = ""
+    # Check 5min trend using candles (EMA cross)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
     if len(candles) >= 10:
@@ -553,7 +928,9 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
             exit_reason = "5min trend turned bearish"
         elif "PE" in action and ema9 > ema21:
             exit_reason = "5min trend turned bullish"
-    if exit_reason: return True, exit_reason
+    if exit_reason:
+        return True, exit_reason
+    # RSI divergence using 1min closes
     with _candle_histories_lock:
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
     if len(closes) >= 20:
@@ -565,10 +942,11 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
+    # VIX spike removed
     return False, ""
 
 # ----------------------------------------------------------------------
-# MAIN SIGNAL ENGINE
+# MAIN SIGNAL ENGINE (with trend‑change cooldown)
 # ----------------------------------------------------------------------
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_trades": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_CONFIG}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "confidence": 0, "highest": 0, "entry_time": 0, "prev_action_side": None, "trend_change_cooldown": 0, "exit_reason": ""} for idx in INDEX_CONFIG}
@@ -579,7 +957,10 @@ signal_buffer = {idx: {"ce_count": 0, "pe_count": 0, "consecutive_ce": 0, "conse
 daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
 last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 
+# Load persisted state
 load_persisted_state()
+
+IST = pytz.timezone("Asia/Kolkata")
 
 def is_expiry_day(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -593,6 +974,7 @@ def is_expiry_day(index_name):
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"): return
 
+    # Check if we have enough candles (1min)
     with _candle_histories_lock:
         if len(candle_histories[index_name]["1min"]) < 30:
             with _market_signal_lock:
@@ -610,13 +992,13 @@ def run_signal_engine_for_index(index_name):
         if ce_prem <= 0: ce_prem = last_known_prices[index_name].get("ce", 0)
         if pe_prem <= 0: pe_prem = last_known_prices[index_name].get("pe", 0)
 
-    # Volume profile
+    # Update volume profile
     vp_engine = volume_profile_engines[index_name]
     with _latest_ticks_lock:
         vp_engine.update(spot, latest_ticks[index_name]["ce_volume"])
         vp_analysis = vp_engine.analyze(spot, latest_ticks[index_name]["ce_volume"])
 
-    # Correlation
+    # Correlation update
     if index_name == "NIFTY":
         nifty_price_series.append(spot)
     elif index_name == "BANKNIFTY":
@@ -624,18 +1006,22 @@ def run_signal_engine_for_index(index_name):
     if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
         correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
-    # Greeks – placeholder
+    # Fetch Greeks
     greeks_data = None
+    if INDEX_CONFIG[index_name].get("greeks_enabled"):
+        greeks_data = get_option_greeks(index_name)
 
-    # Sentiment
+    # Compute sentiment
     sentiment = compute_sentiment(index_name)
     action = get_signal_from_sentiment(sentiment)
     sentiment_label = get_sentiment_label(sentiment)
 
-    # Trend change cooldown
+    # --- TREND CHANGE COOLDOWN (prevents flip‑flopping) ---
     new_side = None
-    if "CE" in action: new_side = "CE"
-    elif "PE" in action: new_side = "PE"
+    if "CE" in action:
+        new_side = "CE"
+    elif "PE" in action:
+        new_side = "PE"
     if new_side is not None:
         prev_side = signal_state[index_name].get("prev_action_side")
         if prev_side is not None and prev_side != new_side:
@@ -648,6 +1034,7 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["trend_change_cooldown_remaining"] = remaining
                 return
             else:
+                # set new cooldown for future flips
                 signal_state[index_name]["trend_change_cooldown"] = now + 60
         signal_state[index_name]["prev_action_side"] = new_side
 
@@ -706,9 +1093,10 @@ def run_signal_engine_for_index(index_name):
         if prem > 0:
             with _signal_state_lock:
                 pnl = prem - signal_state[index_name]["entry_price"]
+                # Update live PnL
                 with _portfolio_state_lock:
                     portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                # Trailing stop
+                # Trailing stop (use actual highs/lows from candles)
                 with _candle_histories_lock:
                     candles = list(candle_histories[index_name]["1min"])
                 if len(candles) >= 14:
@@ -731,11 +1119,13 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"],1)
-                    # Kelly update (dummy)
+                    kelly_trackers[index_name].update(pnl_pct)
+                    performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
                         safety_state[index_name]["consecutive_sl"] += 1
                         if safety_state[index_name]["consecutive_sl"] >= 3:
                             safety_state[index_name]["circuit_breaker"] = True
+                            safety_state[index_name]["circuit_breaker_until"] = now + 1800
                             circuit_triggered = True
                     if circuit_triggered:
                         logger.warning(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
@@ -752,6 +1142,9 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
+                    pnl_pct = pnl / max(signal_state[index_name]["entry_price"],1)
+                    kelly_trackers[index_name].update(pnl_pct)
+                    performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
                         safety_state[index_name]["consecutive_sl"] = 0
                     with _trade_count_lock:
@@ -768,6 +1161,8 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
+                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"],1))
+                    performance_trackers[index_name].add_trade(pnl_total)
                     with _trade_count_lock:
                         daily_trade_count[index_name] += 1
                     reset_signal_state(index_name, now, "TIME_EXIT")
@@ -784,6 +1179,8 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
+                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"],1))
+                    performance_trackers[index_name].add_trade(pnl_total)
                     with _trade_count_lock:
                         daily_trade_count[index_name] += 1
                     reset_signal_state(index_name, now, exit_reason)
@@ -796,6 +1193,7 @@ def run_signal_engine_for_index(index_name):
                     "stop_loss": signal_state[index_name]["stop_loss"],
                     "target": signal_state[index_name]["target"],
                     "current_pnl": round(pnl,2),
+                    "highest_pnl": round(signal_state[index_name]["highest"] - signal_state[index_name]["entry_price"],2) if signal_state[index_name]["highest"]>0 else 0
                 })
         else:
             reset_signal_state(index_name, now, "PREMIUM_ZERO")
@@ -812,6 +1210,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "COOLDOWN"
             return
 
+    # Daily reset
     today = datetime.now(IST).strftime("%Y-%m-%d")
     with _trade_count_lock:
         if last_trade_date[index_name] != today:
@@ -869,26 +1268,85 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "BUILDING"
                 return
 
-    # Greeks filter (placeholder, always passes)
+    # Greeks filter
+    if INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data:
+        delta = greeks_data["ce_delta"] if side=="CE" else greeks_data["pe_delta"]
+        if abs(delta) > 0.6:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"Greeks block: Delta {delta:.2f} > 0.6"
+                market_signal[index_name]["signal"] = "BLOCKED"
+            return
+        iv_rank = greeks_data.get("iv_rank", 50)
+        if iv_rank > 80 and "LOW" not in action:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"High IV rank {iv_rank:.0f} – avoid buying"
+                market_signal[index_name]["signal"] = "BLOCKED"
+            return
+
     # Correlation filter
     pair = INDEX_CONFIG[index_name].get("correlation_pair")
-    beta_adj = 1.0
     if pair:
-        # simplified
-        pass
+        corr_analysis = correlation_filter.analyze(index_name, action)
+        if corr_analysis.get("block_reason"):
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"Correlation block: {corr_analysis['block_reason']}"
+                market_signal[index_name]["signal"] = "BLOCKED"
+            return
+        beta_adj = corr_analysis.get("beta_adjustment", 1.0)
+    else:
+        beta_adj = 1.0
 
-    # ML filter (dummy)
-    ml_prob = 0.5
+    # ML filter
+    with _price_histories_lock:
+        prices_spot = list(price_histories[index_name])
+    rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot)>=50 else 50
+    with _candle_histories_lock:
+        candles_5min = list(candle_histories[index_name]["5min"])
+    if len(candles_5min) >= 30:
+        closes_5min = [c["close"] for c in candles_5min]
+        # approximate trend strength using EMA slope (instead of ADX)
+        if len(closes_5min) >= 10:
+            ema9 = calculate_ema(closes_5min, 9)
+            ema21 = calculate_ema(closes_5min, 21)
+            ema_slope = ema9 - ema21
+            trend_strength = abs(ema_slope) / (closes_5min[-1] + 1e-10) * 100
+        else:
+            trend_strength = 0
+    else:
+        trend_strength = 0
+    # VIX removed – use constant
+    vix = 15.0
+    ml_prob = ml_filter.predict([prem, spot, rsi, trend_strength, vix, sentiment])
+    if ml_prob < 0.4 and "STRONG" not in action:
+        with _market_signal_lock:
+            market_signal[index_name]["alert_message"] = f"ML filter: probability {ml_prob:.2f} < 0.4"
+            market_signal[index_name]["signal"] = "BLOCKED"
+        return
 
-    # Position sizing
-    kelly_risk = 0.01
-    if "STRONG" in action: base_risk_pct = 2.0
-    elif "LOW" in action: base_risk_pct = 0.8
-    else: base_risk_pct = 1.2
+    # Kelly position sizing (VIX adjustments removed)
+    kelly_risk, win_rate, avg_win, avg_loss = kelly_trackers[index_name].get_recommended_risk_pct()
+    if "STRONG" in action:
+        base_risk_pct = 2.0
+    elif "LOW" in action:
+        base_risk_pct = 0.8
+    else:
+        base_risk_pct = 1.2
     risk_pct = base_risk_pct * 0.5 + kelly_risk * 0.5
+    # No VIX adjustment
+    # Trend strength adjustment (instead of ADX)
+    if trend_strength > 1.5:
+        risk_pct *= 1.2
+    elif trend_strength < 0.5:
+        risk_pct *= 0.8
+    risk_pct *= beta_adj
+    if greeks_data:
+        iv_rank = greeks_data.get("iv_rank", 50)
+        if iv_rank > 80: risk_pct *= 0.8
+        elif iv_rank < 20: risk_pct *= 1.1
+    if is_expiry_day(index_name): risk_pct *= 0.5
     risk_pct = max(0.5, min(3.0, risk_pct))
 
-    # ATR
+    # Compute ATR from 1min candles using actual highs/lows
     with _candle_histories_lock:
         candles_1min = list(candle_histories[index_name]["1min"])
     if len(candles_1min) >= 14:
@@ -941,12 +1399,14 @@ def run_signal_engine_for_index(index_name):
         daily_trade_count[index_name] += 1
     save_portfolio_state(index_name)
 
+    # Log alert (no telegram)
     emoji = "B" if "STRONG" in action and "CE" in action else "S" if "STRONG" in action and "PE" in action else "W" if "LOW" in action else "N"
     vwap = vp_analysis["vwap"]
-    regime = "TRENDING" if "STRONG" in action else "RANGING"
+    regime = "TRENDING" if trend_strength > 1 else "RANGING"
+    iv_str = f"IV-R:{greeks_data.get('iv_rank',0):.0f}" if greeks_data else ""
     msg = (f"{emoji} {action} {index_name} | Spot:{spot:.0f} Prem:{prem:.2f} SL:{sl:.2f} Tgt:{target:.2f} | "
            f"Sentiment:{sentiment:.0f} ({sentiment_label}) | Lots:{lots} Risk:{risk_pct:.1f}% | "
-           f"VWAP:{vwap:.0f} | {regime}")
+           f"VWAP:{vwap:.0f} | {regime} | {iv_str}")
     logger.info(msg)
 
     with _market_signal_lock:
@@ -981,7 +1441,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET CALLBACKS
+# WEBSOCKET (subscribes to spot + option tokens)
 # ----------------------------------------------------------------------
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat
@@ -999,7 +1459,7 @@ def on_ws_open(wsapp):
         if not INDEX_CONFIG[idx].get("active"): continue
         if tokens.get("ce_token") and tokens.get("pe_token"):
             token_list.append({"exchangeType": INDEX_CONFIG[idx]["option_ws_exchange_type"], "tokens": [tokens["ce_token"], tokens["pe_token"]]})
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
+    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX placeholder
     if token_list and sws:
         try:
             sws.subscribe("admin", 3, token_list)
@@ -1099,18 +1559,14 @@ def on_ws_data(wsapp, message):
     except Exception as e:
         logger.error(f"WS data error: {e}")
 
-# ----------------------------------------------------------------------
-# WEBSOCKET ENGINE (MAIN THREAD, STARTED IMMEDIATELY)
-# ----------------------------------------------------------------------
-def start_websocket_engine():
+def start_angel_websocket():
     global sws, ws_running
-    logger.info("WebSocket engine thread started")
     while True:
         try:
             if not is_market_open():
                 time.sleep(5)
                 continue
-            auth_token, feed_token, obj = get_auth_token()
+            auth_token, feed_token, _ = get_auth_token()
             if not feed_token:
                 time.sleep(10)
                 continue
@@ -1119,17 +1575,20 @@ def start_websocket_engine():
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
-            logger.info("Connecting WebSocket...")
             sws.connect()
             ws_running = False
-            logger.warning("WebSocket connection closed, will reconnect in 5s...")
             time.sleep(5)
         except Exception as e:
-            logger.error(f"WebSocket thread error: {e}", exc_info=True)
+            logger.error(f"WS thread error: {e}")
             time.sleep(10)
 
+def is_market_open():
+    now_ist = datetime.now(IST)
+    current = now_ist.time()
+    return now_ist.weekday() < 5 and dt_time(9,10) <= current <= dt_time(15,35)
+
 # ----------------------------------------------------------------------
-# REST API POLLER
+# REST API POLLER (fallback only)
 # ----------------------------------------------------------------------
 def start_rest_api_poller():
     global last_heartbeat
@@ -1183,114 +1642,22 @@ def start_rest_api_poller():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# VOLUME PROFILE (PLACEHOLDER)
+# BACKGROUND THREADS (started once in main)
 # ----------------------------------------------------------------------
-class VolumeProfileEngine:
-    def __init__(self, index_name):
-        self.index_name = index_name
-        self.price_volume = deque(maxlen=1000)
-    def update(self, price, volume):
-        if price>0 and volume>0: self.price_volume.append((price, volume))
-    def calculate_vwap(self):
-        if not self.price_volume: return 0.0
-        total_pv = sum(p*v for p,v in self.price_volume)
-        total_v = sum(v for p,v in self.price_volume)
-        return total_pv/total_v if total_v>0 else 0.0
-    def calculate_volume_profile(self, num_bins=20):
-        if len(self.price_volume)<50: return {"poc":0, "vah":0, "val":0}
-        prices = [p for p,v in self.price_volume]
-        volumes = [v for p,v in self.price_volume]
-        min_p, max_p = min(prices), max(prices)
-        if max_p==min_p: return {"poc":min_p, "vah":max_p, "val":min_p}
-        bin_size = (max_p-min_p)/num_bins
-        bins = defaultdict(float)
-        for p,v in self.price_volume:
-            bin_idx = int((p-min_p)/bin_size) if bin_size>0 else 0
-            bins[min_p + bin_idx*bin_size] += v
-        poc = max(bins.items(), key=lambda x: x[1])[0]
-        total_vol = sum(bins.values())
-        target_vol = total_vol*0.7
-        sorted_bins = sorted(bins.items())
-        vah = poc
-        val = poc
-        current_vol = bins[poc]
-        idx = [i for i,(p,_) in enumerate(sorted_bins) if p==poc][0]
-        above, below = idx+1, idx-1
-        while current_vol < target_vol and (above < len(sorted_bins) or below >=0):
-            above_vol = sorted_bins[above][1] if above<len(sorted_bins) else 0
-            below_vol = sorted_bins[below][1] if below>=0 else 0
-            if above_vol >= below_vol and above<len(sorted_bins):
-                current_vol += above_vol
-                vah = sorted_bins[above][0]
-                above +=1
-            elif below>=0:
-                current_vol += below_vol
-                val = sorted_bins[below][0]
-                below -=1
-            else: break
-        return {"poc":poc, "vah":vah, "val":val}
-    def analyze(self, current_price, current_volume):
-        vwap = self.calculate_vwap()
-        profile = self.calculate_volume_profile()
-        signal = "neutral"
-        strength = 0
-        if current_price > vwap*1.002: signal, strength = "above_vwap", 10
-        elif current_price < vwap*0.998: signal, strength = "below_vwap", -10
-        if profile["vah"]>0 and current_price > profile["vah"]: signal, strength = "above_value_area", 15
-        elif profile["val"]>0 and current_price < profile["val"]: signal, strength = "below_value_area", -15
-        return {"signal":signal, "strength":strength, "vwap":vwap, "poc":profile["poc"], "vah":profile["vah"], "val":profile["val"]}
-volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
+_init_completed = False
+_init_lock = threading.Lock()
+
+def _start_background_threads():
+    global _init_completed
+    with _init_lock:
+        if not _init_completed:
+            threading.Thread(target=start_angel_websocket, daemon=True).start()
+            threading.Thread(target=start_rest_api_poller, daemon=True).start()
+            _init_completed = True
+            logger.info("Background threads started")
 
 # ----------------------------------------------------------------------
-# CORRELATION FILTER (PLACEHOLDER)
-# ----------------------------------------------------------------------
-class CorrelationFilter:
-    def __init__(self):
-        self.nifty_returns = deque(maxlen=50)
-        self.banknifty_returns = deque(maxlen=50)
-        self._lock = threading.Lock()
-    def update(self, nifty_price, banknifty_price):
-        with self._lock:
-            if nifty_price>0 and banknifty_price>0:
-                self.nifty_returns.append(nifty_price)
-                self.banknifty_returns.append(banknifty_price)
-    def calculate(self):
-        with self._lock:
-            if len(self.nifty_returns)<20: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
-            n_arr = np.array(list(self.nifty_returns))
-            b_arr = np.array(list(self.banknifty_returns))
-            n_ret = np.diff(n_arr)/n_arr[:-1]
-            b_ret = np.diff(b_arr)/b_arr[:-1]
-            if len(n_ret)<10: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
-            corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0,1] if len(n_ret)>=20 else 0
-            corr_50 = np.corrcoef(n_ret, b_ret)[0,1] if len(n_ret)>=20 else 0
-            cov = np.cov(n_ret, b_ret)[0,1] if len(n_ret)>=2 else 0
-            var_n = np.var(n_ret) if len(n_ret)>=2 else 1
-            beta = cov/var_n if var_n>0 else 1.0
-            if np.isnan(corr_20): corr_20=0
-            if np.isnan(corr_50): corr_50=0
-            if np.isnan(beta): beta=1.0
-            return {"correlation_20":round(corr_20,3), "correlation_50":round(corr_50,3), "beta":round(beta,3)}
-correlation_filter = CorrelationFilter()
-
-# ----------------------------------------------------------------------
-# MARKET OPEN CHECK
-# ----------------------------------------------------------------------
-def is_market_open():
-    now_ist = datetime.now(IST)
-    current = now_ist.time()
-    return now_ist.weekday() < 5 and dt_time(9,10) <= current <= dt_time(15,35)
-
-# ----------------------------------------------------------------------
-# FORCE BACKGROUND THREADS TO START AT MODULE LOAD
-# ----------------------------------------------------------------------
-logger.info("=== FORCING BACKGROUND THREADS START ===")
-threading.Thread(target=start_websocket_engine, daemon=True).start()
-threading.Thread(target=start_rest_api_poller, daemon=True).start()
-logger.info("Background threads started (WebSocket + REST poller)")
-
-# ----------------------------------------------------------------------
-# FLASK ROUTES (no before_request for thread startup)
+# FLASK ROUTES (health endpoint exempt from API key)
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -1305,7 +1672,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.13 (Forced WebSocket)",
+        "engine": "Multi-Index Options Bot v12.11 (No ADX, Trend Cooldown, VIX removed)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1325,7 +1692,7 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {"ws_running": ws_running, "ticks": tick_counter},
-            "version": "12.13"
+            "version": "12.11"
         })
 
 @app.route("/api/health", methods=["GET"])
@@ -1338,8 +1705,11 @@ def health():
     })
 
 # ----------------------------------------------------------------------
-# MAIN ENTRY POINT (only for local run)
+# MAIN ENTRY POINT
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    _start_background_threads()
+    if not API_KEY:
+        logger.warning("No API_KEY set – endpoint is unprotected. Set env API_KEY to enable simple auth.")
     app.run(host="0.0.0.0", port=port, debug=False)
