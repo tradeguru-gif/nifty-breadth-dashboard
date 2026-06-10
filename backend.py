@@ -1,4 +1,4 @@
-# === VERSION 12.11 + V12.3 WEBSOCKET MERGE – FULLY WORKING ===
+# === VERSION 12.11 + V12.3 WEBSOCKET MERGE – FULLY WORKING (GUNICORN FIX) ===
 import sys
 import logging
 import os
@@ -1639,6 +1639,10 @@ def _start_background_threads():
             _init_completed = True
             logger.info("Background threads started")
 
+# -------------------- CRITICAL FIX: Ensure threads start under Gunicorn --------------------
+app.before_request(_start_background_threads)
+# ------------------------------------------------------------------------------------------
+
 # ----------------------------------------------------------------------
 # FLASK ROUTES (health endpoint exempt from API key)
 # ----------------------------------------------------------------------
@@ -1655,7 +1659,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.11 (No ADX, Trend Cooldown, VIX removed) + Fixed WebSocket",
+        "engine": "Multi-Index Options Bot v12.11 (No ADX, Trend Cooldown, VIX removed) + Fixed WebSocket + Gunicorn Fix",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1675,7 +1679,7 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {"ws_running": ws_running, "ticks": tick_counter},
-            "version": "12.11_fixed"
+            "version": "12.11_fixed_gunicorn"
         })
 
 @app.route("/api/health", methods=["GET"])
@@ -1688,7 +1692,7 @@ def health():
     })
 
 # ----------------------------------------------------------------------
-# MAIN ENTRY POINT
+# MAIN ENTRY POINT (not used under Gunicorn, but kept for local testing)
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
