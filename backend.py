@@ -8,7 +8,7 @@ import json
 import requests
 import pandas as pd
 import numpy as np
-import sqlite
+import sqlite3
 import math
 import socket
 import pickle
@@ -41,19 +41,8 @@ application = app
 # ----------------------------------------------------------------------
 # ENVIRONMENT (Telegram removed)
 # ----------------------------------------------------------------------
-ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
-ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
-ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
-ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
-
-if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
-    raise ValueError("Missing critical Angel One environment variables")
-
-DB_PATH = "trading_data.db"
-
-# ----------------------------------------------------------------------
-# ENVIRONMENT (Telegram removed)
-# ----------------------------------------------------------------------
+from dotenv import load_dotenv
+load_dotenv()
 ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
 ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
 ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
@@ -125,7 +114,7 @@ INDEX_CONFIG = {
     }
 }
 
-# Pre‑compute set of index tokens for fast price normalization
+# Pre‑compute set of index tokens for fast price normalisation
 INDEX_TOKENS_SET = {cfg["token"] for cfg in INDEX_CONFIG.values()}
 
 # Global state with locks
@@ -268,78 +257,60 @@ def calculate_atr(highs, lows, closes, period=14):
 
 def calculate_adx(highs, lows, closes, period=14):
     """
-    Approximate ADX calculation.
-    For exact values matching TradingView, use TA-Lib or pandas_ta.
+    Standard Wilder's ADX.
+    Note: This is a simplified version that computes a single DX then smooths.
+    For exact values matching TradingView, use TA‑Lib or pandas_ta.
     """
-    if len(closes) < period * 2:
+    if len(closes) < period*2:
         return 20.0
-
     tr = []
     plus_dm = []
     minus_dm = []
-
     for i in range(1, len(closes)):
         if len(highs) > i and highs[i] > 0 and lows[i] > 0:
             hl = highs[i] - lows[i]
-            hc = abs(highs[i] - closes[i - 1])
-            lc = abs(lows[i] - closes[i - 1])
-
+            hc = abs(highs[i] - closes[i-1])
+            lc = abs(lows[i] - closes[i-1])
             tr.append(max(hl, hc, lc))
-
-            up = highs[i] - highs[i - 1]
-            down = lows[i - 1] - lows[i]
-
-            plus_dm.append(max(up, 0) if up > down else 0)
-            minus_dm.append(max(down, 0) if down > up else 0)
+            up = highs[i] - highs[i-1]
+            down = lows[i-1] - lows[i]
+            plus_dm.append(max(up, 0) if up>down else 0)
+            minus_dm.append(max(down, 0) if down>up else 0)
         else:
-            tr.append(abs(closes[i] - closes[i - 1]))
-            plus_dm.append(max(closes[i] - closes[i - 1], 0))
-            minus_dm.append(max(closes[i - 1] - closes[i], 0))
-
+            tr.append(abs(closes[i] - closes[i-1]))
+            plus_dm.append(max(closes[i] - closes[i-1], 0))
+            minus_dm.append(max(closes[i-1] - closes[i], 0))
     if len(tr) < period:
         return 20.0
-
     # Wilder smoothing
-    atr = sum(tr[:period]) / period
-    plus_di = sum(plus_dm[:period]) / period
-    minus_di = sum(minus_dm[:period]) / period
-
+    atr = sum(tr[:period])/period
+    plus_di = sum(plus_dm[:period])/period
+    minus_di = sum(minus_dm[:period])/period
     for i in range(period, len(tr)):
-        atr = (atr * (period - 1) + tr[i]) / period
-        plus_di = (plus_di * (period - 1) + plus_dm[i]) / period
-        minus_di = (minus_di * (period - 1) + minus_dm[i]) / period
-
-    if atr == 0:
-        return 20.0
-
+        atr = (atr*(period-1) + tr[i])/period
+        plus_di = (plus_di*(period-1) + plus_dm[i])/period
+        minus_di = (minus_di*(period-1) + minus_dm[i])/period
+    if atr == 0: return 20.0
     plus_di = 100 * plus_di / atr
     minus_di = 100 * minus_di / atr
-
-    dx = (
-        100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        if (plus_di + minus_di) > 0
-        else 0
-    )
-
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di+minus_di)>0 else 0
     # Smooth DX to ADX
     adx = dx
-
     for i in range(period, len(tr)):
-        adx = (adx * (period - 1) + dx) / period
-
+        adx = (adx*(period-1) + dx)/period
     return adx
 
 def calculate_bollinger(prices, period=20, std_dev=2):
-    if len(prices) < period: return None, None, None
-    sma = sum(prices[-period:]) / period
-    var = sum((p - sma) ** 2 for p in prices[-period:]) / period
+    if len(prices)<period: return None,None,None
+    sma = sum(prices[-period:])/period
+    var = sum((p-sma)**2 for p in prices[-period:])/period
     std = math.sqrt(var)
-    return sma + std_dev * std, sma, sma - std_dev * std
+    return sma+std_dev*std, sma, sma-std_dev*std
 
 def calculate_vwap(prices, volumes):
     if not prices or not volumes: return prices[-1] if prices else 0
     s_vol = sum(volumes)
-    return sum(p * v for p, v in zip(prices, volumes)) / s_vol if s_vol else prices[-1]
+    return sum(p*v for p,v in zip(prices, volumes))/s_vol if s_vol else prices[-1]
 
 # ----------------------------------------------------------------------
 # PERSISTENCE FUNCTIONS
@@ -416,30 +387,30 @@ def get_option_greeks(index_name):
                     atm_strike = tokens.get("atm_strike", 0)
                 ce_greeks = pe_greeks = None
                 for g in greeks_list:
-                    strike = float(g.get("strikePrice", 0))
-                    opt_type = g.get("optionType", "")
-                    if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50) * 0.5:
+                    strike = float(g.get("strikePrice",0))
+                    opt_type = g.get("optionType","")
+                    if abs(strike - atm_strike) < config.get("atm_strike_multiple",50)*0.5:
                         if opt_type == "CE": ce_greeks = g
                         elif opt_type == "PE": pe_greeks = g
                 if ce_greeks and pe_greeks:
-                    ce_iv = float(ce_greeks.get("impliedVolatility", 0)) / 100 if float(ce_greeks.get("impliedVolatility", 0)) > 1 else float(ce_greeks.get("impliedVolatility", 0))
-                    pe_iv = float(pe_greeks.get("impliedVolatility", 0)) / 100 if float(pe_greeks.get("impliedVolatility", 0)) > 1 else float(pe_greeks.get("impliedVolatility", 0))
+                    ce_iv = float(ce_greeks.get("impliedVolatility",0))/100 if float(ce_greeks.get("impliedVolatility",0))>1 else float(ce_greeks.get("impliedVolatility",0))
+                    pe_iv = float(pe_greeks.get("impliedVolatility",0))/100 if float(pe_greeks.get("impliedVolatility",0))>1 else float(pe_greeks.get("impliedVolatility",0))
                     # Compute IV rank from stored history
                     conn = sqlite3.connect(DB_PATH)
                     hist = conn.execute("SELECT ce_iv FROM greeks_history WHERE index_name=? ORDER BY timestamp DESC LIMIT 50", (index_name,)).fetchall()
                     conn.close()
-                    iv_list = [h[0] for h in hist if h[0] > 0] + [ce_iv]
+                    iv_list = [h[0] for h in hist if h[0]>0] + [ce_iv]
                     if len(iv_list) > 20:
-                        iv_rank = (ce_iv - min(iv_list)) / (max(iv_list) - min(iv_list)) * 100 if max(iv_list) != min(iv_list) else 50
+                        iv_rank = (ce_iv - min(iv_list)) / (max(iv_list)-min(iv_list)) * 100 if max(iv_list)!=min(iv_list) else 50
                         iv_percentile = sum(1 for iv in iv_list if iv < ce_iv) / len(iv_list) * 100
                     else:
                         iv_rank = iv_percentile = 50
                     greeks_data = {
                         "ce_iv": ce_iv, "pe_iv": pe_iv,
-                        "ce_delta": float(ce_greeks.get("delta", 0)), "pe_delta": float(pe_greeks.get("delta", 0)),
-                        "ce_gamma": float(ce_greeks.get("gamma", 0)), "pe_gamma": float(pe_greeks.get("gamma", 0)),
-                        "ce_theta": float(ce_greeks.get("theta", 0)), "pe_theta": float(pe_greeks.get("theta", 0)),
-                        "ce_vega": float(ce_greeks.get("vega", 0)), "pe_vega": float(pe_greeks.get("vega", 0)),
+                        "ce_delta": float(ce_greeks.get("delta",0)), "pe_delta": float(pe_greeks.get("delta",0)),
+                        "ce_gamma": float(ce_greeks.get("gamma",0)), "pe_gamma": float(pe_greeks.get("gamma",0)),
+                        "ce_theta": float(ce_greeks.get("theta",0)), "pe_theta": float(pe_greeks.get("theta",0)),
+                        "ce_vega": float(ce_greeks.get("vega",0)), "pe_vega": float(pe_greeks.get("vega",0)),
                         "iv_rank": iv_rank, "iv_percentile": iv_percentile
                     }
                     with sqlite3.connect(DB_PATH) as conn:
@@ -460,16 +431,16 @@ def _estimate_greeks_fallback(index_name):
         ce_price = latest_ticks[index_name]["ce_price"]
         pe_price = latest_ticks[index_name]["pe_price"]
         spot = latest_ticks[index_name]["spot_price"]
-    if ce_price > 0 and pe_price > 0 and spot > 0:
+    if ce_price>0 and pe_price>0 and spot>0:
         with _index_tokens_lock:
             strike = INDEX_TOKENS.get(index_name, {}).get("atm_strike", spot)
         time_to_expiry = 0.02
-        moneyness = (spot - strike) / spot
-        ce_delta = max(0.05, min(0.95, 0.5 + moneyness * 5))
-        pe_delta = max(-0.95, min(-0.05, -0.5 + (-moneyness) * 5))
-        return {"ce_iv": 0.2, "pe_iv": 0.2, "ce_delta": ce_delta, "pe_delta": pe_delta,
-                "ce_gamma": 0.02, "pe_gamma": 0.02, "ce_theta": -0.1, "pe_theta": -0.1,
-                "ce_vega": 0.15, "pe_vega": 0.15, "iv_rank": 50, "iv_percentile": 50}
+        moneyness = (spot - strike)/spot
+        ce_delta = max(0.05, min(0.95, 0.5 + moneyness*5))
+        pe_delta = max(-0.95, min(-0.05, -0.5 + (-moneyness)*5))
+        return {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":ce_delta, "pe_delta":pe_delta,
+                "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1,
+                "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50}
     return None
 
 # ----------------------------------------------------------------------
@@ -480,7 +451,6 @@ class MLSignalFilter:
         self.model = None
         self.features = []
         self.is_trained = False
-
     def load_model(self):
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -491,18 +461,14 @@ class MLSignalFilter:
                 self.features = json.loads(row[1])
                 self.is_trained = True
                 return True
-        except: 
-            pass
+        except: pass
         return False
-
     def predict(self, feature_vector):
         if not self.is_trained or self.model is None: return 0.5
         try:
             prob = self.model.predict_proba([feature_vector])[0][1]
             return prob
-        except: 
-            return 0.5
-
+        except: return 0.5
 ml_filter = MLSignalFilter()
 ml_filter.load_model()
 
@@ -521,7 +487,6 @@ class KellyCriterion:
         self.loss_count = 0
         self.avg_win = 0.0
         self.avg_loss = 0.0
-
     def update(self, trade_pnl_pct):
         self.trade_returns.append(trade_pnl_pct)
         if trade_pnl_pct > 0:
@@ -530,29 +495,26 @@ class KellyCriterion:
         else:
             self.loss_count += 1
             self.beta += 1
-        wins = [r for r in self.trade_returns if r > 0]
-        losses = [r for r in self.trade_returns if r <= 0]
-        if wins: self.avg_win = sum(wins) / len(wins)
-        if losses: self.avg_loss = abs(sum(losses) / len(losses))
-
+        wins = [r for r in self.trade_returns if r>0]
+        losses = [r for r in self.trade_returns if r<=0]
+        if wins: self.avg_win = sum(wins)/len(wins)
+        if losses: self.avg_loss = abs(sum(losses)/len(losses))
     def calculate(self):
         total = self.win_count + self.loss_count
         if total < self.min_trades: return 0.01, 0.5, self.avg_win, self.avg_loss
-        p = self.alpha / (self.alpha + self.beta)
-        q = 1 - p
+        p = self.alpha/(self.alpha+self.beta)
+        q = 1-p
         if self.avg_loss == 0: return 0.01, p, self.avg_win, self.avg_loss
-        b = self.avg_win / self.avg_loss if self.avg_loss > 0 else 1.0
+        b = self.avg_win/self.avg_loss if self.avg_loss>0 else 1.0
         if b == 0: return 0.01, p, self.avg_win, self.avg_loss
-        kelly_full = (p * b - q) / b
+        kelly_full = (p*b - q)/b
         kelly_full = max(0, min(kelly_full, 0.5))
         return kelly_full * self.kelly_fraction, p, self.avg_win, self.avg_loss
-
     def get_recommended_risk_pct(self):
         kelly, win_rate, avg_win, avg_loss = self.calculate()
-        risk_pct = min(kelly * 100, 2.0)
+        risk_pct = min(kelly*100, 2.0)
         risk_pct = max(0.3, risk_pct)
         return risk_pct, win_rate, avg_win, avg_loss
-
 kelly_trackers = {idx: KellyCriterion(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
@@ -567,75 +529,65 @@ class PerformanceTracker:
         self.trade_pnls = deque(maxlen=100)
         self.peak_equity = 0.0
         self.max_drawdown = 0.0
-
     def add_return(self, daily_return_pct, equity):
         self.returns.append(daily_return_pct)
         self.equity_curve.append(equity)
         if equity > self.peak_equity: self.peak_equity = equity
-        drawdown = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0
+        drawdown = (self.peak_equity - equity)/self.peak_equity if self.peak_equity>0 else 0
         self.max_drawdown = max(self.max_drawdown, drawdown)
-
     def add_trade(self, pnl):
         self.trade_pnls.append(pnl)
-
     def calculate_sharpe(self):
-        if len(self.returns) < 10: return 0.0
+        if len(self.returns)<10: return 0.0
         arr = np.array(list(self.returns))
         excess = arr - self.risk_free_rate
         std = np.std(excess, ddof=1)
-        if std == 0 or np.isnan(std): return 0.0
-        return np.mean(excess) / std * np.sqrt(252)
-
+        if std==0 or np.isnan(std): return 0.0
+        return np.mean(excess)/std * np.sqrt(252)
     def calculate_sortino(self):
-        if len(self.returns) < 10: return 0.0
+        if len(self.returns)<10: return 0.0
         arr = np.array(list(self.returns))
         excess = arr - self.risk_free_rate
-        downside = excess[excess < 0]
-        if len(downside) == 0: return float('inf') if np.mean(excess) > 0 else 0.0
+        downside = excess[excess<0]
+        if len(downside)==0: return float('inf') if np.mean(excess)>0 else 0.0
         downside_std = np.std(downside, ddof=1)
-        if downside_std == 0 or np.isnan(downside_std): return 0.0
-        return np.mean(excess) / downside_std * np.sqrt(252)
-
+        if downside_std==0 or np.isnan(downside_std): return 0.0
+        return np.mean(excess)/downside_std * np.sqrt(252)
     def calculate_calmar(self):
-        if len(self.returns) < 10 or self.max_drawdown == 0: return 0.0
-        annual_return = np.mean(list(self.returns)) * 252
-        return annual_return / self.max_drawdown
-
+        if len(self.returns)<10 or self.max_drawdown==0: return 0.0
+        annual_return = np.mean(list(self.returns))*252
+        return annual_return/self.max_drawdown
     def calculate_win_rate(self):
         if not self.trade_pnls: return 0.0
-        wins = sum(1 for p in self.trade_pnls if p > 0)
-        return wins / len(self.trade_pnls) * 100
-
+        wins = sum(1 for p in self.trade_pnls if p>0)
+        return wins/len(self.trade_pnls)*100
     def calculate_profit_factor(self):
         if not self.trade_pnls: return 0.0
-        gross_profit = sum(p for p in self.trade_pnls if p > 0)
-        gross_loss = abs(sum(p for p in self.trade_pnls if p < 0))
-        if gross_loss == 0: return float('inf') if gross_profit > 0 else 0.0
-        return gross_profit / gross_loss
-
+        gross_profit = sum(p for p in self.trade_pnls if p>0)
+        gross_loss = abs(sum(p for p in self.trade_pnls if p<0))
+        if gross_loss==0: return float('inf') if gross_profit>0 else 0.0
+        return gross_profit/gross_loss
     def calculate_expectancy(self):
         if not self.trade_pnls: return 0.0
-        win_rate = self.calculate_win_rate() / 100
-        wins = [p for p in self.trade_pnls if p > 0]
-        losses = [p for p in self.trade_pnls if p < 0]
-        avg_win = sum(wins) / len(wins) if wins else 0
-        avg_loss = abs(sum(losses) / len(losses)) if losses else 1
-        if avg_loss == 0: return 0.0
-        return (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-
+        win_rate = self.calculate_win_rate()/100
+        wins = [p for p in self.trade_pnls if p>0]
+        losses = [p for p in self.trade_pnls if p<0]
+        avg_win = sum(wins)/len(wins) if wins else 0
+        avg_loss = abs(sum(losses)/len(losses)) if losses else 1
+        if avg_loss==0: return 0.0
+        return (win_rate*avg_win) - ((1-win_rate)*avg_loss)
     def get_all_metrics(self):
         return {
-            "sharpe": round(self.calculate_sharpe(), 3),
-            "sortino": round(self.calculate_sortino(), 3),
-            "calmar": round(self.calculate_calmar(), 3),
-            "win_rate": round(self.calculate_win_rate(), 2),
-            "profit_factor": round(self.calculate_profit_factor(), 3),
-            "max_drawdown": round(self.max_drawdown * 100, 2),
-            "avg_trade": round(np.mean(list(self.trade_pnls)), 2) if self.trade_pnls else 0.0,
-            "expectancy": round(self.calculate_expectancy(), 3),
+            "sharpe": round(self.calculate_sharpe(),3),
+            "sortino": round(self.calculate_sortino(),3),
+            "calmar": round(self.calculate_calmar(),3),
+            "win_rate": round(self.calculate_win_rate(),2),
+            "profit_factor": round(self.calculate_profit_factor(),3),
+            "max_drawdown": round(self.max_drawdown*100,2),
+            "avg_trade": round(np.mean(list(self.trade_pnls)),2) if self.trade_pnls else 0.0,
+            "expectancy": round(self.calculate_expectancy(),3),
             "total_trades": len(self.trade_pnls)
         }
-
 performance_trackers = {idx: PerformanceTracker(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
@@ -647,31 +599,28 @@ class CorrelationFilter:
         self.banknifty_returns = deque(maxlen=50)
         self.divergence_threshold = 0.2
         self._lock = threading.Lock()
-
     def update(self, nifty_price, banknifty_price):
         with self._lock:
-            if nifty_price > 0 and banknifty_price > 0:
+            if nifty_price>0 and banknifty_price>0:
                 self.nifty_returns.append(nifty_price)
                 self.banknifty_returns.append(banknifty_price)
-
     def calculate(self):
         with self._lock:
-            if len(self.nifty_returns) < 20: return {"correlation_20": 0, "correlation_50": 0, "beta": 1.0}
+            if len(self.nifty_returns)<20: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
             n_arr = np.array(list(self.nifty_returns))
             b_arr = np.array(list(self.banknifty_returns))
-            n_ret = np.diff(n_arr) / n_arr[:-1]
-            b_ret = np.diff(b_arr) / b_arr[:-1]
-            if len(n_ret) < 10: return {"correlation_20": 0, "correlation_50": 0, "beta": 1.0}
-            corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0, 1] if len(n_ret) >= 20 else 0
-            corr_50 = np.corrcoef(n_ret, b_ret)[0, 1] if len(n_ret) >= 20 else 0
-            cov = np.cov(n_ret, b_ret)[0, 1] if len(n_ret) >= 2 else 0
-            var_n = np.var(n_ret) if len(n_ret) >= 2 else 1
-            beta = cov / var_n if var_n > 0 else 1.0
-            if np.isnan(corr_20): corr_20 = 0
-            if np.isnan(corr_50): corr_50 = 0
-            if np.isnan(beta): beta = 1.0
-            return {"correlation_20": round(corr_20, 3), "correlation_50": round(corr_50, 3), "beta": round(beta, 3)}
-
+            n_ret = np.diff(n_arr)/n_arr[:-1]
+            b_ret = np.diff(b_arr)/b_arr[:-1]
+            if len(n_ret)<10: return {"correlation_20":0, "correlation_50":0, "beta":1.0}
+            corr_20 = np.corrcoef(n_ret[-20:], b_ret[-20:])[0,1] if len(n_ret)>=20 else 0
+            corr_50 = np.corrcoef(n_ret, b_ret)[0,1] if len(n_ret)>=20 else 0
+            cov = np.cov(n_ret, b_ret)[0,1] if len(n_ret)>=2 else 0
+            var_n = np.var(n_ret) if len(n_ret)>=2 else 1
+            beta = cov/var_n if var_n>0 else 1.0
+            if np.isnan(corr_20): corr_20=0
+            if np.isnan(corr_50): corr_50=0
+            if np.isnan(beta): beta=1.0
+            return {"correlation_20":round(corr_20,3), "correlation_50":round(corr_50,3), "beta":round(beta,3)}
     def analyze(self, index_name, action):
         corr_data = self.calculate()
         corr_20 = corr_data["correlation_20"]
@@ -689,7 +638,6 @@ class CorrelationFilter:
         if corr_data["beta"] > 1.5: beta_adjustment *= 0.8
         elif corr_data["beta"] < 0.5: beta_adjustment *= 1.2
         return {"beta_adjustment": beta_adjustment, "block_reason": block_reason}
-
 correlation_filter = CorrelationFilter()
 
 # ----------------------------------------------------------------------
@@ -699,61 +647,56 @@ class VolumeProfileEngine:
     def __init__(self, index_name):
         self.index_name = index_name
         self.price_volume = deque(maxlen=1000)
-
     def update(self, price, volume):
-        if price > 0 and volume > 0: self.price_volume.append((price, volume))
-
+        if price>0 and volume>0: self.price_volume.append((price, volume))
     def calculate_vwap(self):
         if not self.price_volume: return 0.0
-        total_pv = sum(p * v for p, v in self.price_volume)
-        total_v = sum(v for p, v in self.price_volume)
-        return total_pv / total_v if total_v > 0 else 0.0
-
+        total_pv = sum(p*v for p,v in self.price_volume)
+        total_v = sum(v for p,v in self.price_volume)
+        return total_pv/total_v if total_v>0 else 0.0
     def calculate_volume_profile(self, num_bins=20):
-        if len(self.price_volume) < 50: return {"poc": 0, "vah": 0, "val": 0}
-        prices = [p for p, v in self.price_volume]
-        volumes = [v for p, v in self.price_volume]
+        if len(self.price_volume)<50: return {"poc":0, "vah":0, "val":0}
+        prices = [p for p,v in self.price_volume]
+        volumes = [v for p,v in self.price_volume]
         min_p, max_p = min(prices), max(prices)
-        if max_p == min_p: return {"poc": min_p, "vah": max_p, "val": min_p}
-        bin_size = (max_p - min_p) / num_bins
+        if max_p==min_p: return {"poc":min_p, "vah":max_p, "val":min_p}
+        bin_size = (max_p-min_p)/num_bins
         bins = defaultdict(float)
-        for p, v in self.price_volume:
-            bin_idx = int((p - min_p) / bin_size) if bin_size > 0 else 0
-            bins[min_p + bin_idx * bin_size] += v
+        for p,v in self.price_volume:
+            bin_idx = int((p-min_p)/bin_size) if bin_size>0 else 0
+            bins[min_p + bin_idx*bin_size] += v
         poc = max(bins.items(), key=lambda x: x[1])[0]
         total_vol = sum(bins.values())
-        target_vol = total_vol * 0.7
+        target_vol = total_vol*0.7
         sorted_bins = sorted(bins.items())
         vah = poc
         val = poc
         current_vol = bins[poc]
-        idx = [i for i, (p, _) in enumerate(sorted_bins) if p == poc][0]
-        above, below = idx + 1, idx - 1
-        while current_vol < target_vol and (above < len(sorted_bins) or below >= 0):
-            above_vol = sorted_bins[above][1] if above < len(sorted_bins) else 0
-            below_vol = sorted_bins[below][1] if below >= 0 else 0
-            if above_vol >= below_vol and above < len(sorted_bins):
+        idx = [i for i,(p,_) in enumerate(sorted_bins) if p==poc][0]
+        above, below = idx+1, idx-1
+        while current_vol < target_vol and (above < len(sorted_bins) or below >=0):
+            above_vol = sorted_bins[above][1] if above<len(sorted_bins) else 0
+            below_vol = sorted_bins[below][1] if below>=0 else 0
+            if above_vol >= below_vol and above<len(sorted_bins):
                 current_vol += above_vol
                 vah = sorted_bins[above][0]
-                above += 1
-            elif below >= 0:
+                above +=1
+            elif below>=0:
                 current_vol += below_vol
                 val = sorted_bins[below][0]
-                below -= 1
+                below -=1
             else: break
-        return {"poc": poc, "vah": vah, "val": val}
-
+        return {"poc":poc, "vah":vah, "val":val}
     def analyze(self, current_price, current_volume):
         vwap = self.calculate_vwap()
         profile = self.calculate_volume_profile()
         signal = "neutral"
         strength = 0
-        if current_price > vwap * 1.002: signal, strength = "above_vwap", 10
-        elif current_price < vwap * 0.998: signal, strength = "below_vwap", -10
-        if profile["vah"] > 0 and current_price > profile["vah"]: signal, strength = "above_value_area", 15
-        elif profile["val"] > 0 and current_price < profile["val"]: signal, strength = "below_value_area", -15
-        return {"signal": signal, "strength": strength, "vwap": vwap, "poc": profile["poc"], "vah": profile["vah"], "val": profile["val"]}
-
+        if current_price > vwap*1.002: signal, strength = "above_vwap", 10
+        elif current_price < vwap*0.998: signal, strength = "below_vwap", -10
+        if profile["vah"]>0 and current_price > profile["vah"]: signal, strength = "above_value_area", 15
+        elif profile["val"]>0 and current_price < profile["val"]: signal, strength = "below_value_area", -15
+        return {"signal":signal, "strength":strength, "vwap":vwap, "poc":profile["poc"], "vah":profile["vah"], "val":profile["val"]}
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
@@ -787,14 +730,14 @@ def safe_ltp(resp):
     if isinstance(data, dict):
         if "fetched" in data and data["fetched"]:
             fetched = data["fetched"]
-            if isinstance(fetched, list) and len(fetched) > 0:
-                return float(fetched[0].get("ltp", 0))
+            if isinstance(fetched, list) and len(fetched)>0:
+                return float(fetched[0].get("ltp",0))
             elif isinstance(fetched, dict):
-                return float(fetched.get("ltp", 0))
+                return float(fetched.get("ltp",0))
         elif "ltp" in data:
             return float(data["ltp"])
-    elif isinstance(data, list) and len(data) > 0:
-        return float(data[0].get("ltp", 0))
+    elif isinstance(data, list) and len(data)>0:
+        return float(data[0].get("ltp",0))
     return None
 
 def get_index_spot(index_name):
@@ -805,7 +748,7 @@ def get_index_spot(index_name):
     try:
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
         ltp = safe_ltp(resp)
-        if ltp and ltp > 0:
+        if ltp and ltp>0:
             # Only divide by 100 for **equity cash** (not indices)
             if ltp > 100000 and config.get("instrumenttype") != "INDEX":
                 ltp /= 100
@@ -834,7 +777,7 @@ def parse_expiry_date(expiry_str):
     match = re.search(r'(\d{2})([A-Za-z]{3})(\d{2,4})', expiry_str)
     if match:
         day, mon, year = match.groups()
-        if len(year) == 2: year = "20" + year
+        if len(year)==2: year = "20"+year
         try:
             return datetime.strptime(f"{day}{mon}{year}", "%d%b%Y")
         except:
@@ -871,9 +814,9 @@ def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"): return None, None
     spot = get_index_spot(index_name)
-    if not spot or spot <= 0: return None, None
+    if not spot or spot<=0: return None, None
     mult = config["atm_strike_multiple"]
-    atm = int(round(spot / mult) * mult)
+    atm = int(round(spot/mult)*mult)
     next_expiry = get_next_expiry_date(index_name)
     if not next_expiry: return None, None
     expiry = next_expiry.strftime("%d%b%Y").upper()
@@ -881,20 +824,20 @@ def get_current_atm_tokens(index_name):
     if scrip:
         try:
             df = pd.DataFrame(scrip)
-            opts = df[(df["name"] == config["symbol"]) & (df["instrumenttype"] == "OPTIDX") & (df["exch_seg"] == config["option_exchange"])]
+            opts = df[(df["name"]==config["symbol"]) & (df["instrumenttype"]=="OPTIDX") & (df["exch_seg"]==config["option_exchange"])]
             if not opts.empty:
                 opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
                 opts = opts.dropna(subset=["expiry_date"])
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
+                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce")/100
                 opts = opts.dropna(subset=["strike"])
                 future = opts[opts["expiry_date"] >= datetime.now(IST)]
                 if not future.empty:
                     nearest = future["expiry_date"].min()
-                    atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
+                    atm_opts = future[(future["strike"]==atm) & (future["expiry_date"]==nearest)]
                     if atm_opts.empty:
-                        same_exp = future[future["expiry_date"] == nearest]
+                        same_exp = future[future["expiry_date"]==nearest]
                         if not same_exp.empty:
-                            diff = (same_exp["strike"] - atm).abs()
+                            diff = (same_exp["strike"]-atm).abs()
                             atm_opts = same_exp.loc[[diff.idxmin()]]
                     if not atm_opts.empty:
                         ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
@@ -917,7 +860,6 @@ def get_current_atm_tokens(index_name):
     return None, None
 
 _last_token_refresh_time = 0
-
 def refresh_all_tokens():
     global _last_token_refresh_time
     now = time.time()
@@ -955,8 +897,8 @@ def get_sentiment_label(sentiment):
 
 def compute_sentiment(index_name):
     sentiment_scores = []
-    min_bars_per_tf = {"1min": 30, "2min": 20, "3min": 20, "5min": 15,
-                       "10min": 10, "15min": 10, "20min": 8, "30min": 5}
+    min_bars_per_tf = {"1min":30, "2min":20, "3min":20, "5min":15,
+                       "10min":10, "15min":10, "20min":8, "30min":5}
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
             candles = list(candle_histories[index_name][tf])
@@ -968,25 +910,25 @@ def compute_sentiment(index_name):
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
-        ema50 = calculate_ema(closes, 50) if len(closes) >= 50 else ema21
+        ema50 = calculate_ema(closes, 50) if len(closes)>=50 else ema21
         price = closes[-1]
         recent = closes[-30:]
-        price_range = (max(recent) - min(recent)) / sum(recent) * len(recent) if sum(recent) else 0
+        price_range = (max(recent)-min(recent))/sum(recent)*len(recent) if sum(recent) else 0
         if price_range < 0.005:
             score = 0
-        elif tf in ["1min", "2min", "3min"]:
+        elif tf in ["1min","2min","3min"]:
             if ema9 > ema21 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]
             elif ema9 < ema21 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]
             else: score = 0
-        elif tf in ["5min", "10min"]:
+        elif tf in ["5min","10min"]:
             if ema9 > ema21 > ema50 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]
             elif ema9 < ema21 < ema50 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]
-            elif ema9 > ema21 and price > ema9: score = TIMEFRAME_WEIGHTS[tf] - 5
-            elif ema9 < ema21 and price < ema9:             score = -TIMEFRAME_WEIGHTS[tf] + 5
+            elif ema9 > ema21 and price > ema9: score = TIMEFRAME_WEIGHTS[tf]-5
+            elif ema9 < ema21 and price < ema9: score = -TIMEFRAME_WEIGHTS[tf]+5
             else: score = 0
         else:
-            if ema9 > ema21 > ema50: score = TIMEFRAME_WEIGHTS[tf] - 5
-            elif ema9 < ema21 < ema50: score = -TIMEFRAME_WEIGHTS[tf] + 5
+            if ema9 > ema21 > ema50: score = TIMEFRAME_WEIGHTS[tf]-5
+            elif ema9 < ema21 < ema50: score = -TIMEFRAME_WEIGHTS[tf]+5
             else: score = 0
         sentiment_scores.append(score)
     if not sentiment_scores: return 50
@@ -1017,20 +959,20 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
     if len(closes) >= 20:
         price_trend = closes[-1] - closes[-10]
-        rsi_vals = [calculate_rsi(closes[:i]) for i in range(len(closes) - 10, len(closes) + 1)]
+        rsi_vals = [calculate_rsi(closes[:i]) for i in range(len(closes)-10, len(closes)+1)]
         if len(rsi_vals) >= 2:
             rsi_trend = rsi_vals[-1] - rsi_vals[-2]
             if "CE" in action and price_trend > 0 and rsi_trend < 0:
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-    # VIX spike
+        # VIX spike
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
         vix_hist = list(vix_history)
     if len(vix_hist) >= 10:
-        vix_sma = sum(vix_hist[-10:]) / 10
-        if vix > vix_sma * 1.25:
+        vix_sma = sum(vix_hist[-10:])/10
+        if vix > vix_sma*1.25:
             return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
     return False, ""
 
@@ -1114,14 +1056,14 @@ def run_signal_engine_for_index(index_name):
     peak = daily_drawdown[index_name]["peak_equity"]
     if current_equity > peak:
         daily_drawdown[index_name]["peak_equity"] = current_equity
-    drawdown = (peak - current_equity) / peak * 100 if peak > 0 else 0
+    drawdown = (peak - current_equity)/peak*100 if peak>0 else 0
     daily_drawdown[index_name]["current_drawdown"] = drawdown
-    if drawdown >= INDEX_CONFIG[index_name].get("max_daily_drawdown_pct", 3.0):
+    if drawdown >= INDEX_CONFIG[index_name].get("max_daily_drawdown_pct",3.0):
         with _signal_state_lock:
             if signal_state[index_name]["action"] != "HOLD":
                 active = signal_state[index_name]["action"]
                 prem = ce_prem if "CE" in active else pe_prem
-                if prem > 0:
+                if prem>0:
                     pnl = prem - signal_state[index_name]["entry_price"]
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_state_lock:
@@ -1171,7 +1113,7 @@ def run_signal_engine_for_index(index_name):
                     lows = [c["low"] for c in candles]
                     closes = [c["close"] for c in candles]
                     atr = calculate_atr(highs, lows, closes, 14)
-                    if prem > signal_state[index_name].get("highest", 0):
+                    if prem > signal_state[index_name].get("highest",0):
                         signal_state[index_name]["highest"] = prem
                         new_sl = prem - atr * 1.8
                         if new_sl > signal_state[index_name]["stop_loss"]:
@@ -1185,7 +1127,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
-                    pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
+                    pnl_pct = pnl / max(signal_state[index_name]["entry_price"],1)
                     kelly_trackers[index_name].update(pnl_pct)
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
@@ -1210,7 +1152,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
-                    pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
+                    pnl_pct = pnl / max(signal_state[index_name]["entry_price"],1)
                     kelly_trackers[index_name].update(pnl_pct)
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _safety_state_lock:
@@ -1221,7 +1163,7 @@ def run_signal_engine_for_index(index_name):
                     return
                 # Time exit (45 min)
                 entry_time = signal_state[index_name].get("entry_time", 0)
-                if entry_time > 0 and (now - entry_time) / 60 >= 45:
+                if entry_time > 0 and (now - entry_time)/60 >= 45:
                     pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                     with _portfolio_state_lock:
                         portfolio_state[index_name]["equity"] += pnl_total
@@ -1229,7 +1171,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
-                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
+                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"],1))
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _trade_count_lock:
                         daily_trade_count[index_name] += 1
@@ -1247,7 +1189,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["total_pnl"] += pnl_total
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
-                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
+                    kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"],1))
                     performance_trackers[index_name].add_trade(pnl_total)
                     with _trade_count_lock:
                         daily_trade_count[index_name] += 1
@@ -1260,8 +1202,8 @@ def run_signal_engine_for_index(index_name):
                     "entry_price": signal_state[index_name]["entry_price"],
                     "stop_loss": signal_state[index_name]["stop_loss"],
                     "target": signal_state[index_name]["target"],
-                    "current_pnl": round(pnl, 2),
-                    "highest_pnl": round(signal_state[index_name]["highest"] - signal_state[index_name]["entry_price"], 2) if signal_state[index_name]["highest"] > 0 else 0
+                    "current_pnl": round(pnl,2),
+                    "highest_pnl": round(signal_state[index_name]["highest"] - signal_state[index_name]["entry_price"],2) if signal_state[index_name]["highest"]>0 else 0
                 })
         else:
             reset_signal_state(index_name, now, "PREMIUM_ZERO")
@@ -1308,60 +1250,37 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["alert_message"] = f"Invalid action {action}"
             market_signal[index_name]["signal"] = "NO_TRADE"
         return
-    prem = ce_prem if side == "CE" else pe_prem
-    min_prem = INDEX_CONFIG[index_name].get("min_premium", 5)
-
+    prem = ce_prem if side=="CE" else pe_prem
+    min_prem = INDEX_CONFIG[index_name].get("min_premium",5)
     if prem <= 0 or prem < min_prem:
         with _market_signal_lock:
-            market_signal[index_name]["alert_message"] = (
-                f"Premium invalid: Rs{prem} (min {min_prem})"
-            )
+            market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem} (min {min_prem})"
             market_signal[index_name]["signal"] = "WAITING"
         return
 
     # Signal buffer
     with _signal_buffer_lock:
         buf = signal_buffer[index_name]
-
         if side == "CE":
             buf["ce_count"] += 1
             buf["pe_count"] = 0
-
             if buf["ce_count"] < 2:
                 with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = (
-                        f"Building CE ({buf['ce_count']}/2)"
-                    )
+                    market_signal[index_name]["alert_message"] = f"Building CE ({buf['ce_count']}/2)"
+                    market_signal[index_name]["signal"] = "BUILDING"
+                return
+        else:
+            buf["pe_count"] += 1
+            buf["ce_count"] = 0
+            if buf["pe_count"] < 2:
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"Building PE ({buf['pe_count']}/2)"
                     market_signal[index_name]["signal"] = "BUILDING"
                 return
 
-    if side == "CE":
-        buf["ce_count"] += 1
-        buf["pe_count"] = 0
-
-        if buf["ce_count"] < 2:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = (
-                    f"Building CE ({buf['ce_count']}/2)"
-                )
-                market_signal[index_name]["signal"] = "BUILDING"
-            return
-
-    else:
-        buf["pe_count"] += 1
-        buf["ce_count"] = 0
-
-        if buf["pe_count"] < 2:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = (
-                    f"Building PE ({buf['pe_count']}/2)"
-                )
-                market_signal[index_name]["signal"] = "BUILDING"
-            return
-
     # Greeks filter
     if INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data:
-        delta = greeks_data["ce_delta"] if side == "CE" else greeks_data["pe_delta"]
+        delta = greeks_data["ce_delta"] if side=="CE" else greeks_data["pe_delta"]
         if abs(delta) > 0.6:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Greeks block: Delta {delta:.2f} > 0.6"
@@ -1390,7 +1309,7 @@ def run_signal_engine_for_index(index_name):
     # ML filter
     with _price_histories_lock:
         prices_spot = list(price_histories[index_name])
-    rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50
+    rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot)>=50 else 50
     with _candle_histories_lock:
         candles_5min = list(candle_histories[index_name]["5min"])
     if len(candles_5min) >= 30:
@@ -1487,8 +1406,8 @@ def run_signal_engine_for_index(index_name):
     # Log alert (no telegram)
     emoji = "B" if "STRONG" in action and "CE" in action else "S" if "STRONG" in action and "PE" in action else "W" if "LOW" in action else "N"
     vwap = vp_analysis["vwap"]
-    regime = "TRENDING" if adx > 25 else "RANGING"
-    iv_str = f"IV-R:{greeks_data.get('iv_rank', 0):.0f}" if greeks_data else ""
+    regime = "TRENDING" if adx>25 else "RANGING"
+    iv_str = f"IV-R:{greeks_data.get('iv_rank',0):.0f}" if greeks_data else ""
     msg = (f"{emoji} {action} {index_name} | Spot:{spot:.0f} Prem:{prem:.2f} SL:{sl:.2f} Tgt:{target:.2f} | "
            f"Sentiment:{sentiment:.0f} ({sentiment_label}) | Lots:{lots} Risk:{risk_pct:.1f}% | "
            f"VWAP:{vwap:.0f} | {regime} | {iv_str}")
@@ -1566,148 +1485,86 @@ def on_ws_close(wsapp, code, msg):
 
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, _prev_option_volume
-
     last_heartbeat = time.time()
-
     try:
-        # ----------------------------
-        # PARSE MESSAGE SAFELY
-        # ----------------------------
         if isinstance(message, bytes):
-            if sws and hasattr(sws, "_parse_binary_data"):
+            if sws and hasattr(sws, '_parse_binary_data'):
                 parsed = sws._parse_binary_data(message)
-                ticks = parsed if isinstance(parsed, list) else [parsed] if isinstance(parsed, dict) else []
-            else:
-                return
-
+                ticks = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else []
+            else: return
         elif isinstance(message, str):
-            try:
-                data = json.loads(message)
-            except:
-                return
+            data = json.loads(message)
             ticks = data if isinstance(data, list) else [data]
-
-        else:
-            return
-
-        if not ticks:
-            return
-
-        now = time.time()
-
-        # ----------------------------
-        # MAIN LOOP
-        # ----------------------------
+        else: return
         for tick in ticks:
-
             token = str(tick.get("token") or "")
-            if not token:
-                continue
-
             ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
-            try:
-                ltp = float(ltp)
-            except:
-                ltp = 0
-
-            if ltp <= 0:
-                continue
-
-            # ----------------------------
-            # PRICE NORMALIZATION
-            # ----------------------------
+            if isinstance(ltp, str):
+                try: ltp = float(ltp)
+                except: ltp = 0
+            # Price normalisation: only for equity cash, not indices
             if ltp > 100000 and token not in INDEX_TOKENS_SET:
                 ltp /= 100
-
             vol = tick.get("volume") or tick.get("v") or 0
             oi = tick.get("open_interest") or tick.get("oi") or 0
             bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
-            ask = tick.get("best_ask_price") or tick.get("ask") or 0
-
-            # =========================================================
-            # 1. SPOT INDEX UPDATE (FAST PATH)
-            # =========================================================
+            ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
+            # Spot indices
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
-                    with _latest_ticks_lock:
-                        latest_ticks[idx]["spot_price"] = ltp
-
-                    with _price_histories_lock:
-                        price_histories[idx].append(ltp)
-
-                    update_candle(idx, ltp, vol, now)
-
-                    with _tick_counter_lock:
-                        tick_counter += 1
-
-                    break  # stop early (important optimization)
-
-            # =========================================================
-            # 2. OPTION UPDATE (CE/PE)
-            # =========================================================
+                    if ltp>0:
+                        with _latest_ticks_lock:
+                            latest_ticks[idx]["spot_price"] = ltp
+                        with _price_histories_lock:
+                            price_histories[idx].append(ltp)
+                        # Incremental volume for candles
+                        update_candle(idx, ltp, vol, time.time())
+                        with _tick_counter_lock:
+                            tick_counter += 1
+                    break
+            # Option premiums
             with _index_tokens_lock:
-                snapshot = INDEX_TOKENS.items()
-
-            for idx, tokens in snapshot:
-                if not INDEX_CONFIG[idx].get("active"):
-                    continue
-
-                # CALL OPTION
-                if token == tokens.get("ce_token") and ltp > 0:
-                    with _latest_ticks_lock:
-                        latest_ticks[idx].update({
-                            "ce_price": ltp,
-                            "ce_volume": vol,
-                            "ce_oi": oi,
-                            "ce_bid": bid,
-                            "ce_ask": ask
-                        })
-
-                    with _ce_price_histories_lock:
-                        ce_price_histories[idx].append(ltp)
-
-                    with _last_known_lock:
-                        last_known_prices[idx]["ce"] = ltp
-                        last_known_prices[idx]["timestamp"] = now
-
-                    _prev_option_volume[token] = vol
+                index_tokens_snapshot = list(INDEX_TOKENS.items())
+            for idx, tokens in index_tokens_snapshot:
+                if not INDEX_CONFIG[idx].get("active"): continue
+                if token == tokens.get("ce_token"):
+                    if ltp>0:
+                        with _latest_ticks_lock:
+                            latest_ticks[idx]["ce_price"] = ltp
+                            latest_ticks[idx]["ce_volume"] = vol
+                            latest_ticks[idx]["ce_oi"] = oi
+                            latest_ticks[idx]["ce_bid"] = bid
+                            latest_ticks[idx]["ce_ask"] = ask
+                        with _ce_price_histories_lock:
+                            ce_price_histories[idx].append(ltp)
+                        with _last_known_lock:
+                            last_known_prices[idx]["ce"] = ltp
+                            last_known_prices[idx]["timestamp"] = time.time()
+                        with _prev_vol_lock:
+                            _prev_option_volume[token] = vol
                     break
-
-                # PUT OPTION
-                if token == tokens.get("pe_token") and ltp > 0:
-                    with _latest_ticks_lock:
-                        latest_ticks[idx].update({
-                            "pe_price": ltp,
-                            "pe_volume": vol,
-                            "pe_oi": oi,
-                            "pe_bid": bid,
-                            "pe_ask": ask
-                        })
-
-                    with _pe_price_histories_lock:
-                        pe_price_histories[idx].append(ltp)
-
-                    with _last_known_lock:
-                        last_known_prices[idx]["pe"] = ltp
-                        last_known_prices[idx]["timestamp"] = now
-
-                    _prev_option_volume[token] = vol
+                elif token == tokens.get("pe_token"):
+                    if ltp>0:
+                        with _latest_ticks_lock:
+                            latest_ticks[idx]["pe_price"] = ltp
+                            latest_ticks[idx]["pe_volume"] = vol
+                            latest_ticks[idx]["pe_oi"] = oi
+                            latest_ticks[idx]["pe_bid"] = bid
+                            latest_ticks[idx]["pe_ask"] = ask
+                        with _pe_price_histories_lock:
+                            pe_price_histories[idx].append(ltp)
+                        with _last_known_lock:
+                            last_known_prices[idx]["pe"] = ltp
+                            last_known_prices[idx]["timestamp"] = time.time()
+                        with _prev_vol_lock:
+                            _prev_option_volume[token] = vol
                     break
-
-            # =========================================================
-            # 3. VIX UPDATE
-            # =========================================================
-            if token == "99919017":
+            if token == "99919017" and ltp>0:
                 with _latest_ticks_lock:
                     latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
-
-        # ----------------------------
-        # SIGNAL EXECUTION THROTTLE
-        # ----------------------------
-        if tick_counter > 0 and tick_counter % 5 == 0:
+        if tick_counter % 5 == 0 and tick_counter>0:
             run_all_signals()
-
     except Exception as e:
         logger.error(f"WS data error: {e}")
 
@@ -1737,7 +1594,7 @@ def start_angel_websocket():
 def is_market_open():
     now_ist = datetime.now(IST)
     current = now_ist.time()
-    return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
+    return now_ist.weekday() < 5 and dt_time(9,10) <= current <= dt_time(15,35)
 
 # ----------------------------------------------------------------------
 # REST API POLLER (fallback only)
@@ -1769,18 +1626,17 @@ def start_rest_api_poller():
                     try:
                         ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
                         ce = safe_ltp(ce_resp)
-                        if ce and ce > 0:
-                            if ce > 100000 and INDEX_CONFIG[idx].get("instrumenttype") != "INDEX": ce /= 100
+                        if ce and ce>0:
+                            if ce>100000 and INDEX_CONFIG[idx].get("instrumenttype") != "INDEX": ce/=100
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ce
                             with _last_known_lock:
-                                last_known_prices[idx]["ce"]
                                 last_known_prices[idx]["ce"] = ce
                                 last_known_prices[idx]["timestamp"] = now
                         pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
                         pe = safe_ltp(pe_resp)
-                        if pe and pe > 0:
-                            if pe > 100000 and INDEX_CONFIG[idx].get("instrumenttype") != "INDEX": pe /= 100
+                        if pe and pe>0:
+                            if pe>100000 and INDEX_CONFIG[idx].get("instrumenttype") != "INDEX": pe/=100
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = pe
                             with _last_known_lock:
@@ -1837,7 +1693,7 @@ def live_signals():
     for idx in INDEX_CONFIG:
         if not INDEX_CONFIG[idx].get("active"): continue
         with _market_signal_lock:
-            sentiment_data[idx] = {"score": market_signal[idx].get("sentiment_score", 50), "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50))}
+            sentiment_data[idx] = {"score": market_signal[idx].get("sentiment_score",50), "label": get_sentiment_label(market_signal[idx].get("sentiment_score",50))}
     with _market_signal_lock, _portfolio_state_lock:
         return jsonify({
             "timestamp": datetime.now(IST).isoformat(),
@@ -1867,7 +1723,3 @@ if __name__ == "__main__":
     if not API_KEY:
         logger.warning("No API_KEY set – endpoint is unprotected. Set env API_KEY to enable simple auth.")
     app.run(host="0.0.0.0", port=port, debug=False)
-
-
-
-   
