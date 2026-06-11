@@ -8,7 +8,7 @@ import json
 import requests
 import pandas as pd
 import numpy as np
-import sqlite3
+import sqlite
 import math
 import socket
 import pickle
@@ -1566,86 +1566,148 @@ def on_ws_close(wsapp, code, msg):
 
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, _prev_option_volume
+
     last_heartbeat = time.time()
+
     try:
+        # ----------------------------
+        # PARSE MESSAGE SAFELY
+        # ----------------------------
         if isinstance(message, bytes):
-            if sws and hasattr(sws, '_parse_binary_data'):
+            if sws and hasattr(sws, "_parse_binary_data"):
                 parsed = sws._parse_binary_data(message)
-                ticks = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else []
-            else: return
+                ticks = parsed if isinstance(parsed, list) else [parsed] if isinstance(parsed, dict) else []
+            else:
+                return
+
         elif isinstance(message, str):
-            data = json.loads(message)
+            try:
+                data = json.loads(message)
+            except:
+                return
             ticks = data if isinstance(data, list) else [data]
-        else: return
+
+        else:
+            return
+
+        if not ticks:
+            return
+
+        now = time.time()
+
+        # ----------------------------
+        # MAIN LOOP
+        # ----------------------------
         for tick in ticks:
+
             token = str(tick.get("token") or "")
+            if not token:
+                continue
+
             ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
-            if isinstance(ltp, str):
-                try: ltp = float(ltp)
-                except: ltp = 0
-            # Price normalization: only for equity cash, not indices
+            try:
+                ltp = float(ltp)
+            except:
+                ltp = 0
+
+            if ltp <= 0:
+                continue
+
+            # ----------------------------
+            # PRICE NORMALIZATION
+            # ----------------------------
             if ltp > 100000 and token not in INDEX_TOKENS_SET:
                 ltp /= 100
+
             vol = tick.get("volume") or tick.get("v") or 0
             oi = tick.get("open_interest") or tick.get("oi") or 0
             bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
             ask = tick.get("best_ask_price") or tick.get("ask") or 0
-            # Spot indices
+
+            # =========================================================
+            # 1. SPOT INDEX UPDATE (FAST PATH)
+            # =========================================================
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["spot_price"] = ltp
-                        with _price_histories_lock:
-                            price_histories[idx].append(ltp)
-                        # Incremental volume for candles
-                        update_candle(idx, ltp, vol, time.time())
-                        with _tick_counter_lock:
-                            tick_counter += 1
-                    break
-            # Option premiums
+                    with _latest_ticks_lock:
+                        latest_ticks[idx]["spot_price"] = ltp
+
+                    with _price_histories_lock:
+                        price_histories[idx].append(ltp)
+
+                    update_candle(idx, ltp, vol, now)
+
+                    with _tick_counter_lock:
+                        tick_counter += 1
+
+                    break  # stop early (important optimization)
+
+            # =========================================================
+            # 2. OPTION UPDATE (CE/PE)
+            # =========================================================
             with _index_tokens_lock:
-                index_tokens_snapshot = list(INDEX_TOKENS.items())
-            for idx, tokens in index_tokens_snapshot:
-                if not INDEX_CONFIG[idx].get("active"): continue
-                if token == tokens.get("ce_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["ce_price"] = ltp
-                            latest_ticks[idx]["ce_volume"] = vol
-                            latest_ticks[idx]["ce_oi"] = oi
-                            latest_ticks[idx]["ce_bid"] = bid
-                            latest_ticks[idx]["ce_ask"] = ask
-                        with _ce_price_histories_lock:
-                            ce_price_histories[idx].append(ltp)
-                        with _last_known_lock:
-                            last_known_prices[idx]["ce"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                        with _prev_vol_lock:
-                            _prev_option_volume[token] = vol
+                snapshot = INDEX_TOKENS.items()
+
+            for idx, tokens in snapshot:
+                if not INDEX_CONFIG[idx].get("active"):
+                    continue
+
+                # CALL OPTION
+                if token == tokens.get("ce_token") and ltp > 0:
+                    with _latest_ticks_lock:
+                        latest_ticks[idx].update({
+                            "ce_price": ltp,
+                            "ce_volume": vol,
+                            "ce_oi": oi,
+                            "ce_bid": bid,
+                            "ce_ask": ask
+                        })
+
+                    with _ce_price_histories_lock:
+                        ce_price_histories[idx].append(ltp)
+
+                    with _last_known_lock:
+                        last_known_prices[idx]["ce"] = ltp
+                        last_known_prices[idx]["timestamp"] = now
+
+                    _prev_option_volume[token] = vol
                     break
-                elif token == tokens.get("pe_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["pe_price"] = ltp
-                            latest_ticks[idx]["pe_volume"] = vol
-                            latest_ticks[idx]["pe_oi"] = oi
-                            latest_ticks[idx]["pe_bid"] = bid
-                            latest_ticks[idx]["pe_ask"] = ask
-                        with _pe_price_histories_lock:
-                            pe_price_histories[idx].append(ltp)
-                        with _last_known_lock:
-                            last_known_prices[idx]["pe"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                        with _prev_vol_lock:
-                            _prev_option_volume[token] = vol
+
+                # PUT OPTION
+                if token == tokens.get("pe_token") and ltp > 0:
+                    with _latest_ticks_lock:
+                        latest_ticks[idx].update({
+                            "pe_price": ltp,
+                            "pe_volume": vol,
+                            "pe_oi": oi,
+                            "pe_bid": bid,
+                            "pe_ask": ask
+                        })
+
+                    with _pe_price_histories_lock:
+                        pe_price_histories[idx].append(ltp)
+
+                    with _last_known_lock:
+                        last_known_prices[idx]["pe"] = ltp
+                        last_known_prices[idx]["timestamp"] = now
+
+                    _prev_option_volume[token] = vol
                     break
-            if token == "99919017" and ltp > 0:
+
+            # =========================================================
+            # 3. VIX UPDATE
+            # =========================================================
+            if token == "99919017":
                 with _latest_ticks_lock:
                     latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
-        if tick_counter % 5 == 0 and tick_counter > 0:
+
+        # ----------------------------
+        # SIGNAL EXECUTION THROTTLE
+        # ----------------------------
+        if tick_counter > 0 and tick_counter % 5 == 0:
             run_all_signals()
+
     except Exception as e:
         logger.error(f"WS data error: {e}")
 
