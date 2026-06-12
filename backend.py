@@ -17,8 +17,10 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
+
+print("=== BACKEND MODULE LOADED ===", flush=True)   # <-- ADD THIS
 
 app = Flask(__name__)
 CORS(app)
@@ -748,8 +750,12 @@ def health():
         "last_heartbeat_sec_ago": now - last_heartbeat,
         "market_open": is_market_open()
     })
+# Start background threads immediately when module loads (for Gunicorn)
+try:
+    _start_background_threads()
+except Exception as e:
+    logger.error(f"Failed to start background threads: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    _start_background_threads()
     app.run(host="0.0.0.0", port=port, debug=False)
