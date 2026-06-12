@@ -565,15 +565,17 @@ def on_ws_data(wsapp, message):
     last_heartbeat = time.time()
     try:
         if isinstance(message, bytes):
-            if sws and hasattr(sws, '_parse_binary_data'):
-                parsed = sws._parse_binary_data(message)
-                ticks = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else []
-            else: return
-        elif isinstance(message, str):
+            # SmartWebSocketV2 sends JSON strings as bytes
+            message = message.decode('utf-8')
+        if isinstance(message, str):
             data = json.loads(message)
             ticks = data if isinstance(data, list) else [data]
-        else: return
+        else:
+            return
+
         for tick in ticks:
+
+            # ... rest of your tick processing (unchanged) ...
             token = str(tick.get("token") or "")
             ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
             if isinstance(ltp, str):
@@ -612,22 +614,29 @@ def start_angel_websocket():
             if not is_market_open():
                 time.sleep(5)
                 continue
+
             auth_token, feed_token, _ = get_auth_token()
             if not feed_token:
                 time.sleep(10)
                 continue
+
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
+
+            # Connect (this will block until connection is closed or fails)
             sws.connect()
+            
+            # When connect() returns, the connection is closed. Wait a bit before reconnecting.
             ws_running = False
+            logger.warning("WebSocket disconnected, reconnecting in 5s...")
             time.sleep(5)
+
         except Exception as e:
             logger.error(f"WS thread error: {e}")
             time.sleep(10)
-
 # ----------------------------------------------------------------------
 # REST API POLLER (for option premiums)
 # ----------------------------------------------------------------------
@@ -697,7 +706,6 @@ def _start_background_threads():
             _init_completed = True
             logger.info("Background threads started")
 
-@app.before_request
 def start_backgrounds():
     _start_background_threads()
 
@@ -731,10 +739,13 @@ def live_signals():
 
 @app.route("/api/health")
 def health():
+    now = time.time()
+    ws_alive = ws_running and (now - last_heartbeat) < 60  # received data in last 60s
     return jsonify({
-        "status": "OK",
+        "status": "OK" if ws_alive else "DEGRADED",
         "ws_running": ws_running,
         "ticks": tick_counter,
+        "last_heartbeat_sec_ago": now - last_heartbeat,
         "market_open": is_market_open()
     })
 
