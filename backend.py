@@ -126,6 +126,13 @@ _current_candle_lock = threading.Lock()
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_CONFIG}
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_CONFIG}
 price_histories = {idx: deque(maxlen=5000) for idx in INDEX_CONFIG}
+
+# === ADDED GLOBAL STATE CONTAINERS FOR TRACKING AND METRICS ===
+portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0} for idx in INDEX_CONFIG}
+signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0} for idx in INDEX_CONFIG}
+market_signal = {idx: {"sentiment_score": 50} for idx in INDEX_CONFIG}  # Needed if API uses live-signals
+
+# === REST OF HISTORIES CONTROLLERS AS CURRENTLY CONFIGURED ===
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
 ce_volume_histories = {idx: deque(maxlen=1000) for idx in INDEX_CONFIG}
@@ -208,23 +215,32 @@ def calculate_rsi(prices, period=14):
     return 100 - (100/(1+avg_gain/avg_loss))
 
 def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow+signal: return 0.0, 0.0, 0.0
-    def ema(arr, p):
-        if not arr: return 0
-        alpha=2/(p+1); val=arr[0]
-        for x in arr[1:]: val=alpha*x+(1-alpha)*val
-        return val
-    ema_fast = ema(prices[-fast:], fast)
-    ema_slow = ema(prices[-slow:], slow)
-    macd = ema_fast - ema_slow
-    hist = []
-    for i in range(signal,0,-1):
-        if len(prices)>=slow+i:
-            ef=ema(prices[-(fast+i):-i], fast)
-            es=ema(prices[-(slow+i):-i], slow)
-            hist.append(ef-es)
-    sig = ema(hist, signal) if hist else macd
-    return macd, sig, macd-sig
+    if len(prices) < slow + signal: return 0.0, 0.0, 0.0
+    
+    # Calculate continuous EMAs over the full available price list
+    ema_fast_list, ema_slow_list = [], []
+    val_f = prices[0]
+    val_s = prices[0]
+    alpha_f = 2 / (fast + 1)
+    alpha_s = 2 / (slow + 1)
+    
+    for x in prices:
+        val_f = alpha_f * x + (1 - alpha_f) * val_f
+        val_s = alpha_s * x + (1 - alpha_s) * val_s
+        ema_fast_list.append(val_f)
+        ema_slow_list.append(val_s)
+        
+    macd_line = [f - s for f, s in zip(ema_fast_list, ema_slow_list)]
+    
+    # Calculate Signal Line from MACD Line
+    val_sig = macd_line[0]
+    alpha_sig = 2 / (signal + 1)
+    for m in macd_line:
+        val_sig = alpha_sig * m + (1 - alpha_sig) * val_sig
+        
+    macd = macd_line[-1]
+    sig = val_sig
+    return macd, sig, macd - sig
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period+1:
@@ -286,26 +302,53 @@ def calculate_vwap(prices, volumes):
 # ----------------------------------------------------------------------
 # PERSISTENCE FUNCTIONS
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# PERSISTENCE FUNCTIONS
+# ----------------------------------------------------------------------
 def load_portfolio_state():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    for idx in INDEX_CONFIG:
-        row = c.execute("SELECT equity, active_action, entry_price, stop_loss, target, lots, entry_time, highest FROM portfolio_equity WHERE index_name=?", (idx,)).fetchone()
-        if row:
-            portfolio_state[idx]["equity"] = row[0]
-            if row[1] and row[1] != "HOLD":
-                signal_state[idx].update({
-                    "action": row[1],
-                    "entry_price": row[2],
-                    "stop_loss": row[3],
-                    "target": row[4],
-                    "lots": row[5],
-                    "entry_time": row[6],
-                    "highest": row[7]
-                })
-                portfolio_state[idx]["open_positions"] = 1
-    conn.close()
+    """Safely initializes and loads state parameters from the local database on system boot."""
+    global portfolio_state, signal_state
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        for idx in INDEX_CONFIG:
+            row = c.execute(
+                "SELECT equity, active_action, entry_price, stop_loss, target, lots, entry_time, highest "
+                "FROM portfolio_equity WHERE index_name=?", (idx,)
+            ).fetchone()
+            
+            if row:
+                # Safely update equity
+                portfolio_state[idx]["equity"] = float(row[0]) if row[0] is not None else 0.0
+                
+                # Check for active trading signals
+                action = row[1]
+                if action and action != "HOLD":
+                    signal_state[idx].update({
+                        "action": action,
+                        "entry_price": float(row[2]) if row[2] is not None else 0.0,
+                        "stop_loss": float(row[3]) if row[3] is not None else 0.0,
+                        "target": float(row[4]) if row[4] is not None else 0.0,
+                        "lots": int(row[5]) if row[5] is not None else 0,
+                        "entry_time": float(row[6]) if row[6] is not None else 0.0,
+                        "highest": float(row[7]) if row[7] is not None else 0.0
+                    })
+                    portfolio_state[idx]["open_positions"] = 1
+                    
+        conn.close()
+        logger.info("Persistent operational metrics synchronized successfully from local database.")
+    except Exception as e:
+        logger.error(f"Error executing state boot loader: {e}")
 
+def load_persisted_state():
+    """Alias placeholder wrapper to align execution signatures and prevent deployment NameErrors."""
+    load_portfolio_state()
+
+def save_portfolio_state(idx):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+...
 def save_portfolio_state(idx):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -1544,7 +1587,16 @@ def health():
 # MAIN ENTRY POINT
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    if not API_KEY:
-        logger.warning("No API_KEY set – endpoint unprotected. Set env API_KEY to enable simple auth.")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    init_db()                 # Set up SQLite databases [cite: 2]
+    load_portfolio_state()    # Pull existing trading data [cite: 15]
+    
+    # === START BACKGROUND WORKERS BEFORE FLASK SEEDS THE ENDPOINTS ===
+    # (Ensure these functions match the exact names of your thread loop triggers)
+    if 'refresh_all_tokens' in globals():
+        threading.Thread(target=refresh_all_tokens, daemon=True).start() 
+        
+    # Start your core WebSocket engine thread here (e.g., start_websocket_thread())
+    # threading.Thread(target=YOUR_WEBSOCKET_FUNCTION, daemon=True).start()
+
+    logger.info("Background workers initiated. Starting Flask API Server...")
+    app.run(host="0.0.0.0", port=5000, debug=False)
