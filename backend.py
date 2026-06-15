@@ -1298,18 +1298,19 @@ def run_signal_engine_for_index(index_name):
     rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50
     with _candle_histories_lock:
         closes_5min = [c["close"] for c in candle_histories[index_name]["5min"]]
-    adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20
-    with _latest_ticks_lock:
-        vix = latest_ticks["VIX"]["vix"]
-        if vix <= 0:
-            vix = 15.0
-  ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
+    adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20         
+    with_latest_ticks_lock:
+    vix = latest_ticks["VIX"]["vix"]
+    if vix <= 0:
+        vix = 15.0
 
-  logger.info(
+ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
+
+logger.info(
     f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}"
 )
-    # ML filter is a placeholder (returns 0.5) – it never blocks. To enable, replace with real model.
-    if ml_prob < 0.55 and "STRONG" not in action:
+
+if ml_prob < 0.55 and "STRONG" not in action:
     with _market_signal_lock:
         market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
         market_signal[index_name]["signal"] = "BLOCKED"
