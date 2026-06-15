@@ -1300,29 +1300,31 @@ def run_signal_engine_for_index(index_name):
         closes_5min = [c["close"] for c in candle_histories[index_name]["5min"]]
     adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20         
     
-    with _latest_ticks_lock:
+        with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
         if vix <= 0:
             vix = 15.0
 
-ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
+    ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
 
-logger.info(
-    f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}"
-)
+    logger.info(
+        f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}"
+    )
 
-if ml_prob < 0.55 and "STRONG" not in action:
-    with _market_signal_lock:
-        market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
-        market_signal[index_name]["signal"] = "BLOCKED"
-    return
+    if ml_prob < 0.55 and "STRONG" not in action:
+        with _market_signal_lock:
+            market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
+            market_signal[index_name]["signal"] = "BLOCKED"
+        return
 
     kelly_risk, win_rate, avg_win, avg_loss = kelly_trackers[index_name].get_recommended_risk_pct()
+
     if "STRONG" in action:
         base_risk_pct = 2.0
     elif "LOW" in action:
         base_risk_pct = 0.8
     else:
+        
         base_risk_pct = 1.2
     risk_pct = base_risk_pct * 0.5 + kelly_risk * 0.5
     if vix > 25:
