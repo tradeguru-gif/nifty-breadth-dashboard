@@ -522,6 +522,7 @@ class MLSignalFilter:
             return 0.50
 
 ml_filter = MLSignalFilter()
+
 # ----------------------------------------------------------------------
 # KELLY CRITERION with running averages and capped b-ratio
 # ----------------------------------------------------------------------
@@ -1298,9 +1299,9 @@ def run_signal_engine_for_index(index_name):
     rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50
     with _candle_histories_lock:
         closes_5min = [c["close"] for c in candle_histories[index_name]["5min"]]
-    adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20         
-    
-        with _latest_ticks_lock:
+    adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20
+
+    with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
         if vix <= 0:
             vix = 15.0
@@ -1324,7 +1325,6 @@ def run_signal_engine_for_index(index_name):
     elif "LOW" in action:
         base_risk_pct = 0.8
     else:
-        
         base_risk_pct = 1.2
     risk_pct = base_risk_pct * 0.5 + kelly_risk * 0.5
     if vix > 25:
