@@ -1299,7 +1299,7 @@ def run_signal_engine_for_index(index_name):
     with _candle_histories_lock:
         closes_5min = [c["close"] for c in candle_histories[index_name]["5min"]]
     adx = calculate_adx([], [], closes_5min, 14) if len(closes_5min) >= 30 else 20         
-    with_latest_ticks_lock:
+    with _latest_ticks_lock:
     vix = latest_ticks["VIX"]["vix"]
     if vix <= 0:
         vix = 15.0
