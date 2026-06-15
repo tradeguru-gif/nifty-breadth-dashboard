@@ -1863,9 +1863,18 @@ def connection_status():
 # ----------------------------------------------------------------------
 # MAIN ENTRY POINT
 # ----------------------------------------------------------------------
+def startup():
+    try:
+        init_db()
+        load_portfolio_state()
+        _start_background_threads()
+        logger.info("Background workers started successfully")
+    except Exception as e:
+        logger.exception(f"Startup failed: {e}")
+
+# Gunicorn startup
+startup()
+
 if __name__ == "__main__":
-    init_db()
-    load_portfolio_state()
-    _start_background_threads()
-    logger.info("Background workers initiated. Starting Flask API Server...")
+    logger.info("Starting Flask API Server...")
     app.run(host="0.0.0.0", port=5000, debug=False)
