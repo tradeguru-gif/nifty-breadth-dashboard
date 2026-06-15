@@ -1718,6 +1718,7 @@ def start_rest_api_poller():
 # ----------------------------------------------------------------------
 # HYBRID CONNECTION MANAGER
 # ----------------------------------------------------------------------
+
 class ConnectionManager:
     def __init__(self):
         self.use_websocket = True
@@ -1726,21 +1727,46 @@ class ConnectionManager:
         if self.use_websocket:
             try:
                 logger.info("Attempting WebSocket connection...")
-                threading.Thread(target=start_angel_websocket_improved, daemon=True).start()
-                time.sleep(15)
+
+                threading.Thread(
+                    target=start_angel_websocket_improved,
+                    daemon=True
+                ).start()
+
+                for _ in range(30):
+                    if ws_running:
+                        break
+                    time.sleep(2)
+
                 if not ws_running:
-                    logger.warning("WebSocket failed to connect, switching to REST-only mode")
+                    logger.warning(
+                        "WebSocket failed to connect, switching to REST-only mode"
+                    )
                     self.use_websocket = False
-                    threading.Thread(target=start_rest_only_mode, daemon=True).start()
+                    threading.Thread(
+                        target=start_rest_only_mode,
+                        daemon=True
+                    ).start()
                 else:
-                    threading.Thread(target=ws_watchdog, daemon=True).start()
+                    logger.info("WebSocket connected successfully")
+                    threading.Thread(
+                        target=ws_watchdog,
+                        daemon=True
+                    ).start()
+
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
                 self.use_websocket = False
-                threading.Thread(target=start_rest_only_mode, daemon=True).start()
-        else:
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
+                threading.Thread(
+                    target=start_rest_only_mode,
+                    daemon=True
+                ).start()
 
+        else:
+            threading.Thread(
+                target=start_rest_only_mode,
+                daemon=True
+            ).start()
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS (with token pre‑fetch and improved connection)
 # ----------------------------------------------------------------------
