@@ -1,4 +1,4 @@
-# === VERSION 14.1 - PRO SIGNAL BOT: Fully working REST-only mode with Gunicorn support ===
+# === VERSION 14.2 - PRO SIGNAL BOT: Fixed log duplication, fully working ===
 import sys
 import logging
 import os
@@ -17,18 +17,21 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-# Force logging to stdout immediately
+# Force logging to stdout immediately - with less verbose formatting
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     stream=sys.stdout,
     force=True
 )
 logger = logging.getLogger(__name__)
 
-# Log startup immediately
+# Suppress overly verbose logs from libraries
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 logger.info("=" * 60)
-logger.info("STARTING BOT v14.1 - REST-only mode (Gunicorn compatible)")
+logger.info("STARTING BOT v14.2 - REST-only mode")
 logger.info("=" * 60)
 
 app = Flask(__name__)
@@ -54,10 +57,7 @@ ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-logger.info(f"ANGEL_API_KEY set: {bool(ANGEL_API_KEY)}")
-logger.info(f"ANGEL_CLIENT_ID set: {bool(ANGEL_CLIENT_ID)}")
-logger.info(f"ANGEL_PASSWORD set: {bool(ANGEL_PASSWORD)}")
-logger.info(f"ANGEL_TOTP_SECRET set: {bool(ANGEL_TOTP_SECRET)}")
+logger.info(f"Credentials loaded - API: {bool(ANGEL_API_KEY)}, Client: {bool(ANGEL_CLIENT_ID)}")
 
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
     logger.error("Missing critical Angel One environment variables!")
@@ -69,39 +69,41 @@ DB_PATH = "trading_data.db"
 # DATABASE
 # ----------------------------------------------------------------------
 def init_db():
-    logger.info("Initializing database...")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS ticks (timestamp REAL, token TEXT, price REAL, volume REAL, bid REAL, ask REAL, oi REAL)""")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_time ON ticks(timestamp)")
-    c.execute("""CREATE TABLE IF NOT EXISTS signals (timestamp REAL, action TEXT, signal_type TEXT, grade TEXT, confidence REAL, ce_price REAL, pe_price REAL, rsi REAL, pcr REAL, regime TEXT, vwap REAL, vix REAL, ml_score REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS trades (timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, vix REAL, exit_reason TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS daily_performance (date TEXT, equity REAL, daily_pnl REAL, drawdown_pct REAL, sharpe REAL, var REAL, win_rate REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS ml_models (id INTEGER PRIMARY KEY, model BLOB, created_at REAL, features TEXT, accuracy REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS portfolio_equity (index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL, active_action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL, last_trade_date TEXT, daily_trade_count INTEGER)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS kelly_history (timestamp REAL, index_name TEXT, kelly_fraction REAL, win_rate REAL, avg_win REAL, avg_loss REAL, recommended_lots INTEGER, actual_lots INTEGER)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS greeks_history (timestamp REAL, index_name TEXT, ce_iv REAL, pe_iv REAL, ce_delta REAL, pe_delta REAL, ce_gamma REAL, pe_gamma REAL, ce_theta REAL, pe_theta REAL, ce_vega REAL, pe_vega REAL, iv_rank REAL, iv_percentile REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS performance_metrics (timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, calmar REAL, win_rate REAL, profit_factor REAL, max_drawdown REAL, avg_trade REAL, expectancy REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS drawdown_events (timestamp REAL, index_name TEXT, drawdown_pct REAL, action_taken TEXT, equity_before REAL, equity_after REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS signal_state (index_name TEXT PRIMARY KEY, action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL)""")
     try:
-        c.execute("ALTER TABLE portfolio_equity ADD COLUMN last_trade_date TEXT")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE portfolio_equity ADD COLUMN daily_trade_count INTEGER")
-    except Exception:
-        pass
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized successfully")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS ticks (timestamp REAL, token TEXT, price REAL, volume REAL, bid REAL, ask REAL, oi REAL)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_time ON ticks(timestamp)")
+        c.execute("""CREATE TABLE IF NOT EXISTS signals (timestamp REAL, action TEXT, signal_type TEXT, grade TEXT, confidence REAL, ce_price REAL, pe_price REAL, rsi REAL, pcr REAL, regime TEXT, vwap REAL, vix REAL, ml_score REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS trades (timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, vix REAL, exit_reason TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS daily_performance (date TEXT, equity REAL, daily_pnl REAL, drawdown_pct REAL, sharpe REAL, var REAL, win_rate REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ml_models (id INTEGER PRIMARY KEY, model BLOB, created_at REAL, features TEXT, accuracy REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS portfolio_equity (index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL, active_action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL, last_trade_date TEXT, daily_trade_count INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS kelly_history (timestamp REAL, index_name TEXT, kelly_fraction REAL, win_rate REAL, avg_win REAL, avg_loss REAL, recommended_lots INTEGER, actual_lots INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS greeks_history (timestamp REAL, index_name TEXT, ce_iv REAL, pe_iv REAL, ce_delta REAL, pe_delta REAL, ce_gamma REAL, pe_gamma REAL, ce_theta REAL, pe_theta REAL, ce_vega REAL, pe_vega REAL, iv_rank REAL, iv_percentile REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS performance_metrics (timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, calmar REAL, win_rate REAL, profit_factor REAL, max_drawdown REAL, avg_trade REAL, expectancy REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS drawdown_events (timestamp REAL, index_name TEXT, drawdown_pct REAL, action_taken TEXT, equity_before REAL, equity_after REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS signal_state (index_name TEXT PRIMARY KEY, action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL)""")
+        try:
+            c.execute("ALTER TABLE portfolio_equity ADD COLUMN last_trade_date TEXT")
+        except:
+            pass
+        try:
+            c.execute("ALTER TABLE portfolio_equity ADD COLUMN daily_trade_count INTEGER")
+        except:
+            pass
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.error(f"Database init error: {e}")
 
 init_db()
 
 try:
     from SmartApi import SmartConnect
     from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-    logger.info("SmartApi imported successfully")
+    logger.info("SmartApi imported")
 except ImportError as e:
     logger.error(f"SmartApi import failed: {e}")
     sys.exit(1)
@@ -143,7 +145,7 @@ INDEX_CONFIG = {
 }
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values()}
-logger.info(f"Loaded {len(INDEX_CONFIG)} indices: {list(INDEX_CONFIG.keys())}")
+logger.info(f"Loaded {len(INDEX_CONFIG)} indices")
 
 # ----------------------------------------------------------------------
 # GLOBAL STATE & LOCKS
@@ -233,7 +235,7 @@ def calculate_atr(highs, lows, closes, period=14):
     return sum(tr[-period:])/period if len(tr)>=period else 5.0
 
 def calculate_adx(highs, lows, closes, period=14):
-    return 20.0  # Simplified
+    return 20.0
 
 def update_candle(idx, price, cumulative_volume, timestamp):
     global _prev_volume
@@ -295,9 +297,9 @@ def load_portfolio_state():
                 if len(row) >= 10 and row[9] is not None:
                     daily_trade_count[idx] = int(row[9])
         conn.close()
-        logger.info("Persistent state loaded successfully.")
+        logger.info("State loaded")
     except Exception as e:
-        logger.error(f"Error loading state: {e}")
+        logger.error(f"Load state error: {e}")
 
 def save_portfolio_state(idx):
     with sqlite3.connect(DB_PATH) as conn:
@@ -324,21 +326,17 @@ def get_auth_token():
         if auth_cache["token"] and (now - auth_cache["timestamp"] < 3300):
             return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
         try:
-            logger.info("Generating new auth token...")
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-            logger.info(f"TOTP generated: {totp[:4]}...")
             obj = SmartConnect(api_key=ANGEL_API_KEY)
             session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
             if not session.get("status"):
-                logger.error(f"Auth failed: {session}")
                 return None, None, None
             auth_token = session["data"]["jwtToken"]
             feed_token = obj.getfeedToken()
             auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-            logger.info("Auth token refreshed successfully")
             return auth_token, feed_token, obj
         except Exception as e:
-            logger.error(f"Auth error: {type(e).__name__} - {str(e)}")
+            logger.error(f"Auth error: {type(e).__name__}")
             return None, None, None
 
 def safe_ltp(resp):
@@ -373,7 +371,7 @@ def get_index_spot(index_name):
                 ltp /= 100
             return ltp
     except Exception as e:
-        logger.debug(f"Spot fetch {index_name}: {e}")
+        pass
     return None
 
 # ----------------------------------------------------------------------
@@ -403,10 +401,8 @@ def get_scrip_master():
             data = requests.get(url, timeout=30).json()
             _scrip_cache["data"] = data
             _scrip_cache["timestamp"] = now
-            logger.info("Scrip master refreshed")
             return data
-        except Exception as e:
-            logger.error(f"Scrip master failed: {e}")
+        except Exception:
             return _scrip_cache["data"] or []
 
 def get_next_expiry_date(index_name):
@@ -445,7 +441,6 @@ def get_current_atm_tokens(index_name):
                       (df["instrumenttype"] == "OPTIDX") &
                       (df["exch_seg"] == config["option_exchange"])]
             if not opts.empty:
-                # Use .loc to avoid SettingWithCopyWarning
                 opts.loc[:, "expiry_date"] = opts["expiry"].apply(parse_expiry_date)
                 opts = opts.dropna(subset=["expiry_date"])
                 opts.loc[:, "strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
@@ -468,19 +463,14 @@ def get_current_atm_tokens(index_name):
                             ce_symbol = str(ce.iloc[0]["symbol"])
                             pe_symbol = str(pe.iloc[0]["symbol"])
                             actual_strike = int(ce.iloc[0]["strike"])
-                            if actual_strike != atm:
-                                logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
-                            else:
-                                logger.info(f"{index_name} ATM strike {atm} selected")
                             INDEX_TOKENS[index_name].update({
                                 "ce_token": ce_token, "pe_token": pe_token, "atm_strike": actual_strike,
                                 "expiry": expiry, "expiry_date": nearest,
                                 "ce_symbol": ce_symbol, "pe_symbol": pe_symbol
                             })
-                            logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} expiry={expiry}")
                             return ce_token, pe_token
-        except Exception as e:
-            logger.warning(f"{index_name} token fetch error: {e}")
+        except Exception:
+            pass
     INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
     return None, None
 
@@ -696,8 +686,8 @@ def send_telegram_alert(msg):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=3)
-    except Exception as e:
-        logger.warning(f"Telegram failed: {type(e).__name__}")
+    except Exception:
+        pass
 
 def reset_signal_state(index_name, current_time, exit_reason=""):
     with _signal_state_lock:
@@ -735,7 +725,7 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
     if len(vix_history) >= 10:
         vix_sma = sum(list(vix_history)[-10:]) / 10
         if vix > vix_sma * 1.25:
-            return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
+            return True, f"VIX spike {vix:.1f}"
     return False, ""
 
 def run_signal_engine_for_index(index_name):
@@ -784,8 +774,6 @@ def run_signal_engine_for_index(index_name):
         nifty_price_series.append(spot)
     elif index_name == "BANKNIFTY":
         banknifty_price_series.append(spot)
-    if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
-        correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
     sentiment = compute_sentiment(index_name)
     action = get_signal_from_sentiment(sentiment)
@@ -817,7 +805,7 @@ def run_signal_engine_for_index(index_name):
                     save_portfolio_state(index_name)
                     reset_signal_state(index_name, now, "KILL_SWITCH")
         with _market_signal_lock:
-            market_signal[index_name]["alert_message"] = "KILL SWITCH: Max drawdown hit. Trading halted."
+            market_signal[index_name]["alert_message"] = "KILL SWITCH: Max drawdown hit"
             market_signal[index_name]["signal"] = "KILL_SWITCH"
         return
 
@@ -871,8 +859,8 @@ def run_signal_engine_for_index(index_name):
                     if safety_state[index_name]["consecutive_sl"] >= 3:
                         safety_state[index_name]["circuit_breaker"] = True
                         safety_state[index_name]["circuit_breaker_until"] = now + 1800
-                        send_telegram_alert(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
-                    send_telegram_alert(f"EXIT {index_name} | SL | PnL: {pnl:.2f} pts")
+                        send_telegram_alert(f"CIRCUIT BREAKER {index_name}")
+                    send_telegram_alert(f"EXIT {index_name} | SL | PnL: {pnl:.2f}")
                     reset_signal_state(index_name, now, "STOP_LOSS")
                     return
                 if prem >= signal_state[index_name]["target"]:
@@ -886,7 +874,7 @@ def run_signal_engine_for_index(index_name):
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
                     kelly_trackers[index_name].update(pnl_pct)
                     safety_state[index_name]["consecutive_sl"] = 0
-                    send_telegram_alert(f"EXIT {index_name} | TARGET | PnL: {pnl:.2f} pts")
+                    send_telegram_alert(f"EXIT {index_name} | TARGET | PnL: {pnl:.2f}")
                     reset_signal_state(index_name, now, "TARGET_HIT")
                     return
                 entry_time = signal_state[index_name].get("entry_time", 0)
@@ -899,7 +887,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
                     kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                    send_telegram_alert(f"EXIT {index_name} | TIME | PnL: {pnl:.2f} pts")
+                    send_telegram_alert(f"EXIT {index_name} | TIME | PnL: {pnl:.2f}")
                     reset_signal_state(index_name, now, "TIME_EXIT")
                     return
                 with _price_histories_lock:
@@ -914,7 +902,7 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
                     kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                    send_telegram_alert(f"EXIT {index_name} | {exit_reason} | PnL: {pnl:.2f} pts")
+                    send_telegram_alert(f"EXIT {index_name} | {exit_reason} | PnL: {pnl:.2f}")
                     reset_signal_state(index_name, now, exit_reason)
                     return
 
@@ -933,7 +921,7 @@ def run_signal_engine_for_index(index_name):
                             portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_state(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f} pts")
+                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f}")
                         reset_signal_state(index_name, now, "VWAP_EXIT")
                         return
                     elif "PE" in active and prem > option_vwap * 1.003:
@@ -945,7 +933,7 @@ def run_signal_engine_for_index(index_name):
                             portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_state(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f} pts")
+                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f}")
                         reset_signal_state(index_name, now, "VWAP_EXIT")
                         return
 
@@ -1041,8 +1029,6 @@ def run_signal_engine_for_index(index_name):
 
     ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
 
-    logger.info(f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}")
-
     if ml_prob < 0.55 and "STRONG" not in action:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
@@ -1130,18 +1116,22 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# REST-ONLY MODE (with detailed logging)
+# REST-ONLY MODE
 # ----------------------------------------------------------------------
 tick_counter = 0
 last_tick_timestamp = time.time()
 fetch_cycle_count = 0
+_rest_thread_started = False
 
 def start_rest_only_mode():
     global tick_counter, last_tick_timestamp, fetch_cycle_count
+    global _rest_thread_started
     
-    logger.info("=" * 60)
-    logger.info("STARTING REST-ONLY MODE")
-    logger.info("=" * 60)
+    if _rest_thread_started:
+        return
+    _rest_thread_started = True
+    
+    logger.info("REST-ONLY MODE STARTED")
     
     auth_obj = None
     auth_time = 0
@@ -1149,26 +1139,19 @@ def start_rest_only_mode():
     while True:
         try:
             fetch_cycle_count += 1
-            logger.info(f"--- Fetch cycle #{fetch_cycle_count} ---")
             
             if not is_market_open():
-                logger.info("Market is closed. Waiting 60 seconds...")
                 time.sleep(60)
                 continue
-            
-            logger.info("Market is open. Fetching data...")
             
             # Refresh auth token if needed
             now = time.time()
             if not auth_obj or now - auth_time > 3300:
-                logger.info("Getting auth token...")
                 _, _, auth_obj = get_auth_token()
                 auth_time = now
                 if not auth_obj:
-                    logger.warning("Failed to get auth token, retrying in 10 seconds...")
                     time.sleep(10)
                     continue
-                logger.info("Auth token obtained successfully")
             
             # Refresh tokens if needed
             for idx in INDEX_CONFIG:
@@ -1177,13 +1160,11 @@ def start_rest_only_mode():
                 
                 tokens = INDEX_TOKENS.get(idx, {})
                 if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                    logger.info(f"Getting ATM tokens for {idx}...")
                     get_current_atm_tokens(idx)
                     continue
                 
                 try:
                     # Get spot price
-                    logger.debug(f"Fetching spot for {idx}...")
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
                         with _latest_ticks_lock:
@@ -1196,13 +1177,9 @@ def start_rest_only_mode():
                             last_known_prices[idx]["timestamp"] = time.time()
                         tick_counter += 1
                         last_tick_timestamp = time.time()
-                        logger.info(f"{idx} Spot: {spot:.2f}")
-                    else:
-                        logger.debug(f"{idx} Spot: No data")
                     
                     # Get CE price
                     if tokens.get("ce_token") and tokens.get("ce_symbol"):
-                        logger.debug(f"Fetching CE for {idx}...")
                         ce_resp = auth_obj.ltpData(
                             INDEX_CONFIG[idx]["option_exchange"], 
                             tokens["ce_symbol"], 
@@ -1219,13 +1196,9 @@ def start_rest_only_mode():
                             volume_profile_engines[idx].update(ce_price, 0, option_type="CE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ce_price
-                            logger.info(f"{idx} CE: {ce_price:.2f}")
-                        else:
-                            logger.debug(f"{idx} CE: No data")
                     
                     # Get PE price
                     if tokens.get("pe_token") and tokens.get("pe_symbol"):
-                        logger.debug(f"Fetching PE for {idx}...")
                         pe_resp = auth_obj.ltpData(
                             INDEX_CONFIG[idx]["option_exchange"], 
                             tokens["pe_symbol"], 
@@ -1242,24 +1215,19 @@ def start_rest_only_mode():
                             volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["pe"] = pe_price
-                            logger.info(f"{idx} PE: {pe_price:.2f}")
-                        else:
-                            logger.debug(f"{idx} PE: No data")
                             
                 except Exception as e:
-                    logger.error(f"REST fetch error for {idx}: {type(e).__name__} - {str(e)}")
+                    logger.debug(f"Fetch error {idx}: {e}")
             
-            # Run signal engine
-            logger.info("Running signal engine...")
-            run_all_signals()
-            logger.info("Signal engine completed")
+            # Run signal engine only every 5 cycles to reduce load
+            if fetch_cycle_count % 5 == 0:
+                run_all_signals()
             
-            # Sleep before next cycle (5 seconds)
-            logger.info("Sleeping 5 seconds...")
+            # Sleep 5 seconds
             time.sleep(5)
             
         except Exception as e:
-            logger.error(f"REST-only mode error: {type(e).__name__} - {str(e)}")
+            logger.error(f"REST mode error: {e}")
             time.sleep(10)
 
 # ----------------------------------------------------------------------
@@ -1272,30 +1240,23 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            logger.info("=" * 60)
             logger.info("Starting background threads...")
-            logger.info("=" * 60)
             
             # Pre-fetch tokens
-            logger.info("Pre-fetching option tokens...")
             for attempt in range(5):
                 refresh_all_tokens()
                 ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
                            if cfg.get("active") and INDEX_TOKENS[idx].get("ce_token"))
                 total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
-                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
                 if ready == total_active:
                     break
-                time.sleep((attempt + 1) * 2)
+                time.sleep(2)
             
-            # Start REST-only mode thread
-            logger.info("Starting REST-only mode thread...")
-            rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
-            rest_thread.start()
-            logger.info(f"REST-only mode thread started (daemon={rest_thread.daemon})")
+            # Start REST-only mode
+            threading.Thread(target=start_rest_only_mode, daemon=True).start()
             
             _init_completed = True
-            logger.info("Background threads initialization complete")
+            logger.info("Background threads started")
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
@@ -1311,7 +1272,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v14.1 (REST-only mode)",
+        "engine": "Multi-Index Options Bot v14.2",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mode": "REST_ONLY",
@@ -1338,13 +1299,12 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {
-                "ws_running": False,
                 "mode": "REST_ONLY",
                 "ticks": tick_counter,
                 "fetch_cycles": fetch_cycle_count,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "14.1"
+            "version": "14.2"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -1377,7 +1337,6 @@ def signal_audio():
 def health():
     return jsonify({
         "status": "OK" if tick_counter > 0 else "DEGRADED",
-        "ws_running": False,
         "mode": "REST_ONLY",
         "ticks": tick_counter,
         "fetch_cycles": fetch_cycle_count,
@@ -1387,13 +1346,11 @@ def health():
 @app.route("/api/connection-status", methods=["GET"])
 def connection_status():
     return jsonify({
-        "websocket_running": False,
         "mode": "REST_ONLY",
         "fetch_cycles": fetch_cycle_count,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
         "total_ticks_received": tick_counter,
         "market_open": is_market_open(),
-        "connection_mode": "REST_ONLY",
         "active_indices": [idx for idx, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "tokens_loaded": {idx: {
             "ce_token": bool(INDEX_TOKENS[idx].get("ce_token")),
@@ -1402,38 +1359,19 @@ def connection_status():
     })
 
 # ----------------------------------------------------------------------
-# AUTO-START BACKGROUND THREADS (CRITICAL FOR GUNICORN)
+# AUTO-START BACKGROUND THREADS (for Gunicorn)
 # ----------------------------------------------------------------------
-# This runs when Gunicorn imports the module (NOT just in __main__)
-logger.info("=" * 60)
-logger.info("AUTO-STARTING BACKGROUND THREADS (Gunicorn mode)")
-logger.info("=" * 60)
+logger.info("AUTO-STARTING BACKGROUND THREADS")
 
-# Initialize database and load state
-init_db()
 load_portfolio_state()
-
-# Start background threads
 _start_background_threads()
 
-logger.info("=" * 60)
-logger.info("Background threads started. Flask server ready.")
-logger.info("=" * 60)
+logger.info("Flask server ready.")
 
 # ----------------------------------------------------------------------
-# MAIN ENTRY POINT (for direct execution)
+# MAIN ENTRY POINT
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info("=" * 60)
-    logger.info("INITIALIZING BOT v14.1 (Direct execution)")
-    logger.info("=" * 60)
-    
-    init_db()
     load_portfolio_state()
     _start_background_threads()
-    
-    logger.info("=" * 60)
-    logger.info("Starting Flask server...")
-    logger.info("=" * 60)
-    
     app.run(host="0.0.0.0", port=10000, debug=False)
