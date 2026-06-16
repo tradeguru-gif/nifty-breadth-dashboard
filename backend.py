@@ -1872,6 +1872,26 @@ def connection_status():
 # ----------------------------------------------------------------------
 # MAIN ENTRY POINT
 # ----------------------------------------------------------------------
+# ------------------------------------------------------------------
+# AUTO-START BACKGROUND THREADS (for Gunicorn / production)
+# ------------------------------------------------------------------
+# Only start if not already initialized (prevents double-start on reload)
+_background_started = False
+_background_start_lock = threading.Lock()
+
+def auto_start_background():
+    global _background_started
+    with _background_start_lock:
+        if not _background_started:
+            init_db()
+            load_portfolio_state()
+            _start_background_threads()
+            _background_started = True
+            logger.info("Auto-start: Background threads initialized for production")
+
+# Call once at module load
+auto_start_background()
+
 if __name__ == "__main__":
     init_db()
     load_portfolio_state()
