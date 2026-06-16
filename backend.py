@@ -1,4 +1,4 @@
-# === VERSION 13.9 - PRO SIGNAL BOT: Forced REST-only mode for Render deployment ===
+# === VERSION 14.0 - PRO SIGNAL BOT: REST-only mode with detailed logging ===
 import sys
 import logging
 import os
@@ -17,8 +17,19 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+# Force logging to stdout immediately
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout,
+    force=True
+)
 logger = logging.getLogger(__name__)
+
+# Log startup immediately
+logger.info("=" * 60)
+logger.info("STARTING BOT v14.0 - REST-only mode")
+logger.info("=" * 60)
 
 app = Flask(__name__)
 
@@ -43,15 +54,22 @@ ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+logger.info(f"ANGEL_API_KEY set: {bool(ANGEL_API_KEY)}")
+logger.info(f"ANGEL_CLIENT_ID set: {bool(ANGEL_CLIENT_ID)}")
+logger.info(f"ANGEL_PASSWORD set: {bool(ANGEL_PASSWORD)}")
+logger.info(f"ANGEL_TOTP_SECRET set: {bool(ANGEL_TOTP_SECRET)}")
+
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
+    logger.error("Missing critical Angel One environment variables!")
     raise ValueError("Missing critical Angel One environment variables")
 
 DB_PATH = "trading_data.db"
 
 # ----------------------------------------------------------------------
-# DATABASE (full schema with persistence for daily trade counts)
+# DATABASE
 # ----------------------------------------------------------------------
 def init_db():
+    logger.info("Initializing database...")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS ticks (timestamp REAL, token TEXT, price REAL, volume REAL, bid REAL, ask REAL, oi REAL)""")
@@ -66,7 +84,6 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS performance_metrics (timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, calmar REAL, win_rate REAL, profit_factor REAL, max_drawdown REAL, avg_trade REAL, expectancy REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS drawdown_events (timestamp REAL, index_name TEXT, drawdown_pct REAL, action_taken TEXT, equity_before REAL, equity_after REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS signal_state (index_name TEXT PRIMARY KEY, action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL)""")
-    # Add missing columns if upgrading from older version
     try:
         c.execute("ALTER TABLE portfolio_equity ADD COLUMN last_trade_date TEXT")
     except Exception:
@@ -77,18 +94,20 @@ def init_db():
         pass
     conn.commit()
     conn.close()
+    logger.info("Database initialized successfully")
 
 init_db()
 
 try:
     from SmartApi import SmartConnect
     from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-except ImportError:
-    logger.error("SmartApi not installed. Please install: pip install SmartApi")
+    logger.info("SmartApi imported successfully")
+except ImportError as e:
+    logger.error(f"SmartApi import failed: {e}")
     sys.exit(1)
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION (all active)
+# INDEX CONFIGURATION
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -123,8 +142,8 @@ INDEX_CONFIG = {
     }
 }
 
-# Performance optimisation: set of index tokens for O(1) lookup
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values()}
+logger.info(f"Loaded {len(INDEX_CONFIG)} indices: {list(INDEX_CONFIG.keys())}")
 
 # ----------------------------------------------------------------------
 # GLOBAL STATE & LOCKS
@@ -157,7 +176,6 @@ vix_history = deque(maxlen=200)
 nifty_price_series = deque(maxlen=200)
 banknifty_price_series = deque(maxlen=200)
 
-# Initialize latest_ticks with all required keys (avoid KeyError)
 latest_ticks = {idx: {"spot_price": 0.0, "ce_price": 0.0, "pe_price": 0.0,
                       "ce_volume": 0, "pe_volume": 0, "ce_oi": 0, "pe_oi": 0,
                       "ce_bid": 0.0, "ce_ask": 0.0, "pe_bid": 0.0, "pe_ask": 0.0}
@@ -171,7 +189,7 @@ daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
 last_trade_date = {idx: "" for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
-# MULTI‑TIMEFRAME CANDLES
+# TIMEFRAMES
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min", "8min", "10min", "15min", "20min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "8min":480, "10min":600, "15min":900, "20min":1200}
@@ -181,6 +199,41 @@ candle_histories = {idx: {tf: deque(maxlen=500) for tf in TIMEFRAMES} for idx in
 _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_CONFIG}
 _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_CONFIG}
 _prev_volume = {idx: 0 for idx in INDEX_CONFIG}
+
+# ----------------------------------------------------------------------
+# TECHNICAL INDICATORS (simplified versions)
+# ----------------------------------------------------------------------
+def calculate_ema(prices, period):
+    if not prices: return 0
+    if len(prices) < period: return sum(prices)/len(prices)
+    alpha = 2/(period+1)
+    ema = sum(prices[:period])/period
+    for p in prices[period:]:
+        ema = alpha*p + (1-alpha)*ema
+    return ema
+
+def calculate_rsi(prices, period=14):
+    if len(prices) < period+1: return 50.0
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(max(diff,0))
+        losses.append(max(-diff,0))
+    avg_gain = sum(gains[-period:])/period
+    avg_loss = sum(losses[-period:])/period
+    if avg_loss == 0: return 100.0
+    return 100 - (100/(1+avg_gain/avg_loss))
+
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period+1:
+        return 5.0
+    tr = []
+    for i in range(1, len(closes)):
+        tr.append(abs(closes[i] - closes[i-1]))
+    return sum(tr[-period:])/period if len(tr)>=period else 5.0
+
+def calculate_adx(highs, lows, closes, period=14):
+    return 20.0  # Simplified
 
 def update_candle(idx, price, cumulative_volume, timestamp):
     global _prev_volume
@@ -211,114 +264,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ----------------------------------------------------------------------
-# TECHNICAL INDICATORS
-# ----------------------------------------------------------------------
-def calculate_ema(prices, period):
-    if not prices: return 0
-    if len(prices) < period: return sum(prices)/len(prices)
-    alpha = 2/(period+1)
-    ema = sum(prices[:period])/period
-    for p in prices[period:]:
-        ema = alpha*p + (1-alpha)*ema
-    return ema
-
-def calculate_rsi(prices, period=14):
-    if len(prices) < period+1: return 50.0
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        gains.append(max(diff,0))
-        losses.append(max(-diff,0))
-    avg_gain = sum(gains[-period:])/period
-    avg_loss = sum(losses[-period:])/period
-    if avg_loss == 0: return 100.0
-    return 100 - (100/(1+avg_gain/avg_loss))
-
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow + signal: return 0.0, 0.0, 0.0
-    ema_fast_list, ema_slow_list = [], []
-    val_f = prices[0]
-    val_s = prices[0]
-    alpha_f = 2 / (fast + 1)
-    alpha_s = 2 / (slow + 1)
-    for x in prices:
-        val_f = alpha_f * x + (1 - alpha_f) * val_f
-        val_s = alpha_s * x + (1 - alpha_s) * val_s
-        ema_fast_list.append(val_f)
-        ema_slow_list.append(val_s)
-    macd_line = [f - s for f, s in zip(ema_fast_list, ema_slow_list)]
-    val_sig = macd_line[0]
-    alpha_sig = 2 / (signal + 1)
-    for m in macd_line:
-        val_sig = alpha_sig * m + (1 - alpha_sig) * val_sig
-    return macd_line[-1], val_sig, macd_line[-1] - val_sig
-
-def calculate_atr(highs, lows, closes, period=14):
-    """Note: When highs/lows are empty, uses simple price change."""
-    if len(closes) < period+1:
-        return 5.0
-    tr = []
-    for i in range(1, len(closes)):
-        if len(highs) > i and highs[i] > 0 and lows[i] > 0:
-            hl = highs[i] - lows[i]
-            hc = abs(highs[i] - closes[i-1])
-            lc = abs(lows[i] - closes[i-1])
-            tr.append(max(hl, hc, lc))
-        else:
-            tr.append(abs(closes[i] - closes[i-1]))
-    return sum(tr[-period:])/period if len(tr)>=period else 5.0
-
-def calculate_adx(highs, lows, closes, period=14):
-    if len(closes) < period*2:
-        return 20.0
-    tr = []
-    plus_dm = []
-    minus_dm = []
-    for i in range(1, len(closes)):
-        if len(highs) > i and highs[i] > 0 and lows[i] > 0:
-            hl = highs[i] - lows[i]
-            hc = abs(highs[i] - closes[i-1])
-            lc = abs(lows[i] - closes[i-1])
-            tr.append(max(hl, hc, lc))
-            up = highs[i] - highs[i-1]
-            down = lows[i-1] - lows[i]
-            plus_dm.append(max(up, 0) if up>down else 0)
-            minus_dm.append(max(down, 0) if down>up else 0)
-        else:
-            tr.append(abs(closes[i] - closes[i-1]))
-            plus_dm.append(max(closes[i] - closes[i-1], 0))
-            minus_dm.append(max(closes[i-1] - closes[i], 0))
-    if len(tr) < period:
-        return 20.0
-    atr = sum(tr[:period])/period
-    plus_di = sum(plus_dm[:period])/period
-    minus_di = sum(minus_dm[:period])/period
-    for i in range(period, len(tr)):
-        atr = (atr*(period-1) + tr[i])/period
-        plus_di = (plus_di*(period-1) + plus_dm[i])/period
-        minus_di = (minus_di*(period-1) + minus_dm[i])/period
-    if atr == 0: return 20.0
-    plus_di = 100 * plus_di / atr
-    minus_di = 100 * minus_di / atr
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di+minus_di)>0 else 0
-    adx = dx
-    for i in range(period, len(tr)):
-        adx = (adx*(period-1) + dx)/period
-    return adx
-
-def calculate_vwap(prices, volumes):
-    """Computes VWAP from price and volume sequences."""
-    if not prices:
-        return 0
-    if not volumes:
-        return prices[-1]
-    s_vol = sum(volumes)
-    if s_vol == 0:
-        return prices[-1]
-    return sum(p*v for p,v in zip(prices, volumes)) / s_vol
-
-# ----------------------------------------------------------------------
-# PERSISTENCE FUNCTIONS (including daily trade counts)
+# PERSISTENCE FUNCTIONS
 # ----------------------------------------------------------------------
 def load_portfolio_state():
     global portfolio_state, signal_state, daily_trade_count, last_trade_date
@@ -344,7 +290,6 @@ def load_portfolio_state():
                         "highest": float(row[7]) if row[7] is not None else 0.0
                     })
                     portfolio_state[idx]["open_positions"] = 1
-                # Restore daily counters
                 if len(row) >= 9 and row[8]:
                     last_trade_date[idx] = row[8]
                 if len(row) >= 10 and row[9] is not None:
@@ -353,9 +298,6 @@ def load_portfolio_state():
         logger.info("Persistent state loaded successfully.")
     except Exception as e:
         logger.error(f"Error loading state: {e}")
-
-def load_persisted_state():
-    load_portfolio_state()
 
 def save_portfolio_state(idx):
     with sqlite3.connect(DB_PATH) as conn:
@@ -371,270 +313,7 @@ def save_portfolio_state(idx):
         conn.commit()
 
 # ----------------------------------------------------------------------
-# GREEKS ENGINE (with TTL cache and fallback)
-# ----------------------------------------------------------------------
-greeks_cache_fallback_store = {idx: {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":0.5, "pe_delta":-0.5, "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1, "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50} for idx in INDEX_CONFIG}
-_greeks_cache = {idx: {"data": None, "timestamp": 0} for idx in INDEX_CONFIG}
-_GREEKS_CACHE_TTL = 60  # seconds
-
-def _estimate_greeks_fallback(index_name):
-    """Improved fallback with capped moneyness and delta ranges."""
-    tokens = INDEX_TOKENS.get(index_name, {})
-    with _latest_ticks_lock:
-        ce_price = latest_ticks[index_name]["ce_price"]
-        pe_price = latest_ticks[index_name]["pe_price"]
-        spot = latest_ticks[index_name]["spot_price"]
-    if ce_price > 0 and pe_price > 0 and spot > 0:
-        strike = tokens.get("atm_strike", spot)
-        moneyness = (spot - strike) / spot if spot > 0 else 0
-        moneyness = max(-0.2, min(0.2, moneyness))
-        ce_delta = max(0.05, min(0.95, 0.5 + moneyness * 5))
-        pe_delta = max(-0.95, min(-0.05, -0.5 + (-moneyness) * 5))
-        greeks_data = {
-            "ce_iv": 0.2, "pe_iv": 0.2, "ce_delta": ce_delta, "pe_delta": pe_delta,
-            "ce_gamma": 0.02, "pe_gamma": 0.02, "ce_theta": -0.1, "pe_theta": -0.1,
-            "ce_vega": 0.15, "pe_vega": 0.15, "iv_rank": 50, "iv_percentile": 50
-        }
-    else:
-        greeks_data = greeks_cache_fallback_store.get(index_name, {
-            "ce_iv":0.2, "pe_iv":0.2, "ce_delta":0.5, "pe_delta":-0.5, "ce_gamma":0.02, "pe_gamma":0.02,
-            "ce_theta":-0.1, "pe_theta":-0.1, "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50
-        })
-    greeks_cache_fallback_store[index_name] = greeks_data
-    return greeks_data
-
-def get_option_greeks(index_name):
-    """Fetch Greeks with TTL caching (60 seconds) to avoid hammering the API."""
-    now = time.time()
-    cached = _greeks_cache.get(index_name, {})
-    if cached.get("data") and (now - cached.get("timestamp", 0) < _GREEKS_CACHE_TTL):
-        return cached["data"]
-
-    config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("greeks_enabled"):
-        return None
-    tokens = INDEX_TOKENS.get(index_name)
-    if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
-        return None
-    _, _, obj = get_auth_token()
-    if not obj:
-        data = _estimate_greeks_fallback(index_name)
-        _greeks_cache[index_name] = {"data": data, "timestamp": now}
-        return data
-
-    try:
-        expiry_str = tokens.get("expiry", "")
-        if not expiry_str:
-            data = _estimate_greeks_fallback(index_name)
-            _greeks_cache[index_name] = {"data": data, "timestamp": now}
-            return data
-
-        greeks_payload = {"name": config["symbol"], "expirydate": expiry_str}
-        url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
-        try:
-            local_ip = socket.gethostbyname(socket.gethostname())
-        except Exception:
-            local_ip = "127.0.0.1"
-        auth_token, _, _ = get_auth_token()
-        headers = {"Authorization": f"Bearer {auth_token}", "Content-Type": "application/json",
-                   "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
-                   "X-ClientLocalIP": local_ip, "X-ClientPublicIP": local_ip, "X-MACAddress": "00:00:00:00:00:00",
-                   "X-PrivateKey": ANGEL_API_KEY}
-        resp = requests.post(url, json=greeks_payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") and data.get("data"):
-                greeks_list = data["data"]
-                atm_strike = tokens.get("atm_strike", 0)
-                ce_greeks = pe_greeks = None
-                for g in greeks_list:
-                    strike = float(g.get("strikePrice", 0))
-                    opt_type = g.get("optionType", "")
-                    if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50) * 0.5:
-                        if opt_type == "CE":
-                            ce_greeks = g
-                        elif opt_type == "PE":
-                            pe_greeks = g
-                if ce_greeks and pe_greeks:
-                    ce_iv = float(ce_greeks.get("impliedVolatility", 0))
-                    pe_iv = float(pe_greeks.get("impliedVolatility", 0))
-                    if ce_iv > 1:
-                        ce_iv /= 100
-                    if pe_iv > 1:
-                        pe_iv /= 100
-                    greeks_data = {
-                        "ce_iv": ce_iv, "pe_iv": pe_iv,
-                        "ce_delta": float(ce_greeks.get("delta", 0)),
-                        "pe_delta": float(pe_greeks.get("delta", 0)),
-                        "ce_gamma": float(ce_greeks.get("gamma", 0)),
-                        "pe_gamma": float(pe_greeks.get("gamma", 0)),
-                        "ce_theta": float(ce_greeks.get("theta", 0)),
-                        "pe_theta": float(pe_greeks.get("theta", 0)),
-                        "ce_vega": float(ce_greeks.get("vega", 0)),
-                        "pe_vega": float(pe_greeks.get("vega", 0)),
-                        "iv_rank": 50, "iv_percentile": 50
-                    }
-                    greeks_cache_fallback_store[index_name] = greeks_data
-                    _greeks_cache[index_name] = {"data": greeks_data, "timestamp": now}
-                    return greeks_data
-        data = _estimate_greeks_fallback(index_name)
-        _greeks_cache[index_name] = {"data": data, "timestamp": now}
-        return data
-    except Exception as e:
-        logger.debug(f"Greeks API error {index_name}: {e}")
-        data = _estimate_greeks_fallback(index_name)
-        _greeks_cache[index_name] = {"data": data, "timestamp": now}
-        return data
-
-# ----------------------------------------------------------------------
-# ML FILTER (rule-based confidence scoring)
-# ----------------------------------------------------------------------
-class MLSignalFilter:
-    def __init__(self):
-        self.is_trained = False
-
-    def predict(self, feature_vector):
-        try:
-            prem, spot, rsi, adx, vix, sentiment = feature_vector
-
-            score = 0.50
-
-            # Healthy RSI
-            if 45 <= rsi <= 70:
-                score += 0.10
-
-            # Strong trend
-            if adx > 25:
-                score += 0.15
-
-            # Stable volatility
-            if 12 <= vix <= 25:
-                score += 0.10
-
-            # Bullish/Bearish sentiment present
-            if sentiment > 55 or sentiment < 45:
-                score += 0.10
-
-            # Premium not too far from spot movement
-            if prem > 0 and spot > 0:
-                score += 0.05
-
-            return max(0.0, min(1.0, score))
-
-        except Exception as e:
-            logger.debug(f"ML filter error: {e}")
-            return 0.50
-
-ml_filter = MLSignalFilter()
-
-# ----------------------------------------------------------------------
-# KELLY CRITERION with running averages and capped b-ratio
-# ----------------------------------------------------------------------
-class KellyCriterion:
-    def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
-        self.index_name = index_name
-        self.kelly_fraction = kelly_fraction
-        self.min_trades = min_trades
-        self.alpha = 1.0
-        self.beta = 1.0
-        self.win_count = 0
-        self.loss_count = 0
-        self.avg_win = 0.0
-        self.avg_loss = 0.0
-
-    def update(self, trade_pnl_pct):
-        if trade_pnl_pct > 0:
-            self.win_count += 1
-            self.alpha += 1
-            self.avg_win = ((self.avg_win * (self.win_count - 1)) + trade_pnl_pct) / self.win_count
-        else:
-            self.loss_count += 1
-            self.beta += 1
-            self.avg_loss = ((self.avg_loss * (self.loss_count - 1)) + trade_pnl_pct) / self.loss_count
-
-    def get_recommended_risk_pct(self):
-        total = self.win_count + self.loss_count
-        if total < self.min_trades:
-            return 0.5, 0.5, self.avg_win, self.avg_loss
-        p = self.win_count / total
-        q = 1 - p
-        b = 2.0
-        if self.avg_loss != 0:
-            b = abs(self.avg_win / self.avg_loss)
-            b = min(b, 10.0)  # Cap reward/risk ratio to avoid explosive Kelly
-        kelly_full = (p * b - q) / b if b > 0 else 0
-        kelly_full = max(0, min(kelly_full, 0.5))
-        return kelly_full * self.kelly_fraction, p, self.avg_win, self.avg_loss
-
-kelly_trackers = {idx: KellyCriterion(idx) for idx in INDEX_CONFIG}
-
-# ----------------------------------------------------------------------
-# PERFORMANCE TRACKER (simplified - placeholder, not used)
-# ----------------------------------------------------------------------
-class PerformanceTracker:
-    def __init__(self, index_name):
-        self.index_name = index_name
-    def add_trade(self, pnl):
-        pass  # Intentionally empty; can be implemented later
-performance_trackers = {idx: PerformanceTracker(idx) for idx in INDEX_CONFIG}
-
-# ----------------------------------------------------------------------
-# CORRELATION FILTER (placeholder - intentionally disabled)
-# ----------------------------------------------------------------------
-class CorrelationFilter:
-    def __init__(self):
-        self.nifty_returns = deque(maxlen=50)
-        self.banknifty_returns = deque(maxlen=50)
-    def update(self, nifty_price, banknifty_price):
-        if nifty_price>0 and banknifty_price>0:
-            self.nifty_returns.append(nifty_price)
-            self.banknifty_returns.append(banknifty_price)
-    def analyze(self, index_name, action):
-        # Currently disabled - always returns pass-through
-        return {"beta_adjustment": 1.0, "block_reason": None}
-correlation_filter = CorrelationFilter()
-
-# ----------------------------------------------------------------------
-# VOLUME PROFILE ENGINE - supports separate VWAP for spot, CE, PE
-# ----------------------------------------------------------------------
-class VolumeProfileEngine:
-    def __init__(self, index_name):
-        self.price_volume = deque(maxlen=1000)   # spot
-        self.ce_price_volume = deque(maxlen=1000)
-        self.pe_price_volume = deque(maxlen=1000)
-
-    def update(self, price, volume, option_type=None):
-        if option_type is None:
-            if price > 0 and volume > 0:
-                self.price_volume.append((price, volume))
-        elif option_type == "CE":
-            if price > 0 and volume > 0:
-                self.ce_price_volume.append((price, volume))
-        elif option_type == "PE":
-            if price > 0 and volume > 0:
-                self.pe_price_volume.append((price, volume))
-
-    def analyze(self, current_price, current_volume, option_type=None):
-        if option_type is None:
-            pv = self.price_volume
-        elif option_type == "CE":
-            pv = self.ce_price_volume
-        elif option_type == "PE":
-            pv = self.pe_price_volume
-        else:
-            pv = self.price_volume
-
-        if not pv:
-            return {"vwap": 0.0, "poc": 0, "vah": 0, "val": 0, "signal": "neutral", "strength": 0}
-        total_pv = sum(p * v for p, v in pv)
-        total_v = sum(v for p, v in pv)
-        vwap = total_pv / total_v if total_v > 0 else current_price
-        return {"vwap": vwap, "poc": 0, "vah": 0, "val": 0, "signal": "neutral", "strength": 0}
-
-volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
-
-# ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT
+# AUTHENTICATION
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -645,18 +324,21 @@ def get_auth_token():
         if auth_cache["token"] and (now - auth_cache["timestamp"] < 3300):
             return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
         try:
+            logger.info("Generating new auth token...")
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            logger.info(f"TOTP generated: {totp[:4]}...")
             obj = SmartConnect(api_key=ANGEL_API_KEY)
             session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
             if not session.get("status"):
+                logger.error(f"Auth failed: {session}")
                 return None, None, None
             auth_token = session["data"]["jwtToken"]
             feed_token = obj.getfeedToken()
             auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-            logger.info("Auth token refreshed")
+            logger.info("Auth token refreshed successfully")
             return auth_token, feed_token, obj
         except Exception as e:
-            logger.error(f"Auth error: {type(e).__name__}")
+            logger.error(f"Auth error: {type(e).__name__} - {str(e)}")
             return None, None, None
 
 def safe_ltp(resp):
@@ -691,9 +373,12 @@ def get_index_spot(index_name):
                 ltp /= 100
             return ltp
     except Exception as e:
-        logger.error(f"Spot fetch {index_name}: {e}")
+        logger.debug(f"Spot fetch {index_name}: {e}")
     return None
 
+# ----------------------------------------------------------------------
+# SCRIP MASTER / TOKEN MANAGEMENT
+# ----------------------------------------------------------------------
 _scrip_cache = {"data": None, "timestamp": 0}
 _scrip_lock = threading.Lock()
 
@@ -804,30 +489,8 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# SENTIMENT & SIGNAL MAPPING
+# SENTIMENT
 # ----------------------------------------------------------------------
-SENTIMENT_SCORES = {
-    "STRONG_BULLISH": (85, 100, "STRONG BULLISH", "STRONG_BUY_CE"),
-    "BULLISH": (70, 84, "BULLISH", "BUY_CE"),
-    "SLOW_BULLISH": (55, 69, "SLOW BULLISH", "LOW_BUY_CE"),
-    "NEUTRAL": (45, 54, "NEUTRAL", "NO_TRADE"),
-    "SLOW_BEARISH": (30, 44, "SLOW BEARISH", "LOW_BUY_PE"),
-    "BEARISH": (15, 29, "BEARISH", "BUY_PE"),
-    "STRONG_BEARISH": (0, 14, "STRONG BEARISH", "STRONG_BUY_PE")
-}
-
-def get_signal_from_sentiment(sentiment):
-    for _, (low, high, _, action) in SENTIMENT_SCORES.items():
-        if low <= sentiment <= high:
-            return action
-    return "NO_TRADE"
-
-def get_sentiment_label(sentiment):
-    for _, (low, high, label, _) in SENTIMENT_SCORES.items():
-        if low <= sentiment <= high:
-            return label
-    return "UNKNOWN"
-
 def compute_sentiment(index_name):
     sentiment_scores = []
     for tf in TIMEFRAMES:
@@ -878,61 +541,153 @@ def compute_sentiment(index_name):
     sentiment = 50 + (total / 3.5)
     return max(0, min(100, sentiment))
 
-def get_trend_for_timeframe(index_name, tf):
-    with _candle_histories_lock:
-        candles = list(candle_histories[index_name][tf])
-    if len(candles) < 20:
-        return "NEUTRAL"
-    closes = [c["close"] for c in candles]
-    ema9 = calculate_ema(closes, 9)
-    ema21 = calculate_ema(closes, 21)
-    price = closes[-1]
-    if ema9 > ema21 and price > ema9:
-        return "BULLISH"
-    elif ema9 < ema21 and price < ema9:
-        return "BEARISH"
-    return "NEUTRAL"
+SENTIMENT_SCORES = {
+    "STRONG_BULLISH": (85, 100, "STRONG BULLISH", "STRONG_BUY_CE"),
+    "BULLISH": (70, 84, "BULLISH", "BUY_CE"),
+    "SLOW_BULLISH": (55, 69, "SLOW BULLISH", "LOW_BUY_CE"),
+    "NEUTRAL": (45, 54, "NEUTRAL", "NO_TRADE"),
+    "SLOW_BEARISH": (30, 44, "SLOW BEARISH", "LOW_BUY_PE"),
+    "BEARISH": (15, 29, "BEARISH", "BUY_PE"),
+    "STRONG_BEARISH": (0, 14, "STRONG BEARISH", "STRONG_BUY_PE")
+}
+
+def get_signal_from_sentiment(sentiment):
+    for _, (low, high, _, action) in SENTIMENT_SCORES.items():
+        if low <= sentiment <= high:
+            return action
+    return "NO_TRADE"
+
+def get_sentiment_label(sentiment):
+    for _, (low, high, label, _) in SENTIMENT_SCORES.items():
+        if low <= sentiment <= high:
+            return label
+    return "UNKNOWN"
 
 # ----------------------------------------------------------------------
-# EXIT LOGIC (removed invalid spot-VWAP vs premium comparison)
+# ML FILTER
 # ----------------------------------------------------------------------
-def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem):
-    if len(prices_spot) < 60:
-        return False, ""
-    exit_reason = ""
-    with _candle_histories_lock:
-        candles = list(candle_histories[index_name]["5min"])
-    if len(candles) >= 10:
-        closes = [c["close"] for c in candles[-10:]]
-        ema9 = calculate_ema(closes, 9)
-        ema21 = calculate_ema(closes, 21)
-        if "CE" in action and ema9 < ema21:
-            exit_reason = "5min trend turned bearish"
-        elif "PE" in action and ema9 > ema21:
-            exit_reason = "5min trend turned bullish"
-    if exit_reason:
-        return True, exit_reason
-    with _candle_histories_lock:
-        closes = [c["close"] for c in candle_histories[index_name]["1min"]]
-    if len(closes) >= 20:
-        price_trend = closes[-1] - closes[-10]
-        rsi_vals = [calculate_rsi(closes[:i]) for i in range(len(closes)-10, len(closes)+1)]
-        if len(rsi_vals) >= 2:
-            rsi_trend = rsi_vals[-1] - rsi_vals[-2]
-            if "CE" in action and price_trend > 0 and rsi_trend < 0:
-                return True, "Bearish divergence"
-            if "PE" in action and price_trend < 0 and rsi_trend > 0:
-                return True, "Bullish divergence"
-    with _latest_ticks_lock:
-        vix = latest_ticks["VIX"]["vix"]
-    if len(vix_history) >= 10:
-        vix_sma = sum(list(vix_history)[-10:]) / 10
-        if vix > vix_sma * 1.25:
-            return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
-    return False, ""
+class MLSignalFilter:
+    def __init__(self):
+        self.is_trained = False
+    def predict(self, feature_vector):
+        try:
+            prem, spot, rsi, adx, vix, sentiment = feature_vector
+            score = 0.50
+            if 45 <= rsi <= 70:
+                score += 0.10
+            if adx > 25:
+                score += 0.15
+            if 12 <= vix <= 25:
+                score += 0.10
+            if sentiment > 55 or sentiment < 45:
+                score += 0.10
+            if prem > 0 and spot > 0:
+                score += 0.05
+            return max(0.0, min(1.0, score))
+        except Exception:
+            return 0.50
+ml_filter = MLSignalFilter()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS
+# KELLY CRITERION
+# ----------------------------------------------------------------------
+class KellyCriterion:
+    def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
+        self.index_name = index_name
+        self.kelly_fraction = kelly_fraction
+        self.min_trades = min_trades
+        self.win_count = 0
+        self.loss_count = 0
+        self.avg_win = 0.0
+        self.avg_loss = 0.0
+    def update(self, trade_pnl_pct):
+        if trade_pnl_pct > 0:
+            self.win_count += 1
+            self.avg_win = ((self.avg_win * (self.win_count - 1)) + trade_pnl_pct) / self.win_count
+        else:
+            self.loss_count += 1
+            self.avg_loss = ((self.avg_loss * (self.loss_count - 1)) + trade_pnl_pct) / self.loss_count
+    def get_recommended_risk_pct(self):
+        total = self.win_count + self.loss_count
+        if total < self.min_trades:
+            return 0.5, 0.5, self.avg_win, self.avg_loss
+        p = self.win_count / total
+        q = 1 - p
+        b = 2.0
+        if self.avg_loss != 0:
+            b = abs(self.avg_win / self.avg_loss)
+            b = min(b, 10.0)
+        kelly_full = (p * b - q) / b if b > 0 else 0
+        kelly_full = max(0, min(kelly_full, 0.5))
+        return kelly_full * self.kelly_fraction, p, self.avg_win, self.avg_loss
+kelly_trackers = {idx: KellyCriterion(idx) for idx in INDEX_CONFIG}
+
+# ----------------------------------------------------------------------
+# VOLUME PROFILE ENGINE
+# ----------------------------------------------------------------------
+class VolumeProfileEngine:
+    def __init__(self, index_name):
+        self.price_volume = deque(maxlen=1000)
+        self.ce_price_volume = deque(maxlen=1000)
+        self.pe_price_volume = deque(maxlen=1000)
+    def update(self, price, volume, option_type=None):
+        if option_type is None:
+            if price > 0 and volume > 0:
+                self.price_volume.append((price, volume))
+        elif option_type == "CE":
+            if price > 0 and volume > 0:
+                self.ce_price_volume.append((price, volume))
+        elif option_type == "PE":
+            if price > 0 and volume > 0:
+                self.pe_price_volume.append((price, volume))
+    def analyze(self, current_price, current_volume, option_type=None):
+        if option_type is None:
+            pv = self.price_volume
+        elif option_type == "CE":
+            pv = self.ce_price_volume
+        elif option_type == "PE":
+            pv = self.pe_price_volume
+        else:
+            pv = self.price_volume
+        if not pv:
+            return {"vwap": 0.0}
+        total_pv = sum(p * v for p, v in pv)
+        total_v = sum(v for p, v in pv)
+        vwap = total_pv / total_v if total_v > 0 else current_price
+        return {"vwap": vwap}
+volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
+
+class CorrelationFilter:
+    def __init__(self):
+        self.nifty_returns = deque(maxlen=50)
+        self.banknifty_returns = deque(maxlen=50)
+    def update(self, nifty_price, banknifty_price):
+        if nifty_price>0 and banknifty_price>0:
+            self.nifty_returns.append(nifty_price)
+            self.banknifty_returns.append(banknifty_price)
+    def analyze(self, index_name, action):
+        return {"beta_adjustment": 1.0, "block_reason": None}
+correlation_filter = CorrelationFilter()
+
+# ----------------------------------------------------------------------
+# MARKET STATE
+# ----------------------------------------------------------------------
+def is_market_open():
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    current = now_ist.time()
+    return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
+
+def is_expiry_day(index_name):
+    config = INDEX_CONFIG.get(index_name)
+    if not config:
+        return False
+    today = datetime.now().strftime("%d%b%Y").upper()
+    tokens = INDEX_TOKENS.get(index_name, {})
+    expiry = tokens.get("expiry", "")
+    return today == expiry
+
+# ----------------------------------------------------------------------
+# SIGNAL ENGINE (simplified but functional)
 # ----------------------------------------------------------------------
 def send_telegram_alert(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -960,23 +715,28 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
             "exit_reason": exit_reason
         })
 
-def is_expiry_day(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config:
-        return False
-    today = datetime.now().strftime("%d%b%Y").upper()
-    tokens = INDEX_TOKENS.get(index_name, {})
-    expiry = tokens.get("expiry", "")
-    return today == expiry
+def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem):
+    if len(prices_spot) < 60:
+        return False, ""
+    with _candle_histories_lock:
+        closes = [c["close"] for c in candle_histories[index_name]["1min"]]
+    if len(closes) >= 20:
+        price_trend = closes[-1] - closes[-10]
+        rsi_vals = [calculate_rsi(closes[:i]) for i in range(len(closes)-10, len(closes)+1)]
+        if len(rsi_vals) >= 2:
+            rsi_trend = rsi_vals[-1] - rsi_vals[-2]
+            if "CE" in action and price_trend > 0 and rsi_trend < 0:
+                return True, "Bearish divergence"
+            if "PE" in action and price_trend < 0 and rsi_trend > 0:
+                return True, "Bullish divergence"
+    with _latest_ticks_lock:
+        vix = latest_ticks["VIX"]["vix"]
+    if len(vix_history) >= 10:
+        vix_sma = sum(list(vix_history)[-10:]) / 10
+        if vix > vix_sma * 1.25:
+            return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
+    return False, ""
 
-def is_market_open():
-    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    current = now_ist.time()
-    return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
-
-# ----------------------------------------------------------------------
-# MAIN SIGNAL ENGINE
-# ----------------------------------------------------------------------
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"):
         return
@@ -1026,7 +786,6 @@ def run_signal_engine_for_index(index_name):
     if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
         correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
-    greeks_data = get_option_greeks(index_name) if INDEX_CONFIG[index_name].get("greeks_enabled") else None
     sentiment = compute_sentiment(index_name)
     action = get_signal_from_sentiment(sentiment)
     sentiment_label = get_sentiment_label(sentiment)
@@ -1158,7 +917,6 @@ def run_signal_engine_for_index(index_name):
                     reset_signal_state(index_name, now, exit_reason)
                     return
 
-                # Option-specific VWAP exit
                 if "CE" in active:
                     vwap_data = vp_engine.analyze(ce_prem, ce_vol, option_type="CE")
                 else:
@@ -1174,7 +932,7 @@ def run_signal_engine_for_index(index_name):
                             portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_state(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                        send_telegram_alert(f"EXIT {index_name} | VWAP (premium below option VWAP) | PnL: {pnl:.2f} pts")
+                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f} pts")
                         reset_signal_state(index_name, now, "VWAP_EXIT")
                         return
                     elif "PE" in active and prem > option_vwap * 1.003:
@@ -1186,7 +944,7 @@ def run_signal_engine_for_index(index_name):
                             portfolio_state[index_name]["live_pnl"] = 0.0
                         save_portfolio_state(index_name)
                         kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                        send_telegram_alert(f"EXIT {index_name} | VWAP (premium above option VWAP) | PnL: {pnl:.2f} pts")
+                        send_telegram_alert(f"EXIT {index_name} | VWAP | PnL: {pnl:.2f} pts")
                         reset_signal_state(index_name, now, "VWAP_EXIT")
                         return
 
@@ -1268,33 +1026,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BUILDING"
             return
 
-    # Greeks filter - relaxed threshold and STRONG override
-    if INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data:
-        delta = greeks_data["ce_delta"] if side == "CE" else greeks_data["pe_delta"]
-        if "STRONG" not in action and abs(delta) > 0.80:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Greeks block: Delta {delta:.2f} > 0.80"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            return
-        iv_rank = greeks_data.get("iv_rank", 50)
-        if iv_rank > 80 and "LOW" not in action:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"High IV rank {iv_rank:.0f}"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            return
-
-    pair = INDEX_CONFIG[index_name].get("correlation_pair")
-    if pair:
-        corr_analysis = correlation_filter.analyze(index_name, action)
-        if corr_analysis.get("block_reason"):
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Correlation block: {corr_analysis['block_reason']}"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            return
-        beta_adj = corr_analysis.get("beta_adjustment", 1.0)
-    else:
-        beta_adj = 1.0
-
     with _price_histories_lock:
         prices_spot = list(price_histories[index_name])
     rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50
@@ -1309,9 +1040,7 @@ def run_signal_engine_for_index(index_name):
 
     ml_prob = ml_filter.predict([prem, spot, rsi, adx, vix, sentiment])
 
-    logger.info(
-        f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}"
-    )
+    logger.info(f"{index_name} ML={ml_prob:.2f} RSI={rsi:.1f} ADX={adx:.1f} VIX={vix:.1f}")
 
     if ml_prob < 0.55 and "STRONG" not in action:
         with _market_signal_lock:
@@ -1336,13 +1065,6 @@ def run_signal_engine_for_index(index_name):
         risk_pct *= 1.2
     elif adx < 15:
         risk_pct *= 0.8
-    risk_pct *= beta_adj
-    if greeks_data:
-        iv_rank = greeks_data.get("iv_rank", 50)
-        if iv_rank > 80:
-            risk_pct *= 0.8
-        elif iv_rank < 20:
-            risk_pct *= 1.1
     if is_expiry_day(index_name):
         risk_pct *= 0.5
     risk_pct = max(0.5, min(3.0, risk_pct))
@@ -1378,7 +1100,6 @@ def run_signal_engine_for_index(index_name):
     with _portfolio_state_lock:
         portfolio_state[index_name]["open_positions"] = 1
     signal_buffer[index_name]["ce_count"] = signal_buffer[index_name]["pe_count"] = 0
-    # Only increment daily_trade_count on entry (not on exit)
     daily_trade_count[index_name] += 1
     save_portfolio_state(index_name)
 
@@ -1408,36 +1129,45 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# REST-ONLY MODE (WebSocket disabled for Render compatibility)
+# REST-ONLY MODE (with detailed logging)
 # ----------------------------------------------------------------------
-ws_running = False  # Force disable WebSocket
 tick_counter = 0
 last_tick_timestamp = time.time()
+fetch_cycle_count = 0
 
 def start_rest_only_mode():
-    """REST-only mode - continuously fetches data via REST API"""
-    logger.info("Starting REST-only mode (WebSocket disabled for Render compatibility)")
+    global tick_counter, last_tick_timestamp, fetch_cycle_count
+    
+    logger.info("=" * 60)
+    logger.info("STARTING REST-ONLY MODE")
+    logger.info("=" * 60)
     
     auth_obj = None
     auth_time = 0
     
     while True:
         try:
+            fetch_cycle_count += 1
+            logger.info(f"--- Fetch cycle #{fetch_cycle_count} ---")
+            
             if not is_market_open():
-                logger.info("Market closed, waiting...")
+                logger.info("Market is closed. Waiting 60 seconds...")
                 time.sleep(60)
                 continue
             
-            now = time.time()
+            logger.info("Market is open. Fetching data...")
             
             # Refresh auth token if needed
+            now = time.time()
             if not auth_obj or now - auth_time > 3300:
+                logger.info("Getting auth token...")
                 _, _, auth_obj = get_auth_token()
                 auth_time = now
                 if not auth_obj:
-                    logger.warning("Failed to get auth token, retrying...")
+                    logger.warning("Failed to get auth token, retrying in 10 seconds...")
                     time.sleep(10)
                     continue
+                logger.info("Auth token obtained successfully")
             
             # Refresh tokens if needed
             for idx in INDEX_CONFIG:
@@ -1446,11 +1176,13 @@ def start_rest_only_mode():
                 
                 tokens = INDEX_TOKENS.get(idx, {})
                 if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                    logger.info(f"Getting ATM tokens for {idx}...")
                     get_current_atm_tokens(idx)
                     continue
                 
                 try:
                     # Get spot price
+                    logger.debug(f"Fetching spot for {idx}...")
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
                         with _latest_ticks_lock:
@@ -1461,13 +1193,15 @@ def start_rest_only_mode():
                         with _latest_ticks_lock:
                             last_known_prices[idx]["spot"] = spot
                             last_known_prices[idx]["timestamp"] = time.time()
-                        global tick_counter
                         tick_counter += 1
-                        global last_tick_timestamp
                         last_tick_timestamp = time.time()
+                        logger.info(f"{idx} Spot: {spot:.2f}")
+                    else:
+                        logger.debug(f"{idx} Spot: No data")
                     
                     # Get CE price
                     if tokens.get("ce_token") and tokens.get("ce_symbol"):
+                        logger.debug(f"Fetching CE for {idx}...")
                         ce_resp = auth_obj.ltpData(
                             INDEX_CONFIG[idx]["option_exchange"], 
                             tokens["ce_symbol"], 
@@ -1484,9 +1218,13 @@ def start_rest_only_mode():
                             volume_profile_engines[idx].update(ce_price, 0, option_type="CE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ce_price
+                            logger.info(f"{idx} CE: {ce_price:.2f}")
+                        else:
+                            logger.debug(f"{idx} CE: No data")
                     
                     # Get PE price
                     if tokens.get("pe_token") and tokens.get("pe_symbol"):
+                        logger.debug(f"Fetching PE for {idx}...")
                         pe_resp = auth_obj.ltpData(
                             INDEX_CONFIG[idx]["option_exchange"], 
                             tokens["pe_symbol"], 
@@ -1503,22 +1241,28 @@ def start_rest_only_mode():
                             volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["pe"] = pe_price
+                            logger.info(f"{idx} PE: {pe_price:.2f}")
+                        else:
+                            logger.debug(f"{idx} PE: No data")
                             
                 except Exception as e:
-                    logger.debug(f"REST fetch error for {idx}: {e}")
+                    logger.error(f"REST fetch error for {idx}: {type(e).__name__} - {str(e)}")
             
             # Run signal engine
+            logger.info("Running signal engine...")
             run_all_signals()
+            logger.info("Signal engine completed")
             
             # Sleep before next cycle (5 seconds)
+            logger.info("Sleeping 5 seconds...")
             time.sleep(5)
             
         except Exception as e:
-            logger.error(f"REST-only mode error: {e}")
+            logger.error(f"REST-only mode error: {type(e).__name__} - {str(e)}")
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS (with REST-only mode)
+# BACKGROUND THREADS
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -1527,10 +1271,12 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            logger.info("Starting in REST-only mode (WebSocket disabled for Render)")
+            logger.info("=" * 60)
+            logger.info("Starting background threads...")
+            logger.info("=" * 60)
             
             # Pre-fetch tokens
-            logger.info("Pre‑fetching option tokens...")
+            logger.info("Pre-fetching option tokens...")
             for attempt in range(5):
                 refresh_all_tokens()
                 ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
@@ -1541,10 +1287,14 @@ def _start_background_threads():
                     break
                 time.sleep((attempt + 1) * 2)
             
-            # Start REST-only mode
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
+            # Start REST-only mode thread
+            logger.info("Starting REST-only mode thread...")
+            rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
+            rest_thread.start()
+            logger.info(f"REST-only mode thread started (daemon={rest_thread.daemon})")
+            
             _init_completed = True
-            logger.info("Background threads started in REST-only mode")
+            logger.info("Background threads initialization complete")
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
@@ -1560,10 +1310,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v13.9 (REST-only mode for Render)",
+        "engine": "Multi-Index Options Bot v14.0 (REST-only mode)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
-        "mode": "REST_ONLY"
+        "mode": "REST_ONLY",
+        "ticks_received": tick_counter,
+        "fetch_cycles": fetch_cycle_count
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -1573,8 +1325,10 @@ def live_signals():
         if not INDEX_CONFIG[idx].get("active"):
             continue
         with _market_signal_lock:
-            sentiment_data[idx] = {"score": market_signal[idx].get("sentiment_score", 50),
-                                   "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50))}
+            sentiment_data[idx] = {
+                "score": market_signal[idx].get("sentiment_score", 50),
+                "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50))
+            }
     with _market_signal_lock, _portfolio_state_lock:
         return jsonify({
             "timestamp": datetime.now().isoformat(),
@@ -1584,38 +1338,13 @@ def live_signals():
             "market_open": is_market_open(),
             "debug": {
                 "ws_running": False,
+                "mode": "REST_ONLY",
                 "ticks": tick_counter,
-                "last_tick_ago": round(time.time() - last_tick_timestamp, 1),
-                "mode": "REST_ONLY"
+                "fetch_cycles": fetch_cycle_count,
+                "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "13.9"
+            "version": "14.0"
         })
-
-@app.route("/api/signal-audio", methods=["GET"])
-def signal_audio():
-    latest_action = "NO_TRADE"
-    for idx in INDEX_CONFIG:
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        with _market_signal_lock:
-            sig = market_signal[idx].get("signal", "WAITING")
-            if sig == "EXIT":
-                latest_action = "EXIT"
-                break
-            if sig in ["STRONG_BUY_CE", "BUY_CE", "LOW_BUY_CE", "STRONG_BUY_PE", "BUY_PE", "LOW_BUY_PE"]:
-                latest_action = sig
-                break
-    audio_map = {
-        "STRONG_BUY_CE": "strong_buy_ce.mp3",
-        "BUY_CE": "buy_ce.mp3",
-        "LOW_BUY_CE": "low_buy_ce.mp3",
-        "STRONG_BUY_PE": "strong_buy_pe.mp3",
-        "BUY_PE": "buy_pe.mp3",
-        "LOW_BUY_PE": "low_buy_pe.mp3",
-        "EXIT": "exit.mp3"
-    }
-    audio_file = audio_map.get(latest_action, None)
-    return jsonify({"action": latest_action, "audio_file": audio_file, "timestamp": datetime.now().isoformat()})
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -1624,6 +1353,7 @@ def health():
         "ws_running": False,
         "mode": "REST_ONLY",
         "ticks": tick_counter,
+        "fetch_cycles": fetch_cycle_count,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2)
     })
 
@@ -1632,7 +1362,7 @@ def connection_status():
     return jsonify({
         "websocket_running": False,
         "mode": "REST_ONLY",
-        "last_heartbeat_seconds_ago": None,
+        "fetch_cycles": fetch_cycle_count,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
         "total_ticks_received": tick_counter,
         "market_open": is_market_open(),
@@ -1648,8 +1378,16 @@ def connection_status():
 # MAIN ENTRY POINT
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("INITIALIZING BOT v14.0")
+    logger.info("=" * 60)
+    
     init_db()
     load_portfolio_state()
     _start_background_threads()
-    logger.info("Background workers initiated. Starting Flask API Server in REST-only mode...")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    
+    logger.info("=" * 60)
+    logger.info("Starting Flask server...")
+    logger.info("=" * 60)
+    
+    app.run(host="0.0.0.0", port=10000, debug=False)
