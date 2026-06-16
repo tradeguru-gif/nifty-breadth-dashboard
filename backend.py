@@ -752,6 +752,8 @@ def get_current_atm_tokens(index_name):
                       (df["instrumenttype"] == "OPTIDX") &
                       (df["exch_seg"] == config["option_exchange"])]
             if not opts.empty:
+                # AFTER (clean copy):
+                opts = opts.copy()
                 opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
                 opts = opts.dropna(subset=["expiry_date"])
                 opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
