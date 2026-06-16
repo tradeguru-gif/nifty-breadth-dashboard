@@ -1349,7 +1349,7 @@ def live_signals():
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "OK" if (time.time() - last_tick_timestamp < 30) else "DEGRADED",
+        "status": "OK" if tick_counter > 0 else "DEGRADED",  # Changed from ws_running check
         "ws_running": False,
         "mode": "REST_ONLY",
         "ticks": tick_counter,
