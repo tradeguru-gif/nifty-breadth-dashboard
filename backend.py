@@ -1,4 +1,4 @@
-# === VERSION 13.7 - PRO SIGNAL BOT: All remaining concerns addressed ===
+# === VERSION 13.8 - PRO SIGNAL BOT: Fixed WebSocket connection issues ===
 import sys
 import logging
 import os
@@ -80,8 +80,12 @@ def init_db():
 
 init_db()
 
-from SmartApi import SmartConnect
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+try:
+    from SmartApi import SmartConnect
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+except ImportError:
+    logger.error("SmartApi not installed. Please install: pip install SmartApi")
+    sys.exit(1)
 
 # ----------------------------------------------------------------------
 # INDEX CONFIGURATION (all active)
@@ -1108,7 +1112,6 @@ def run_signal_engine_for_index(index_name):
                         safety_state[index_name]["circuit_breaker"] = True
                         safety_state[index_name]["circuit_breaker_until"] = now + 1800
                         send_telegram_alert(f"CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
-                    # IMPORTANT: Do NOT increment daily_trade_count on SL exit
                     send_telegram_alert(f"EXIT {index_name} | SL | PnL: {pnl:.2f} pts")
                     reset_signal_state(index_name, now, "STOP_LOSS")
                     return
@@ -1123,7 +1126,6 @@ def run_signal_engine_for_index(index_name):
                     pnl_pct = pnl / max(signal_state[index_name]["entry_price"], 1)
                     kelly_trackers[index_name].update(pnl_pct)
                     safety_state[index_name]["consecutive_sl"] = 0
-                    # IMPORTANT: Do NOT increment daily_trade_count on target exit
                     send_telegram_alert(f"EXIT {index_name} | TARGET | PnL: {pnl:.2f} pts")
                     reset_signal_state(index_name, now, "TARGET_HIT")
                     return
@@ -1137,7 +1139,6 @@ def run_signal_engine_for_index(index_name):
                         portfolio_state[index_name]["live_pnl"] = 0.0
                     save_portfolio_state(index_name)
                     kelly_trackers[index_name].update(pnl / max(signal_state[index_name]["entry_price"], 1))
-                    # IMPORTANT: Do NOT increment daily_trade_count on time exit
                     send_telegram_alert(f"EXIT {index_name} | TIME | PnL: {pnl:.2f} pts")
                     reset_signal_state(index_name, now, "TIME_EXIT")
                     return
@@ -1447,7 +1448,7 @@ def on_ws_open(wsapp):
             # Alternative: subscribe each group individually (CORRECT: wrap in list)
             try:
                 for token_group in token_list:
-                    sws.subscribe("admin", 3, [token_group])  # ✅ List of dicts, as required by SmartAPI
+                    sws.subscribe("admin", 3, [token_group])
                 logger.info("Alternative subscription method succeeded")
             except Exception as e2:
                 logger.error(f"Alternative subscription also failed: {e2}")
@@ -1573,18 +1574,30 @@ def start_angel_websocket_improved():
             if not is_market_open():
                 time.sleep(60)
                 continue
+
             auth_token, feed_token, _ = get_auth_token()
             if not feed_token:
                 logger.error("Failed to get feed token, retrying in 10 seconds...")
                 time.sleep(10)
                 continue
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws.on_open = on_ws_open
-            sws.on_data = on_ws_data
-            sws.on_error = on_ws_error
-            sws.on_close = on_ws_close
-            logger.info("Attempting WebSocket connection...")
-            sws.connect()
+
+            # Try multiple connection attempts
+            for attempt in range(3):
+                try:
+                    logger.info(f"WebSocket connection attempt {attempt + 1}/3...")
+                    sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+                    sws.on_open = on_ws_open
+                    sws.on_data = on_ws_data
+                    sws.on_error = on_ws_error
+                    sws.on_close = on_ws_close
+                    sws.connect()
+                    break
+                except Exception as e:
+                    logger.error(f"Connection attempt {attempt + 1} failed: {e}")
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
+
             while ws_running:
                 time.sleep(1)
                 if time.time() - last_heartbeat > 30:
@@ -1594,9 +1607,11 @@ def start_angel_websocket_improved():
                         last_heartbeat = time.time()
                     except Exception:
                         pass
+
             logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
             ws_running = False
             time.sleep(5)
+
         except Exception as e:
             logger.error(f"WebSocket thread error: {e}")
             time.sleep(10)
@@ -1718,7 +1733,6 @@ def start_rest_api_poller():
 # ----------------------------------------------------------------------
 # HYBRID CONNECTION MANAGER
 # ----------------------------------------------------------------------
-
 class ConnectionManager:
     def __init__(self):
         self.use_websocket = True
@@ -1727,46 +1741,21 @@ class ConnectionManager:
         if self.use_websocket:
             try:
                 logger.info("Attempting WebSocket connection...")
-
-                threading.Thread(
-                    target=start_angel_websocket_improved,
-                    daemon=True
-                ).start()
-
-                for _ in range(30):
-                    if ws_running:
-                        break
-                    time.sleep(2)
-
+                threading.Thread(target=start_angel_websocket_improved, daemon=True).start()
+                time.sleep(15)
                 if not ws_running:
-                    logger.warning(
-                        "WebSocket failed to connect, switching to REST-only mode"
-                    )
+                    logger.warning("WebSocket failed to connect, switching to REST-only mode")
                     self.use_websocket = False
-                    threading.Thread(
-                        target=start_rest_only_mode,
-                        daemon=True
-                    ).start()
+                    threading.Thread(target=start_rest_only_mode, daemon=True).start()
                 else:
-                    logger.info("WebSocket connected successfully")
-                    threading.Thread(
-                        target=ws_watchdog,
-                        daemon=True
-                    ).start()
-
+                    threading.Thread(target=ws_watchdog, daemon=True).start()
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
                 self.use_websocket = False
-                threading.Thread(
-                    target=start_rest_only_mode,
-                    daemon=True
-                ).start()
-
+                threading.Thread(target=start_rest_only_mode, daemon=True).start()
         else:
-            threading.Thread(
-                target=start_rest_only_mode,
-                daemon=True
-            ).start()
+            threading.Thread(target=start_rest_only_mode, daemon=True).start()
+
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS (with token pre‑fetch and improved connection)
 # ----------------------------------------------------------------------
@@ -1810,7 +1799,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v13.7 (All remaining concerns addressed)",
+        "engine": "Multi-Index Options Bot v13.8 (Fixed WebSocket connection)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1832,7 +1821,7 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {"ws_running": ws_running, "ticks": tick_counter, "last_tick_ago": round(time.time() - last_tick_timestamp, 1)},
-            "version": "13.7"
+            "version": "13.8"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -1889,18 +1878,9 @@ def connection_status():
 # ----------------------------------------------------------------------
 # MAIN ENTRY POINT
 # ----------------------------------------------------------------------
-def startup():
-    try:
-        init_db()
-        load_portfolio_state()
-        _start_background_threads()
-        logger.info("Background workers started successfully")
-    except Exception as e:
-        logger.exception(f"Startup failed: {e}")
-
-# Gunicorn startup
-startup()
-
 if __name__ == "__main__":
-    logger.info("Starting Flask API Server...")
+    init_db()
+    load_portfolio_state()
+    _start_background_threads()
+    logger.info("Background workers initiated. Starting Flask API Server...")
     app.run(host="0.0.0.0", port=5000, debug=False)
