@@ -1,4 +1,4 @@
-# === VERSION 14.1 - PRO SIGNAL BOT: Fixed Gunicorn thread startup ===
+# === VERSION 14.1 - PRO SIGNAL BOT: Fully working REST-only mode with Gunicorn support ===
 import sys
 import logging
 import os
@@ -201,7 +201,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_CONFIG}
 _prev_volume = {idx: 0 for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
-# TECHNICAL INDICATORS (simplified versions)
+# TECHNICAL INDICATORS
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices: return 0
@@ -445,9 +445,10 @@ def get_current_atm_tokens(index_name):
                       (df["instrumenttype"] == "OPTIDX") &
                       (df["exch_seg"] == config["option_exchange"])]
             if not opts.empty:
-                opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
+                # Use .loc to avoid SettingWithCopyWarning
+                opts.loc[:, "expiry_date"] = opts["expiry"].apply(parse_expiry_date)
                 opts = opts.dropna(subset=["expiry_date"])
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
+                opts.loc[:, "strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
                 opts = opts.dropna(subset=["strike"])
                 future = opts[opts["expiry_date"] >= datetime.now()]
                 if not future.empty:
@@ -687,7 +688,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ----------------------------------------------------------------------
-# SIGNAL ENGINE (simplified but functional)
+# SIGNAL ENGINE
 # ----------------------------------------------------------------------
 def send_telegram_alert(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1346,10 +1347,36 @@ def live_signals():
             "version": "14.1"
         })
 
+@app.route("/api/signal-audio", methods=["GET"])
+def signal_audio():
+    latest_action = "NO_TRADE"
+    for idx in INDEX_CONFIG:
+        if not INDEX_CONFIG[idx].get("active"):
+            continue
+        with _market_signal_lock:
+            sig = market_signal[idx].get("signal", "WAITING")
+            if sig == "EXIT":
+                latest_action = "EXIT"
+                break
+            if sig in ["STRONG_BUY_CE", "BUY_CE", "LOW_BUY_CE", "STRONG_BUY_PE", "BUY_PE", "LOW_BUY_PE"]:
+                latest_action = sig
+                break
+    audio_map = {
+        "STRONG_BUY_CE": "strong_buy_ce.mp3",
+        "BUY_CE": "buy_ce.mp3",
+        "LOW_BUY_CE": "low_buy_ce.mp3",
+        "STRONG_BUY_PE": "strong_buy_pe.mp3",
+        "BUY_PE": "buy_pe.mp3",
+        "LOW_BUY_PE": "low_buy_pe.mp3",
+        "EXIT": "exit.mp3"
+    }
+    audio_file = audio_map.get(latest_action, None)
+    return jsonify({"action": latest_action, "audio_file": audio_file, "timestamp": datetime.now().isoformat()})
+
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "OK" if tick_counter > 0 else "DEGRADED",  # Changed from ws_running check
+        "status": "OK" if tick_counter > 0 else "DEGRADED",
         "ws_running": False,
         "mode": "REST_ONLY",
         "ticks": tick_counter,
@@ -1375,9 +1402,9 @@ def connection_status():
     })
 
 # ----------------------------------------------------------------------
-# AUTO-START BACKGROUND THREADS (for Gunicorn)
+# AUTO-START BACKGROUND THREADS (CRITICAL FOR GUNICORN)
 # ----------------------------------------------------------------------
-# This runs when Gunicorn imports the module
+# This runs when Gunicorn imports the module (NOT just in __main__)
 logger.info("=" * 60)
 logger.info("AUTO-STARTING BACKGROUND THREADS (Gunicorn mode)")
 logger.info("=" * 60)
