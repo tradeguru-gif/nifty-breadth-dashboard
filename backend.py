@@ -1,4 +1,4 @@
-# === VERSION 13.8 - PRO SIGNAL BOT: Fixed WebSocket connection issues ===
+# === VERSION 13.9 - PRO SIGNAL BOT: Forced REST-only mode for Render deployment ===
 import sys
 import logging
 import os
@@ -1408,229 +1408,49 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET WITH IMPROVED CONNECTION HANDLING & FALLBACK
+# REST-ONLY MODE (WebSocket disabled for Render compatibility)
 # ----------------------------------------------------------------------
-ws_running = False
-sws = None
-last_heartbeat = time.time()
+ws_running = False  # Force disable WebSocket
 tick_counter = 0
 last_tick_timestamp = time.time()
 
-def on_ws_open(wsapp):
-    global ws_running, last_heartbeat
-    ws_running = True
-    last_heartbeat = time.time()
-    logger.info("WebSocket connected successfully, subscribing to tokens...")
-
-    token_list = []
-    for idx, cfg in INDEX_CONFIG.items():
-        if cfg.get("active"):
-            token_list.append({"exchangeType": cfg["ws_exchange_type"], "tokens": [cfg["token"]]})
-
-    for idx, tokens in INDEX_TOKENS.items():
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        if tokens.get("ce_token") and tokens.get("pe_token"):
-            token_list.append({
-                "exchangeType": INDEX_CONFIG[idx]["option_ws_exchange_type"],
-                "tokens": [tokens["ce_token"], tokens["pe_token"]]
-            })
-
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX
-
-    if token_list and sws:
-        try:
-            sws.subscribe("admin", 3, token_list)
-            total = sum(len(g["tokens"]) for g in token_list)
-            logger.info(f"Successfully subscribed to {total} tokens")
-        except Exception as e:
-            logger.error(f"Subscribe error: {e}")
-            # Alternative: subscribe each group individually (CORRECT: wrap in list)
-            try:
-                for token_group in token_list:
-                    sws.subscribe("admin", 3, [token_group])
-                logger.info("Alternative subscription method succeeded")
-            except Exception as e2:
-                logger.error(f"Alternative subscription also failed: {e2}")
-
-def on_ws_error(wsapp, error):
-    global ws_running
-    logger.error(f"WebSocket error: {error}")
-    ws_running = False
-
-def on_ws_close(wsapp, *args):
-    global ws_running
-    ws_running = False
-    logger.warning(f"WebSocket closed: {args}")
-
-def on_ws_data(wsapp, message):
-    global tick_counter, last_heartbeat, last_tick_timestamp
-    last_heartbeat = time.time()
-    if message == b'\x00' or message == '\x00':
-        return
-    try:
-        if isinstance(message, bytes):
-            message = message.decode('utf-8')
-        if isinstance(message, str):
-            data = json.loads(message)
-        elif isinstance(message, dict):
-            data = message
-        else:
-            return
-        ticks = data if isinstance(data, list) else [data]
-        for tick in ticks:
-            token = str(tick.get("token") or "")
-            ltp = tick.get("last_traded_price") or tick.get("ltp") or 0
-            if isinstance(ltp, str):
-                try:
-                    ltp = float(ltp)
-                except Exception:
-                    ltp = 0
-            # Performance: O(1) check for index token
-            if ltp > 100000 and token not in INDEX_TOKEN_SET:
-                ltp /= 100
-            vol = tick.get("volume") or tick.get("v") or 0
-            oi = tick.get("open_interest") or tick.get("oi") or 0
-            bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
-            ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
-
-            for idx, cfg in INDEX_CONFIG.items():
-                if cfg.get("token") == token:
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["spot_price"] = ltp
-                        with _price_histories_lock:
-                            price_histories[idx].append(ltp)
-                        update_candle(idx, ltp, vol, time.time())
-                        tick_counter += 1
-                        last_tick_timestamp = time.time()
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["spot"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                    break
-
-            for idx, tokens in INDEX_TOKENS.items():
-                if not INDEX_CONFIG[idx].get("active"):
-                    continue
-                if token == tokens.get("ce_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["ce_price"] = ltp
-                            latest_ticks[idx]["ce_volume"] = vol
-                            latest_ticks[idx]["ce_oi"] = oi
-                            latest_ticks[idx]["ce_bid"] = bid
-                            latest_ticks[idx]["ce_ask"] = ask
-                        with _ce_price_histories_lock:
-                            ce_price_histories[idx].append(ltp)
-                        volume_profile_engines[idx].update(ltp, vol, option_type="CE")
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["ce"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                    break
-                elif token == tokens.get("pe_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["pe_price"] = ltp
-                            latest_ticks[idx]["pe_volume"] = vol
-                            latest_ticks[idx]["pe_oi"] = oi
-                            latest_ticks[idx]["pe_bid"] = bid
-                            latest_ticks[idx]["pe_ask"] = ask
-                        with _pe_price_histories_lock:
-                            pe_price_histories[idx].append(ltp)
-                        volume_profile_engines[idx].update(ltp, vol, option_type="PE")
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["pe"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                    break
-
-            if token == "99919017" and ltp > 0:
-                with _latest_ticks_lock:
-                    latest_ticks["VIX"]["vix"] = ltp
-                vix_history.append(ltp)
-
-        if tick_counter % 5 == 0 and tick_counter > 0:
-            run_all_signals()
-    except Exception as e:
-        logger.error(f"WS data error: {e}")
-
-def ws_watchdog():
-    global ws_running, last_heartbeat, sws
-    while True:
-        time.sleep(10)
-        now = time.time()
-        if ws_running and (now - last_heartbeat > 20):
-            logger.warning("Data starvation – no tick for 20s, forcing reconnect")
-            ws_running = False
-            if sws:
-                try:
-                    sws.close_connection()
-                except Exception:
-                    pass
-
-def start_angel_websocket_improved():
-    global sws, ws_running
-    while True:
-        try:
-            if not is_market_open():
-                time.sleep(60)
-                continue
-
-            auth_token, feed_token, _ = get_auth_token()
-            if not feed_token:
-                logger.error("Failed to get feed token, retrying in 10 seconds...")
-                time.sleep(10)
-                continue
-
-            # Try multiple connection attempts
-            for attempt in range(3):
-                try:
-                    logger.info(f"WebSocket connection attempt {attempt + 1}/3...")
-                    sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-                    sws.on_open = on_ws_open
-                    sws.on_data = on_ws_data
-                    sws.on_error = on_ws_error
-                    sws.on_close = on_ws_close
-                    sws.connect()
-                    break
-                except Exception as e:
-                    logger.error(f"Connection attempt {attempt + 1} failed: {e}")
-                    if attempt == 2:
-                        raise
-                    time.sleep(2)
-
-            while ws_running:
-                time.sleep(1)
-                if time.time() - last_heartbeat > 30:
-                    try:
-                        if hasattr(sws, 'ping'):
-                            sws.ping()
-                        last_heartbeat = time.time()
-                    except Exception:
-                        pass
-
-            logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
-            ws_running = False
-            time.sleep(5)
-
-        except Exception as e:
-            logger.error(f"WebSocket thread error: {e}")
-            time.sleep(10)
-            ws_running = False
-
-# ----------------------------------------------------------------------
-# REST-ONLY FALLBACK MODE
-# ----------------------------------------------------------------------
 def start_rest_only_mode():
-    logger.info("Starting REST-only mode (WebSocket fallback)")
+    """REST-only mode - continuously fetches data via REST API"""
+    logger.info("Starting REST-only mode (WebSocket disabled for Render compatibility)")
+    
+    auth_obj = None
+    auth_time = 0
+    
     while True:
         try:
             if not is_market_open():
+                logger.info("Market closed, waiting...")
                 time.sleep(60)
                 continue
+            
+            now = time.time()
+            
+            # Refresh auth token if needed
+            if not auth_obj or now - auth_time > 3300:
+                _, _, auth_obj = get_auth_token()
+                auth_time = now
+                if not auth_obj:
+                    logger.warning("Failed to get auth token, retrying...")
+                    time.sleep(10)
+                    continue
+            
+            # Refresh tokens if needed
             for idx in INDEX_CONFIG:
                 if not INDEX_CONFIG[idx].get("active"):
                     continue
+                
+                tokens = INDEX_TOKENS.get(idx, {})
+                if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                    get_current_atm_tokens(idx)
+                    continue
+                
                 try:
+                    # Get spot price
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
                         with _latest_ticks_lock:
@@ -1641,123 +1461,64 @@ def start_rest_only_mode():
                         with _latest_ticks_lock:
                             last_known_prices[idx]["spot"] = spot
                             last_known_prices[idx]["timestamp"] = time.time()
-                    tokens = INDEX_TOKENS.get(idx, {})
-                    if tokens.get("ce_token") and tokens.get("pe_token"):
-                        auth_token, _, obj = get_auth_token()
-                        if obj:
-                            ce_resp = obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
-                            ce_price = safe_ltp(ce_resp)
-                            if ce_price and ce_price > 0:
-                                if ce_price > 100000:
-                                    ce_price /= 100
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["ce_price"] = ce_price
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["ce"] = ce_price
-                                volume_profile_engines[idx].update(ce_price, 0, option_type="CE")
-                            pe_resp = obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
-                            pe_price = safe_ltp(pe_resp)
-                            if pe_price and pe_price > 0:
-                                if pe_price > 100000:
-                                    pe_price /= 100
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["pe_price"] = pe_price
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["pe"] = pe_price
-                                volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
+                        global tick_counter
+                        tick_counter += 1
+                        global last_tick_timestamp
+                        last_tick_timestamp = time.time()
+                    
+                    # Get CE price
+                    if tokens.get("ce_token") and tokens.get("ce_symbol"):
+                        ce_resp = auth_obj.ltpData(
+                            INDEX_CONFIG[idx]["option_exchange"], 
+                            tokens["ce_symbol"], 
+                            tokens["ce_token"]
+                        )
+                        ce_price = safe_ltp(ce_resp)
+                        if ce_price and ce_price > 0:
+                            if ce_price > 100000:
+                                ce_price /= 100
+                            with _latest_ticks_lock:
+                                latest_ticks[idx]["ce_price"] = ce_price
+                            with _ce_price_histories_lock:
+                                ce_price_histories[idx].append(ce_price)
+                            volume_profile_engines[idx].update(ce_price, 0, option_type="CE")
+                            with _latest_ticks_lock:
+                                last_known_prices[idx]["ce"] = ce_price
+                    
+                    # Get PE price
+                    if tokens.get("pe_token") and tokens.get("pe_symbol"):
+                        pe_resp = auth_obj.ltpData(
+                            INDEX_CONFIG[idx]["option_exchange"], 
+                            tokens["pe_symbol"], 
+                            tokens["pe_token"]
+                        )
+                        pe_price = safe_ltp(pe_resp)
+                        if pe_price and pe_price > 0:
+                            if pe_price > 100000:
+                                pe_price /= 100
+                            with _latest_ticks_lock:
+                                latest_ticks[idx]["pe_price"] = pe_price
+                            with _pe_price_histories_lock:
+                                pe_price_histories[idx].append(pe_price)
+                            volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
+                            with _latest_ticks_lock:
+                                last_known_prices[idx]["pe"] = pe_price
+                            
                 except Exception as e:
                     logger.debug(f"REST fetch error for {idx}: {e}")
+            
+            # Run signal engine
             run_all_signals()
+            
+            # Sleep before next cycle (5 seconds)
             time.sleep(5)
+            
         except Exception as e:
             logger.error(f"REST-only mode error: {e}")
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# REST API POLLER (original fallback, kept for compatibility)
-# ----------------------------------------------------------------------
-def start_rest_api_poller():
-    global last_heartbeat
-    logger.info("REST poller started (fallback)")
-    auth_obj = None
-    auth_time = 0
-    while True:
-        try:
-            last_heartbeat = time.time()
-            if not is_market_open():
-                time.sleep(5)
-                continue
-            now = time.time()
-            if not auth_obj or now - auth_time > 3000:
-                _, _, auth_obj = get_auth_token()
-                auth_time = now
-            if not auth_obj:
-                time.sleep(10)
-                continue
-            for idx, tokens in INDEX_TOKENS.items():
-                if not INDEX_CONFIG[idx].get("active"):
-                    continue
-                if tokens.get("ce_token") and tokens.get("pe_token"):
-                    try:
-                        ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
-                        ce = safe_ltp(ce_resp)
-                        if ce and ce > 0:
-                            if ce > 100000:
-                                ce /= 100
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["ce_price"] = ce
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["ce"] = ce
-                                last_known_prices[idx]["timestamp"] = now
-                            volume_profile_engines[idx].update(ce, 0, option_type="CE")
-                        pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
-                        pe = safe_ltp(pe_resp)
-                        if pe and pe > 0:
-                            if pe > 100000:
-                                pe /= 100
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["pe_price"] = pe
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["pe"] = pe
-                                last_known_prices[idx]["timestamp"] = now
-                            volume_profile_engines[idx].update(pe, 0, option_type="PE")
-                    except Exception as e:
-                        logger.debug(f"REST fetch error {idx}: {e}")
-                else:
-                    get_current_atm_tokens(idx)
-            time.sleep(10)
-        except Exception as e:
-            logger.error(f"REST poller error: {e}")
-            time.sleep(10)
-
-# ----------------------------------------------------------------------
-# HYBRID CONNECTION MANAGER
-# ----------------------------------------------------------------------
-class ConnectionManager:
-    def __init__(self):
-        self.use_websocket = True
-
-    def start(self):
-        if self.use_websocket:
-            try:
-                logger.info("Attempting WebSocket connection...")
-                threading.Thread(target=start_angel_websocket_improved, daemon=True).start()
-                time.sleep(15)
-                if not ws_running:
-                    logger.warning("WebSocket failed to connect, switching to REST-only mode")
-                    self.use_websocket = False
-                    threading.Thread(target=start_rest_only_mode, daemon=True).start()
-                else:
-                    threading.Thread(target=ws_watchdog, daemon=True).start()
-            except Exception as e:
-                logger.error(f"WebSocket initialization failed: {e}")
-                self.use_websocket = False
-                threading.Thread(target=start_rest_only_mode, daemon=True).start()
-        else:
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
-
-# ----------------------------------------------------------------------
-# BACKGROUND THREADS (with token pre‑fetch and improved connection)
+# BACKGROUND THREADS (with REST-only mode)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -1766,9 +1527,11 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
+            logger.info("Starting in REST-only mode (WebSocket disabled for Render)")
+            
+            # Pre-fetch tokens
             logger.info("Pre‑fetching option tokens...")
-            max_retries = 5
-            for attempt in range(max_retries):
+            for attempt in range(5):
                 refresh_all_tokens()
                 ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
                            if cfg.get("active") and INDEX_TOKENS[idx].get("ce_token"))
@@ -1776,14 +1539,12 @@ def _start_background_threads():
                 logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
                 if ready == total_active:
                     break
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-            conn_manager = ConnectionManager()
-            conn_manager.start()
+                time.sleep((attempt + 1) * 2)
+            
+            # Start REST-only mode
+            threading.Thread(target=start_rest_only_mode, daemon=True).start()
             _init_completed = True
-            logger.info("Background threads started with connection manager")
+            logger.info("Background threads started in REST-only mode")
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
@@ -1799,9 +1560,10 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v13.8 (Fixed WebSocket connection)",
+        "engine": "Multi-Index Options Bot v13.9 (REST-only mode for Render)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
-        "market_open": is_market_open()
+        "market_open": is_market_open(),
+        "mode": "REST_ONLY"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -1820,8 +1582,13 @@ def live_signals():
             "sentiment": sentiment_data,
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
-            "debug": {"ws_running": ws_running, "ticks": tick_counter, "last_tick_ago": round(time.time() - last_tick_timestamp, 1)},
-            "version": "13.8"
+            "debug": {
+                "ws_running": False,
+                "ticks": tick_counter,
+                "last_tick_ago": round(time.time() - last_tick_timestamp, 1),
+                "mode": "REST_ONLY"
+            },
+            "version": "13.9"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -1853,8 +1620,9 @@ def signal_audio():
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "OK" if ws_running and (time.time() - last_tick_timestamp < 30) else "DEGRADED",
-        "ws_running": ws_running,
+        "status": "OK" if (time.time() - last_tick_timestamp < 30) else "DEGRADED",
+        "ws_running": False,
+        "mode": "REST_ONLY",
         "ticks": tick_counter,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2)
     })
@@ -1862,12 +1630,13 @@ def health():
 @app.route("/api/connection-status", methods=["GET"])
 def connection_status():
     return jsonify({
-        "websocket_running": ws_running,
-        "last_heartbeat_seconds_ago": round(time.time() - last_heartbeat, 2) if last_heartbeat else None,
+        "websocket_running": False,
+        "mode": "REST_ONLY",
+        "last_heartbeat_seconds_ago": None,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
         "total_ticks_received": tick_counter,
         "market_open": is_market_open(),
-        "connection_mode": "WEBSOCKET" if ws_running else "REST_FALLBACK",
+        "connection_mode": "REST_ONLY",
         "active_indices": [idx for idx, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "tokens_loaded": {idx: {
             "ce_token": bool(INDEX_TOKENS[idx].get("ce_token")),
@@ -1882,5 +1651,5 @@ if __name__ == "__main__":
     init_db()
     load_portfolio_state()
     _start_background_threads()
-    logger.info("Background workers initiated. Starting Flask API Server...")
+    logger.info("Background workers initiated. Starting Flask API Server in REST-only mode...")
     app.run(host="0.0.0.0", port=5000, debug=False)
