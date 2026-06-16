@@ -1,4 +1,4 @@
-# === VERSION 14.0 - PRO SIGNAL BOT: REST-only mode with detailed logging ===
+# === VERSION 14.1 - PRO SIGNAL BOT: Fixed Gunicorn thread startup ===
 import sys
 import logging
 import os
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Log startup immediately
 logger.info("=" * 60)
-logger.info("STARTING BOT v14.0 - REST-only mode")
+logger.info("STARTING BOT v14.1 - REST-only mode (Gunicorn compatible)")
 logger.info("=" * 60)
 
 app = Flask(__name__)
@@ -1310,7 +1310,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v14.0 (REST-only mode)",
+        "engine": "Multi-Index Options Bot v14.1 (REST-only mode)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mode": "REST_ONLY",
@@ -1343,7 +1343,7 @@ def live_signals():
                 "fetch_cycles": fetch_cycle_count,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "14.0"
+            "version": "14.1"
         })
 
 @app.route("/api/health", methods=["GET"])
@@ -1375,11 +1375,30 @@ def connection_status():
     })
 
 # ----------------------------------------------------------------------
-# MAIN ENTRY POINT
+# AUTO-START BACKGROUND THREADS (for Gunicorn)
+# ----------------------------------------------------------------------
+# This runs when Gunicorn imports the module
+logger.info("=" * 60)
+logger.info("AUTO-STARTING BACKGROUND THREADS (Gunicorn mode)")
+logger.info("=" * 60)
+
+# Initialize database and load state
+init_db()
+load_portfolio_state()
+
+# Start background threads
+_start_background_threads()
+
+logger.info("=" * 60)
+logger.info("Background threads started. Flask server ready.")
+logger.info("=" * 60)
+
+# ----------------------------------------------------------------------
+# MAIN ENTRY POINT (for direct execution)
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("INITIALIZING BOT v14.0")
+    logger.info("INITIALIZING BOT v14.1 (Direct execution)")
     logger.info("=" * 60)
     
     init_db()
