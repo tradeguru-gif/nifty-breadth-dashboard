@@ -1803,14 +1803,13 @@ def ws_watchdog():
 
 def start_angel_websocket_improved():
     global sws, ws_running
-    logger.info("***** ENTERED start_angel_websocket_improved *****")  # already there
+    logger.info("***** ENTERED start_angel_websocket_improved *****")
     while True:
         try:
-            logger.info("Top of while loop")
-            if not is_market_open():
-                logger.info("Market closed, sleeping 60s")
-                time.sleep(60)
-                continue
+            # If market is closed, sleep briefly and retry – don't block for 60s
+            while not is_market_open():
+                logger.info("Market closed, will retry in 5 seconds...")
+                time.sleep(5)  # short sleep, allows manager to see thread is alive
 
             auth_token, feed_token, _ = get_auth_token()
             logger.info(f"Auth token obtained: {bool(auth_token)}, feed_token: {bool(feed_token)}")
@@ -1829,7 +1828,6 @@ def start_angel_websocket_improved():
             # ---------- TIMEOUT WRAPPER ----------
             logger.info("Attempting WebSocket connection...")
 
-            # Define a wrapper to catch exceptions inside the thread
             def connect_with_log():
                 try:
                     logger.info("Thread: calling sws.connect()")
@@ -1867,8 +1865,6 @@ def start_angel_websocket_improved():
                         last_heartbeat = time.time()
                     except Exception:
                         pass
-                # Optionally log periodically
-                # if int(time.time()) % 10 == 0: logger.debug("WebSocket loop alive")
 
             logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
             ws_running = False
