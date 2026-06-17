@@ -1892,7 +1892,7 @@ def start_rest_only_mode():
     while True:
         try:
             if not is_market_open():
-                time.sleep(60)
+                time.sleep(5)
                 continue
             for idx in INDEX_CONFIG:
                 if not INDEX_CONFIG[idx].get("active"):
