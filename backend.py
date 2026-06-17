@@ -1802,7 +1802,9 @@ def ws_watchdog():
 
 
 def start_angel_websocket_improved():
+    logger.info("***** ENTERED start_angel_websocket_improved *****")   # <-- ADD THIS
     global sws, ws_running
+    ...
     while True:
         try:
             if not is_market_open():
