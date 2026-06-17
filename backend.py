@@ -1,4 +1,4 @@
-# === VERSION 13.10 - PRO SIGNAL BOT: Improved WS parsing + tick watchdog + DEBUG mode ===
+# === VERSION 14.0 - PRO SIGNAL BOT: FIXED SmartAPI WS V2 Binary Parsing ===
 import sys
 import logging
 import os
@@ -11,6 +11,7 @@ import numpy as np
 import sqlite3
 import math
 import socket
+import struct
 from collections import deque
 from datetime import datetime, timedelta, time as dt_time, timezone
 from flask import Flask, jsonify, request
@@ -292,7 +293,6 @@ def calculate_adx(highs, lows, closes, period=14):
             minus_dm.append(max(closes[i-1] - closes[i], 0))
     if len(tr) < period:
         return 20.0
-    # Smoothing
     atr = sum(tr[:period])
     plus_di_sum = sum(plus_dm[:period])
     minus_di_sum = sum(minus_dm[:period])
@@ -1137,7 +1137,7 @@ def run_signal_engine_for_index(index_name):
                     reset_signal_state(index_name, now, exit_reason)
                     return
 
-                # VWAP exit (fixed for both CE and PE)
+                # VWAP exit
                 if "CE" in active:
                     vwap_data = vp_engine.analyze(ce_prem, ce_vol, option_type="CE")
                 else:
@@ -1378,14 +1378,189 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET WITH IMPROVED CONNECTION – UPDATED PARSING + TICK WATCHDOG
+# CUSTOM BINARY TICK PARSER FOR SMARTAPI WS V2
+# Based on official SmartAPI binary protocol specification
+# ----------------------------------------------------------------------
+
+def parse_smartapi_binary(data):
+    """
+    Parse SmartAPI WebSocket V2 binary tick data.
+    Returns a list of dicts with parsed tick fields.
+
+    Binary format (Mode 3 - SnapQuote, most common):
+    Byte positions based on SmartAPI V2 spec:
+
+    All modes share:
+    - Bytes 0-1:   Subscription mode (1=ltp, 2=quote, 3=snapquote)
+    - Bytes 2-26:  Token (25 bytes, null-padded)
+    - Bytes 27-34: Exchange timestamp (int64, ms)
+    - Bytes 35-42: Last traded price (int64, paise -> divide by 100)
+    - Bytes 43-50: Last traded quantity (int64)
+    - Bytes 51-58: Average traded price (int64)
+    - Bytes 59-66: Volume for the day (int64)
+    - Bytes 67-74: Total buy quantity (int64)
+    - Bytes 75-82: Total sell quantity (int64)
+    - Bytes 83-90: Open price (int64)
+    - Bytes 91-98: High price (int64)
+    - Bytes 99-106: Low price (int64)
+    - Bytes 107-114: Close price (int64)
+    - Bytes 115-122: Last traded timestamp (int64)
+
+    Mode 2+ additional:
+    - Bytes 123-130: Open interest (int64)
+    - Bytes 131-138: Open interest change % (int64)
+
+    Mode 3 additional:
+    - Bytes 139-146: Upper circuit (int64)
+    - Bytes 147-154: Lower circuit (int64)
+    - Bytes 155-162: 52-week high (int64)
+    - Bytes 163-170: 52-week low (int64)
+    - Then best 5 bid/ask...
+
+    We use a flexible parser that extracts the common fields regardless of mode.
+    """
+    ticks = []
+
+    if not data or len(data) < 2:
+        return ticks
+
+    # Handle heartbeat (ping/pong)
+    if len(data) == 4 and data == b'ping':
+        return ticks  # Heartbeat, no tick data
+
+    if data == b'\x00' or data == b'\x00\x00':
+        return ticks
+
+    try:
+        # Some implementations send multiple ticks concatenated
+        # Each tick has a mode byte at position 0
+        offset = 0
+
+        while offset < len(data) - 1:
+            # Determine subscription mode
+            if offset + 1 >= len(data):
+                break
+
+            mode = data[offset]
+
+            # Validate mode (1=LTP, 2=Quote, 3=SnapQuote)
+            if mode not in (1, 2, 3):
+                # Might be a different format, try to find next valid mode
+                offset += 1
+                continue
+
+            # Calculate expected minimum length based on mode
+            if mode == 1:
+                min_len = 43  # LTP mode minimum
+            elif mode == 2:
+                min_len = 139  # Quote mode minimum
+            else:
+                min_len = 171  # SnapQuote mode minimum
+
+            if offset + min_len > len(data):
+                break
+
+            try:
+                # Parse token (bytes 2-26, 25 bytes)
+                token_bytes = data[offset + 2:offset + 27]
+                token = token_bytes.decode('utf-8', errors='ignore').strip('\x00').strip()
+
+                # Parse exchange timestamp (bytes 27-34, int64 LE)
+                exchange_ts = struct.unpack('<q', data[offset + 27:offset + 35])[0] if offset + 35 <= len(data) else 0
+
+                # Parse LTP (bytes 35-42, int64 LE, in paise)
+                ltp_raw = struct.unpack('<q', data[offset + 35:offset + 43])[0] if offset + 43 <= len(data) else 0
+                ltp = ltp_raw / 100.0
+
+                # Parse volume (bytes 59-66, int64 LE)
+                volume = struct.unpack('<q', data[offset + 59:offset + 67])[0] if offset + 67 <= len(data) else 0
+
+                # Parse OI (bytes 123-130, int64 LE) - Mode 2+
+                oi = 0
+                if mode >= 2 and offset + 131 <= len(data):
+                    oi = struct.unpack('<q', data[offset + 123:offset + 131])[0]
+
+                # Parse bid/ask (Mode 3)
+                bid = 0
+                ask = 0
+                if mode >= 3 and offset + 179 <= len(data):
+                    # Best 5 buy starts at byte 171
+                    # Each entry: 20 bytes (quantity:8, price:8, orders:4)
+                    best_bid_price_raw = struct.unpack('<q', data[offset + 179:offset + 187])[0] if offset + 187 <= len(data) else 0
+                    bid = best_bid_price_raw / 100.0
+
+                    # Best 5 sell starts after best 5 buy (5 * 20 = 100 bytes)
+                    best_ask_offset = offset + 171 + 100
+                    if best_ask_offset + 8 <= len(data):
+                        best_ask_price_raw = struct.unpack('<q', data[best_ask_offset:best_ask_offset + 8])[0]
+                        ask = best_ask_price_raw / 100.0
+
+                tick = {
+                    "token": token,
+                    "last_traded_price": ltp,
+                    "ltp": ltp,
+                    "price": ltp,
+                    "volume": volume,
+                    "v": volume,
+                    "open_interest": oi,
+                    "oi": oi,
+                    "best_bid_price": bid,
+                    "bid": bid,
+                    "bp": bid,
+                    "best_ask_price": ask,
+                    "ask": ask,
+                    "ap": ask,
+                    "exchange_timestamp": exchange_ts,
+                    "mode": mode
+                }
+                ticks.append(tick)
+
+                # Move to next tick
+                offset += min_len
+
+            except struct.error as e:
+                logger.debug(f"Struct unpack error at offset {offset}: {e}")
+                offset += 1
+            except Exception as e:
+                logger.debug(f"Parse error at offset {offset}: {e}")
+                offset += 1
+
+    except Exception as e:
+        logger.error(f"Binary parse error: {e}")
+
+    return ticks
+
+
+def parse_smartapi_binary_v2(data):
+    """
+    Alternative parser using SmartAPI's _parse_binary_data if available,
+    with fallback to custom parser.
+    """
+    # First try the SDK's built-in parser
+    if sws and hasattr(sws, '_parse_binary_data'):
+        try:
+            result = sws._parse_binary_data(data)
+            if result and isinstance(result, (dict, list)):
+                if isinstance(result, dict):
+                    return [result]
+                return result
+        except Exception as e:
+            logger.debug(f"SDK parser failed: {e}")
+
+    # Fallback to custom parser
+    return parse_smartapi_binary(data)
+
+
+# ----------------------------------------------------------------------
+# WEBSOCKET WITH FIXED BINARY PARSING
 # ----------------------------------------------------------------------
 ws_running = False
 sws = None
 last_heartbeat = time.time()
 tick_counter = 0
 last_tick_timestamp = time.time()
-_last_tick_count = 0  # for tick watchdog
+_last_tick_count = 0
+
 
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat
@@ -1411,7 +1586,9 @@ def on_ws_open(wsapp):
 
     if token_list and sws:
         try:
-            response = sws.subscribe("admin", 3, token_list)
+            # Mode 3 = SnapQuote (most data), Mode 2 = Quote, Mode 1 = LTP
+            # Use Mode 2 for better performance, Mode 3 if you need depth
+            response = sws.subscribe("admin", 2, token_list)
             logger.info(f"Subscription response: {response}")
             total = sum(len(g["tokens"]) for g in token_list)
             logger.info(f"Successfully subscribed to {total} tokens")
@@ -1419,20 +1596,23 @@ def on_ws_open(wsapp):
             logger.error(f"Subscribe error: {e}")
             try:
                 for token_group in token_list:
-                    sws.subscribe("admin", 3, [token_group])
+                    sws.subscribe("admin", 2, [token_group])
                 logger.info("Alternative subscription method succeeded")
             except Exception as e2:
                 logger.error(f"Alternative subscription also failed: {e2}")
+
 
 def on_ws_error(wsapp, error):
     global ws_running
     logger.error(f"WebSocket error: {error}")
     ws_running = False
 
+
 def on_ws_close(wsapp, *args):
     global ws_running
     ws_running = False
     logger.warning(f"WebSocket closed: {args}")
+
 
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws
@@ -1445,35 +1625,25 @@ def on_ws_data(wsapp, message):
             logger.info(f"First 20 bytes: {message[:20].hex()}")
     # --------------------------------
 
-    if message == b'\x00' or message == '\x00':
+    # Skip empty/heartbeat messages
+    if message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping':
         return
 
     try:
-        # ---------- PARSING ----------
-        if isinstance(message, bytes):
-            parsed = None
-            if sws and hasattr(sws, "_parse_binary_data"):
-                try:
-                    parsed = sws._parse_binary_data(message)
-                except Exception as parse_err:
-                    logger.error(f"_parse_binary_data error: {parse_err}")
+        ticks = []
 
-            if parsed is None:
-                # Fallback: try to decode as JSON
+        if isinstance(message, bytes):
+            # Try SDK parser first, then custom binary parser
+            ticks = parse_smartapi_binary_v2(message)
+
+            if not ticks and len(message) > 2:
+                # Try JSON fallback
                 try:
                     decoded = message.decode('utf-8')
-                    parsed = json.loads(decoded)
-                except Exception as e:
-                    logger.error(f"Fallback parsing failed: {e}")
-                    return
-
-            if isinstance(parsed, dict):
-                ticks = [parsed]
-            elif isinstance(parsed, list):
-                ticks = parsed
-            else:
-                logger.warning(f"Unknown parsed type: {type(parsed)}")
-                return
+                    data = json.loads(decoded)
+                    ticks = data if isinstance(data, list) else [data]
+                except Exception:
+                    pass
 
         elif isinstance(message, str):
             try:
@@ -1482,7 +1652,6 @@ def on_ws_data(wsapp, message):
             except Exception as e:
                 logger.error(f"JSON parse error: {e}")
                 return
-
         elif isinstance(message, dict):
             ticks = [message]
         else:
@@ -1492,10 +1661,14 @@ def on_ws_data(wsapp, message):
         if not ticks:
             return
 
+        # Log first tick for debugging
+        if DEBUG_MODE and ticks:
+            logger.info(f"Parsed {len(ticks)} ticks. First: {ticks[0]}")
+
         # ---------- PROCESS TICKS ----------
         for tick in ticks:
             tick_counter += 1
-            # Copy the existing processing logic from the original code
+
             token = str(tick.get("token") or tick.get("symbol") or "")
             ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
             if isinstance(ltp, str):
@@ -1524,6 +1697,8 @@ def on_ws_data(wsapp, message):
                         with _latest_ticks_lock:
                             last_known_prices[idx]["spot"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
+                        if DEBUG_MODE:
+                            logger.info(f"SPOT TICK {idx}: {ltp}")
                     break
 
             # Option premiums – CE
@@ -1544,6 +1719,8 @@ def on_ws_data(wsapp, message):
                         with _latest_ticks_lock:
                             last_known_prices[idx]["ce"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
+                        if DEBUG_MODE:
+                            logger.info(f"CE TICK {idx}: {ltp}")
                     break
                 elif token == tokens.get("pe_token"):
                     if ltp > 0:
@@ -1559,6 +1736,8 @@ def on_ws_data(wsapp, message):
                         with _latest_ticks_lock:
                             last_known_prices[idx]["pe"] = ltp
                             last_known_prices[idx]["timestamp"] = time.time()
+                        if DEBUG_MODE:
+                            logger.info(f"PE TICK {idx}: {ltp}")
                     break
 
             # VIX
@@ -1566,6 +1745,8 @@ def on_ws_data(wsapp, message):
                 with _latest_ticks_lock:
                     latest_ticks["VIX"]["vix"] = ltp
                 vix_history.append(ltp)
+                if DEBUG_MODE:
+                    logger.info(f"VIX TICK: {ltp}")
 
         # Throttle signal runs
         if tick_counter % 5 == 0 and tick_counter > 0:
@@ -1578,6 +1759,7 @@ def on_ws_data(wsapp, message):
 
     except Exception as e:
         logger.error(f"Unhandled exception in on_ws_data: {e}", exc_info=True)
+
 
 def tick_watchdog():
     """Force reconnect if no new ticks arrive for 30 seconds."""
@@ -1598,6 +1780,7 @@ def tick_watchdog():
             else:
                 last_count = tick_counter
 
+
 def ws_watchdog():
     global ws_running, last_heartbeat, sws
     while True:
@@ -1611,6 +1794,7 @@ def ws_watchdog():
                     sws.close_connection()
                 except Exception:
                     pass
+
 
 def start_angel_websocket_improved():
     global sws, ws_running
@@ -1723,7 +1907,7 @@ class ConnectionManager:
                     threading.Thread(target=start_rest_only_mode, daemon=True).start()
                 else:
                     threading.Thread(target=ws_watchdog, daemon=True).start()
-                    threading.Thread(target=tick_watchdog, daemon=True).start()  # NEW
+                    threading.Thread(target=tick_watchdog, daemon=True).start()
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
                 self.use_websocket = False
@@ -1774,7 +1958,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v13.10 (Improved WS parsing + tick watchdog)",
+        "engine": "Multi-Index Options Bot v14.0 (Fixed SmartAPI WS V2 Binary Parser)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1791,13 +1975,11 @@ def live_signals():
                 "score": market_signal[idx].get("sentiment_score", 50),
                 "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50))
             }
-        # Build trends per timeframe
         trends_data[idx] = {}
         for tf in TIMEFRAMES:
             trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
 
     with _market_signal_lock, _portfolio_state_lock:
-        # Add daily_trades to each portfolio entry
         portfolio_with_trades = {}
         for idx, port in portfolio_state.items():
             portfolio_with_trades[idx] = port.copy()
@@ -1815,7 +1997,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "13.10"
+            "version": "14.0"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
