@@ -1767,12 +1767,15 @@ def on_ws_data(wsapp, message):
 
 
 def tick_watchdog():
-    """Force reconnect if no new ticks arrive for 30 seconds."""
+    """Force reconnect if no new ticks arrive for 30 seconds, but only if market is open."""
     global ws_running, tick_counter, last_tick_timestamp
     last_count = 0
     while True:
         time.sleep(15)
         if ws_running:
+            # Only check if market is open
+            if not is_market_open():
+                continue  # skip checking during market closed
             if tick_counter == last_count:
                 if time.time() - last_tick_timestamp > 30:
                     logger.warning("No new ticks for 30s - forcing reconnect")
@@ -1950,7 +1953,6 @@ class ConnectionManager:
                     self.use_websocket = False
                     threading.Thread(target=start_rest_only_mode, daemon=True).start()
                 else:
-                    threading.Thread(target=ws_watchdog, daemon=True).start()
                     threading.Thread(target=tick_watchdog, daemon=True).start()
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
