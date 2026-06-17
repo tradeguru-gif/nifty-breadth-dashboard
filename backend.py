@@ -1563,6 +1563,8 @@ _last_tick_count = 0
 
 
 def on_ws_open(wsapp):
+    logger.info("on_ws_open CALLED")   # <-- ADD
+    ...
     global ws_running, last_heartbeat
     ws_running = True
     last_heartbeat = time.time()
@@ -1588,7 +1590,7 @@ def on_ws_open(wsapp):
         try:
             # Mode 3 = SnapQuote (most data), Mode 2 = Quote, Mode 1 = LTP
             # Use Mode 2 for better performance, Mode 3 if you need depth
-            response = sws.subscribe("admin", 2, token_list)
+            response = sws.subscribe("admin", 3, token_list)
             logger.info(f"Subscription response: {response}")
             total = sum(len(g["tokens"]) for g in token_list)
             logger.info(f"Successfully subscribed to {total} tokens")
@@ -1603,12 +1605,15 @@ def on_ws_open(wsapp):
 
 
 def on_ws_error(wsapp, error):
+    logger.error(f"on_ws_error: {error}")   # <-- ADD
+    ...
     global ws_running
     logger.error(f"WebSocket error: {error}")
     ws_running = False
 
 
 def on_ws_close(wsapp, *args):
+    logger.warning(f"on_ws_close: {args}")   # <-- add this
     global ws_running
     ws_running = False
     logger.warning(f"WebSocket closed: {args}")
@@ -1803,18 +1808,40 @@ def start_angel_websocket_improved():
             if not is_market_open():
                 time.sleep(60)
                 continue
+
             auth_token, feed_token, _ = get_auth_token()
             if not feed_token:
                 logger.error("Failed to get feed token, retrying in 10 seconds...")
                 time.sleep(10)
                 continue
+
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
             sws.on_error = on_ws_error
             sws.on_close = on_ws_close
+
+            # ---------- TIMEOUT WRAPPER ----------
             logger.info("Attempting WebSocket connection...")
-            sws.connect()
+            connect_thread = threading.Thread(target=lambda: sws.connect())
+            connect_thread.daemon = True
+            connect_thread.start()
+            connect_thread.join(timeout=10)   # wait max 10 seconds
+
+            if connect_thread.is_alive():
+                logger.error("WebSocket connect() timed out after 10s, aborting and retrying")
+                # Try to close the hung connection
+                try:
+                    sws.close_connection()
+                except:
+                    pass
+                ws_running = False
+                time.sleep(5)
+                continue   # retry from beginning
+
+            logger.info("WebSocket connect() returned (or completed)")
+
+            # ---------- MAIN LOOP ----------
             while ws_running:
                 time.sleep(1)
                 if time.time() - last_heartbeat > 30:
@@ -1824,14 +1851,15 @@ def start_angel_websocket_improved():
                         last_heartbeat = time.time()
                     except Exception:
                         pass
+
             logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
             ws_running = False
             time.sleep(5)
+
         except Exception as e:
-            logger.error(f"WebSocket thread error: {e}")
+            logger.error(f"WebSocket thread error: {e}", exc_info=True)
             time.sleep(10)
             ws_running = False
-
 # ----------------------------------------------------------------------
 # REST-ONLY FALLBACK MODE (unchanged)
 # ----------------------------------------------------------------------
