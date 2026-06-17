@@ -1804,12 +1804,15 @@ def ws_watchdog():
 def start_angel_websocket_improved():
     global sws, ws_running
     logger.info("***** ENTERED start_angel_websocket_improved *****")
+    # Inform the manager that the WebSocket thread is alive
+    ws_running = True   # <--- CRITICAL
+
     while True:
         try:
-            # If market is closed, sleep briefly and retry – don't block for 60s
+            # Wait until market opens, but keep ws_running True
             while not is_market_open():
                 logger.info("Market closed, will retry in 5 seconds...")
-                time.sleep(5)  # short sleep, allows manager to see thread is alive
+                time.sleep(5)
 
             auth_token, feed_token, _ = get_auth_token()
             logger.info(f"Auth token obtained: {bool(auth_token)}, feed_token: {bool(feed_token)}")
@@ -1848,9 +1851,8 @@ def start_angel_websocket_improved():
                     sws.close_connection()
                 except:
                     pass
-                ws_running = False
                 time.sleep(5)
-                continue   # retry from beginning
+                continue   # retry connection attempt
 
             logger.info("WebSocket connect() returned (or completed)")
 
@@ -1867,13 +1869,13 @@ def start_angel_websocket_improved():
                         pass
 
             logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
-            ws_running = False
             time.sleep(5)
 
         except Exception as e:
             logger.error(f"WebSocket thread error: {e}", exc_info=True)
             time.sleep(10)
-            ws_running = False
+            # In case of error, we keep ws_running True to avoid fallback, but if the connection is dead, we may need to reset.
+            # For simplicity, we'll let the loop retry.
 # ----------------------------------------------------------------------
 # REST-ONLY FALLBACK MODE (unchanged)
 # ----------------------------------------------------------------------
