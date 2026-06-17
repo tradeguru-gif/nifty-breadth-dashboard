@@ -949,9 +949,14 @@ def is_expiry_day(index_name):
     return today == expiry
 
 def is_market_open():
-    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
     current = now_ist.time()
-    return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
+    # Market is open Mon–Fri 9:15 AM to 3:30 PM IST
+    is_open = now_ist.weekday() < 5 and dt_time(9, 15) <= current <= dt_time(15, 30)
+    if DEBUG_MODE or True:  # Always log for now to debug
+        logger.info(f"Market check: UTC={now_utc}, IST={now_ist}, current={current}, is_open={is_open}")
+    return is_open
 
 # ----------------------------------------------------------------------
 # MAIN SIGNAL ENGINE (unchanged)
@@ -1943,24 +1948,24 @@ class ConnectionManager:
         self.use_websocket = True
 
     def start(self):
+        # ALWAYS start REST mode as a fallback (this will fetch data immediately)
+        logger.info("Starting REST-only mode as a backup...")
+        threading.Thread(target=start_rest_only_mode, daemon=True).start()
+
+        # Also attempt WebSocket for faster updates
         if self.use_websocket:
             try:
                 logger.info("Attempting WebSocket connection...")
                 threading.Thread(target=start_angel_websocket_improved, daemon=True).start()
-                time.sleep(15)
-                if not ws_running:
-                    logger.warning("WebSocket failed to connect, switching to REST-only mode")
-                    self.use_websocket = False
-                    threading.Thread(target=start_rest_only_mode, daemon=True).start()
-                else:
+                # Give the WebSocket thread a moment to set ws_running
+                time.sleep(3)
+                # If WebSocket is running, start the tick watchdog to monitor it
+                if ws_running:
                     threading.Thread(target=tick_watchdog, daemon=True).start()
+                else:
+                    logger.warning("WebSocket thread did not set ws_running, but REST fallback is active.")
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
-                self.use_websocket = False
-                threading.Thread(target=start_rest_only_mode, daemon=True).start()
-        else:
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
-
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS (unchanged)
 # ----------------------------------------------------------------------
