@@ -1802,21 +1802,24 @@ def ws_watchdog():
 
 
 def start_angel_websocket_improved():
-    logger.info("***** ENTERED start_angel_websocket_improved *****")   # <-- ADD THIS
     global sws, ws_running
-    ...
+    logger.info("***** ENTERED start_angel_websocket_improved *****")  # already there
     while True:
         try:
+            logger.info("Top of while loop")
             if not is_market_open():
+                logger.info("Market closed, sleeping 60s")
                 time.sleep(60)
                 continue
 
             auth_token, feed_token, _ = get_auth_token()
+            logger.info(f"Auth token obtained: {bool(auth_token)}, feed_token: {bool(feed_token)}")
             if not feed_token:
                 logger.error("Failed to get feed token, retrying in 10 seconds...")
                 time.sleep(10)
                 continue
 
+            logger.info("Creating SmartWebSocketV2 instance...")
             sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
             sws.on_open = on_ws_open
             sws.on_data = on_ws_data
@@ -1825,14 +1828,24 @@ def start_angel_websocket_improved():
 
             # ---------- TIMEOUT WRAPPER ----------
             logger.info("Attempting WebSocket connection...")
-            connect_thread = threading.Thread(target=lambda: sws.connect())
+
+            # Define a wrapper to catch exceptions inside the thread
+            def connect_with_log():
+                try:
+                    logger.info("Thread: calling sws.connect()")
+                    sws.connect()
+                    logger.info("Thread: sws.connect() returned")
+                except Exception as e:
+                    logger.error(f"Thread: sws.connect() raised exception: {e}", exc_info=True)
+
+            connect_thread = threading.Thread(target=connect_with_log)
             connect_thread.daemon = True
             connect_thread.start()
-            connect_thread.join(timeout=10)   # wait max 10 seconds
+            logger.info("Thread started, waiting up to 10 seconds for completion...")
+            connect_thread.join(timeout=10)
 
             if connect_thread.is_alive():
                 logger.error("WebSocket connect() timed out after 10s, aborting and retrying")
-                # Try to close the hung connection
                 try:
                     sws.close_connection()
                 except:
@@ -1844,6 +1857,7 @@ def start_angel_websocket_improved():
             logger.info("WebSocket connect() returned (or completed)")
 
             # ---------- MAIN LOOP ----------
+            logger.info("Entering main WebSocket keep-alive loop")
             while ws_running:
                 time.sleep(1)
                 if time.time() - last_heartbeat > 30:
@@ -1853,6 +1867,8 @@ def start_angel_websocket_improved():
                         last_heartbeat = time.time()
                     except Exception:
                         pass
+                # Optionally log periodically
+                # if int(time.time()) % 10 == 0: logger.debug("WebSocket loop alive")
 
             logger.warning("WebSocket disconnected, reconnecting in 5 seconds...")
             ws_running = False
