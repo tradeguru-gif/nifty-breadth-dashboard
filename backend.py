@@ -1,4 +1,4 @@
-# === VERSION 13.9 - PRO SIGNAL BOT: Full features + binary parser + trends + daily_trades ===
+# === VERSION 13.10 - PRO SIGNAL BOT: Improved WS parsing + tick watchdog + DEBUG mode ===
 import sys
 import logging
 import os
@@ -17,7 +17,11 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pyotp
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+# ---------- DEBUG MODE ----------
+DEBUG_MODE = os.getenv("DEBUG_MODE", "0") == "1"
+
+logging.basicConfig(level=logging.DEBUG if DEBUG_MODE else logging.INFO,
+                    stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -210,7 +214,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ----------------------------------------------------------------------
-# TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (unchanged)
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices: return 0
@@ -319,7 +323,7 @@ def calculate_vwap(prices, volumes):
     return sum(p*v for p,v in zip(prices, volumes)) / s_vol
 
 # ----------------------------------------------------------------------
-# PERSISTENCE
+# PERSISTENCE (unchanged)
 # ----------------------------------------------------------------------
 def load_portfolio_state():
     global portfolio_state, signal_state, daily_trade_count, last_trade_date
@@ -370,7 +374,7 @@ def save_portfolio_state(idx):
         conn.commit()
 
 # ----------------------------------------------------------------------
-# GREEKS ENGINE
+# GREEKS ENGINE (unchanged)
 # ----------------------------------------------------------------------
 greeks_cache_fallback_store = {idx: {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":0.5, "pe_delta":-0.5, "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1, "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50} for idx in INDEX_CONFIG}
 _greeks_cache = {idx: {"data": None, "timestamp": 0} for idx in INDEX_CONFIG}
@@ -496,7 +500,7 @@ class MLSignalFilter:
 ml_filter = MLSignalFilter()
 
 # ----------------------------------------------------------------------
-# KELLY CRITERION
+# KELLY CRITERION (unchanged)
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -544,7 +548,7 @@ class PerformanceTracker:
 performance_trackers = {idx: PerformanceTracker(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
-# CORRELATION FILTER
+# CORRELATION FILTER (unchanged)
 # ----------------------------------------------------------------------
 class CorrelationFilter:
     def __init__(self):
@@ -559,7 +563,7 @@ class CorrelationFilter:
 correlation_filter = CorrelationFilter()
 
 # ----------------------------------------------------------------------
-# VOLUME PROFILE ENGINE
+# VOLUME PROFILE ENGINE (unchanged)
 # ----------------------------------------------------------------------
 class VolumeProfileEngine:
     def __init__(self, index_name):
@@ -598,7 +602,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_CONFIG}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT
+# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -769,7 +773,7 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# SENTIMENT & SIGNAL MAPPING
+# SENTIMENT & SIGNAL MAPPING (unchanged)
 # ----------------------------------------------------------------------
 SENTIMENT_SCORES = {
     "STRONG_BULLISH": (85, 100, "STRONG BULLISH", "STRONG_BUY_CE"),
@@ -859,7 +863,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# EXIT LOGIC
+# EXIT LOGIC (unchanged)
 # ----------------------------------------------------------------------
 def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem):
     if len(prices_spot) < 60:
@@ -897,7 +901,7 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
     return False, ""
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (unchanged)
 # ----------------------------------------------------------------------
 def send_telegram_alert(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -950,7 +954,7 @@ def is_market_open():
     return now_ist.weekday() < 5 and dt_time(9, 10) <= current <= dt_time(15, 35)
 
 # ----------------------------------------------------------------------
-# MAIN SIGNAL ENGINE
+# MAIN SIGNAL ENGINE (unchanged)
 # ----------------------------------------------------------------------
 def run_signal_engine_for_index(index_name):
     if not INDEX_CONFIG[index_name].get("active"):
@@ -1374,13 +1378,14 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}")
 
 # ----------------------------------------------------------------------
-# WEBSOCKET WITH IMPROVED CONNECTION – USING sws._parse_binary_data()
+# WEBSOCKET WITH IMPROVED CONNECTION – UPDATED PARSING + TICK WATCHDOG
 # ----------------------------------------------------------------------
 ws_running = False
 sws = None
 last_heartbeat = time.time()
 tick_counter = 0
 last_tick_timestamp = time.time()
+_last_tick_count = 0  # for tick watchdog
 
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat
@@ -1406,7 +1411,8 @@ def on_ws_open(wsapp):
 
     if token_list and sws:
         try:
-            sws.subscribe("admin", 3, token_list)
+            response = sws.subscribe("admin", 3, token_list)
+            logger.info(f"Subscription response: {response}")
             total = sum(len(g["tokens"]) for g in token_list)
             logger.info(f"Successfully subscribed to {total} tokens")
         except Exception as e:
@@ -1432,31 +1438,41 @@ def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws
     last_heartbeat = time.time()
 
+    # ---- DEBUG: log raw message ----
+    if DEBUG_MODE:
+        logger.info(f"WS data: type={type(message)}, len={len(message) if message else 0}")
+        if isinstance(message, bytes) and len(message) > 0:
+            logger.info(f"First 20 bytes: {message[:20].hex()}")
+    # --------------------------------
+
     if message == b'\x00' or message == '\x00':
         return
 
     try:
-        # ----------------------------------------------------------------
-        # FIX: Use sws._parse_binary_data() for binary packets
-        # ----------------------------------------------------------------
+        # ---------- PARSING ----------
         if isinstance(message, bytes):
+            parsed = None
             if sws and hasattr(sws, "_parse_binary_data"):
                 try:
                     parsed = sws._parse_binary_data(message)
-                    if parsed is None:
-                        return
-                    if isinstance(parsed, dict):
-                        ticks = [parsed]
-                    elif isinstance(parsed, list):
-                        ticks = parsed
-                    else:
-                        logger.warning(f"Unknown binary parse result type: {type(parsed)}")
-                        return
+                except Exception as parse_err:
+                    logger.error(f"_parse_binary_data error: {parse_err}")
+
+            if parsed is None:
+                # Fallback: try to decode as JSON
+                try:
+                    decoded = message.decode('utf-8')
+                    parsed = json.loads(decoded)
                 except Exception as e:
-                    logger.error(f"Binary parse error: {e}", exc_info=True)
+                    logger.error(f"Fallback parsing failed: {e}")
                     return
+
+            if isinstance(parsed, dict):
+                ticks = [parsed]
+            elif isinstance(parsed, list):
+                ticks = parsed
             else:
-                logger.warning("SmartWebSocket parser unavailable")
+                logger.warning(f"Unknown parsed type: {type(parsed)}")
                 return
 
         elif isinstance(message, str):
@@ -1469,7 +1485,6 @@ def on_ws_data(wsapp, message):
 
         elif isinstance(message, dict):
             ticks = [message]
-
         else:
             logger.warning(f"Unsupported WS message type: {type(message)}")
             return
@@ -1477,10 +1492,10 @@ def on_ws_data(wsapp, message):
         if not ticks:
             return
 
-        # Process ticks
+        # ---------- PROCESS TICKS ----------
         for tick in ticks:
             tick_counter += 1
-
+            # Copy the existing processing logic from the original code
             token = str(tick.get("token") or tick.get("symbol") or "")
             ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
             if isinstance(ltp, str):
@@ -1562,7 +1577,26 @@ def on_ws_data(wsapp, message):
                     threading.Thread(target=run_all_signals, daemon=True).start()
 
     except Exception as e:
-        logger.error(f"WS data error: {e}")
+        logger.error(f"Unhandled exception in on_ws_data: {e}", exc_info=True)
+
+def tick_watchdog():
+    """Force reconnect if no new ticks arrive for 30 seconds."""
+    global ws_running, tick_counter, last_tick_timestamp
+    last_count = 0
+    while True:
+        time.sleep(15)
+        if ws_running:
+            if tick_counter == last_count:
+                if time.time() - last_tick_timestamp > 30:
+                    logger.warning("No new ticks for 30s - forcing reconnect")
+                    ws_running = False
+                    if sws:
+                        try:
+                            sws.close_connection()
+                        except:
+                            pass
+            else:
+                last_count = tick_counter
 
 def ws_watchdog():
     global ws_running, last_heartbeat, sws
@@ -1615,7 +1649,7 @@ def start_angel_websocket_improved():
             ws_running = False
 
 # ----------------------------------------------------------------------
-# REST-ONLY FALLBACK MODE
+# REST-ONLY FALLBACK MODE (unchanged)
 # ----------------------------------------------------------------------
 def start_rest_only_mode():
     logger.info("Starting REST-only mode (WebSocket fallback)")
@@ -1671,7 +1705,7 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER
+# CONNECTION MANAGER (unchanged)
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
@@ -1689,6 +1723,7 @@ class ConnectionManager:
                     threading.Thread(target=start_rest_only_mode, daemon=True).start()
                 else:
                     threading.Thread(target=ws_watchdog, daemon=True).start()
+                    threading.Thread(target=tick_watchdog, daemon=True).start()  # NEW
             except Exception as e:
                 logger.error(f"WebSocket initialization failed: {e}")
                 self.use_websocket = False
@@ -1697,7 +1732,7 @@ class ConnectionManager:
             threading.Thread(target=start_rest_only_mode, daemon=True).start()
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS (unchanged)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -1726,7 +1761,7 @@ def _start_background_threads():
             logger.info("Background threads started with connection manager")
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES
+# FLASK ROUTES (unchanged)
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -1739,7 +1774,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v13.9 (Full features + binary parser + trends)",
+        "engine": "Multi-Index Options Bot v13.10 (Improved WS parsing + tick watchdog)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1772,15 +1807,15 @@ def live_signals():
             "timestamp": datetime.now().isoformat(),
             "signals": market_signal,
             "sentiment": sentiment_data,
-            "trends": trends_data,          # <-- NEW
-            "portfolios": portfolio_with_trades,  # <-- includes daily_trades
+            "trends": trends_data,
+            "portfolios": portfolio_with_trades,
             "market_open": is_market_open(),
             "debug": {
                 "ws_running": ws_running,
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "13.9"
+            "version": "13.10"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
