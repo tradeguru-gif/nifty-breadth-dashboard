@@ -32,7 +32,8 @@ ALLOWED_ORIGINS = [
     "http://index-options.co",
     "https://index-options.co",
     "http://localhost:5000",
-    "http://127.0.0.1:5000"
+    "http://127.0.0.1:5000",
+    "https://kame.nifty-options.workers.dev"
 ]
 CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
 
