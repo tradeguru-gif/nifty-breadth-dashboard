@@ -1774,45 +1774,45 @@ class ConnectionManager:
         self._ws_thread = None
 
     def start(self):
-        if self.use_websocket:
-            # Start WebSocket in background
-            if is_market_open():
-    self._ws_thread = threading.Thread(
-        target=start_angel_websocket_improved,
-        daemon=True
-    )
-    self._ws_thread.start()
-else:
-    logger.info(
-        "Market closed - skipping websocket startup"
-    )
+    if self.use_websocket:
 
-            # Start watchdogs
-            threading.Thread(target=ws_watchdog, daemon=True).start()
-            threading.Thread(target=tick_watchdog, daemon=True).start()
+        if is_market_open():
+            self._ws_thread = threading.Thread(
+                target=start_angel_websocket_improved,
+                daemon=True
+            )
+            self._ws_thread.start()
+        else:
+            logger.info("Market closed - skipping websocket startup")
 
-            # Give it time but DON'T switch to REST permanently
-            # The REST fallback should run in parallel if WS fails
-            time.sleep(10)
+        threading.Thread(target=ws_watchdog, daemon=True).start()
+        threading.Thread(target=tick_watchdog, daemon=True).start()
 
-            # If still not connected, start REST as PARALLEL fallback, not replacement
-              if is_market_open() and not ws_running:
-                  logger.warning(
-                      "WebSocket not yet connected, starting REST as parallel fallback"
-                 )
-                 threading.Thread(
-                     target=start_rest_only_mode,
-                     daemon=True
-                 ).start()
-            else:
-                logger.info(
+        time.sleep(10)
+
+        if is_market_open() and not ws_running:
+            logger.warning(
+                "WebSocket not yet connected, starting REST as parallel fallback"
+            )
+            threading.Thread(
+                target=start_rest_only_mode,
+                daemon=True
+            ).start()
+        else:
+            logger.info(
                 f"Skipping REST fallback. "
                 f"market_open={is_market_open()} "
                 f"ws_running={ws_running}"
-          )
-        else:
-            logger.info("WebSocket disabled via FORCE_REST_MODE, using REST-only")
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
+            )
+
+    else:
+        logger.info(
+            "WebSocket disabled via FORCE_REST_MODE, using REST-only"
+        )
+        threading.Thread(
+            target=start_rest_only_mode,
+            daemon=True
+        ).start()
 
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS (unchanged)
