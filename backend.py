@@ -2324,10 +2324,31 @@ def _start_background_threads():
             _init_completed = True
             logger.info("Background threads started with connection manager")
 
+# ----------------------------------------------------------------------
+# AUTO-START FOR GUNICORN
+# ----------------------------------------------------------------------
+_background_started = False
+_background_start_lock = threading.Lock()
+
+def auto_start_background():
+    global _background_started
+    with _background_start_lock:
+        if not _background_started:
+            init_db()
+            load_portfolio_state()
+            _start_background_threads()
+            _background_started = True
+            logger.info("Auto-start: Background threads initialized for production")
+
+# This is what calls the function when Gunicorn starts
 auto_start_background()
 
+# ----------------------------------------------------------------------
+# RUN FLASK APP (only when executed directly, not by Gunicorn)
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
     load_portfolio_state()
     _start_background_threads()
+    logger.info("Background workers initiated. Starting Flask API Server...")
     app.run(host="0.0.0.0", port=5000, debug=False)
