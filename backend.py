@@ -948,18 +948,16 @@ def is_expiry_day(index_name):
     expiry = tokens.get("expiry", "")
     return today == expiry
 
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo
+
 def is_market_open():
-    from datetime import datetime
-    now = datetime.now()
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
 
-    logger.info(
-        f"DEBUG MARKET CHECK: now={now}, "
-        f"hour={now.hour}, "
-        f"minute={now.minute}, "
-        f"weekday={now.weekday()}"
+    return (
+        now_ist.weekday() < 5 and
+        dt_time(9, 10) <= now_ist.time() <= dt_time(15, 35)
     )
-
-    return True
 
 # ----------------------------------------------------------------------
 # MAIN SIGNAL ENGINE (unchanged)
