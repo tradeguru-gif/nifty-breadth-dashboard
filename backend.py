@@ -779,28 +779,43 @@ def get_mcx_futures_tokens():
     if not scrip:
         return
     df = pd.DataFrame(scrip)
-    mcx_fut = df[(df["exch_seg"]=="MCX") & (df["instrumenttype"]=="FUTCOM")]
+    mcx_fut = df[(df["exch_seg"] == "MCX") & (df["instrumenttype"] == "FUTCOM")]
     if mcx_fut.empty:
-        logger.error("No MCX FUTCOM found in scrip master")
+        logger.warning("No MCX FUTCOM found in scrip master")
+        # Let's check if there are any MCX records at all
+        mcx_all = df[df["exch_seg"] == "MCX"]
+        if not mcx_all.empty:
+            logger.info(f"Found {len(mcx_all)} MCX records, but none with instrumenttype 'FUTCOM'")
+            # Try to find any commodity symbols
+            sample_symbols = mcx_all["symbol"].head(5).tolist()
+            logger.info(f"Sample MCX symbols: {sample_symbols}")
         return
+
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
-        opts = mcx_fut[mcx_fut["symbol"]==symbol]
-        if opts.empty:
-            logger.warning(f"MCX symbol {symbol} not found")
+        # Find rows where symbol contains the base symbol (case-insensitive)
+        matching = mcx_fut[mcx_fut["symbol"].str.contains(symbol, case=False, na=False)]
+        if matching.empty:
+            logger.warning(f"MCX symbol '{symbol}' not found in scrip master")
+            # Try to find any symbol that starts with the symbol (e.g., GOLD*)
+            matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
+        if matching.empty:
             continue
-        opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
-        opts = opts.dropna(subset=["expiry_date"])
+        # Sort by expiry date to get the nearest active contract
+        matching = matching.copy()
+        matching["expiry_date"] = matching["expiry"].apply(parse_expiry_date)
+        matching = matching.dropna(subset=["expiry_date"])
         today = datetime.now()
-        future = opts[opts["expiry_date"] >= today]
+        future = matching[matching["expiry_date"] >= today]
         if future.empty:
-            future = opts
+            future = matching
         nearest = future.iloc[0]
         token = str(nearest["token"])
         cfg["token"] = token
-        logger.info(f"MCX {symbol} token: {token} expiry {nearest['expiry']}")
+        logger.info(f"MCX {symbol} token: {token} (symbol: {nearest['symbol']}) expiry {nearest['expiry']}")
+
     global INDEX_TOKEN_SET
     INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
 
