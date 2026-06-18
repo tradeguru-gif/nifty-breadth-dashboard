@@ -1589,6 +1589,7 @@ def start_angel_websocket_improved():
     while True:
         try:
             if not is_market_open():
+                logger.debug("Market closed - REST fallback sleeping")
                 time.sleep(60)
                 continue
 
@@ -1775,8 +1776,16 @@ class ConnectionManager:
     def start(self):
         if self.use_websocket:
             # Start WebSocket in background
-            self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
-            self._ws_thread.start()
+            if is_market_open():
+    self._ws_thread = threading.Thread(
+        target=start_angel_websocket_improved,
+        daemon=True
+    )
+    self._ws_thread.start()
+else:
+    logger.info(
+        "Market closed - skipping websocket startup"
+    )
 
             # Start watchdogs
             threading.Thread(target=ws_watchdog, daemon=True).start()
@@ -1787,9 +1796,20 @@ class ConnectionManager:
             time.sleep(10)
 
             # If still not connected, start REST as PARALLEL fallback, not replacement
-            if not ws_running:
-                logger.warning("WebSocket not yet connected, starting REST as parallel fallback")
-                threading.Thread(target=start_rest_only_mode, daemon=True).start()
+              if is_market_open() and not ws_running:
+                  logger.warning(
+                      "WebSocket not yet connected, starting REST as parallel fallback"
+                 )
+                 threading.Thread(
+                     target=start_rest_only_mode,
+                     daemon=True
+                 ).start()
+            else:
+                logger.info(
+                f"Skipping REST fallback. "
+                f"market_open={is_market_open()} "
+                f"ws_running={ws_running}"
+          )
         else:
             logger.info("WebSocket disabled via FORCE_REST_MODE, using REST-only")
             threading.Thread(target=start_rest_only_mode, daemon=True).start()
