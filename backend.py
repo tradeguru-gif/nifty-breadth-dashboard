@@ -1841,7 +1841,6 @@ with _candle_histories_lock:
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"Building candles ({length}/30)"
             market_signal[index_name]["signal"] = "WAITING"
-        return
 #------------------------------------------------------
 #---------------------------------------------------------
 #---------------------------------------------------------
