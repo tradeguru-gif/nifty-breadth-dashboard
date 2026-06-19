@@ -1,4 +1,5 @@
 # === HYBRID v14.5 – FULL FIX: NONE COMPARISONS + COMMODITY SCALING ===
+# === v14.6 – FULL FIX: Candle Building + Price Scaling ===
 import sys
 import logging
 import os
@@ -109,7 +110,6 @@ def _patched_parse(self, binary_data):
             return result
     except:
         result = {}
-    # fallback: try to extract token
     try:
         token_int = int.from_bytes(binary_data[2:10], byteorder='little')
         if token_int > 0:
@@ -127,6 +127,16 @@ def _patched_on_close(self, wsapp, *args):
     except:
         pass
 SmartWebSocketV2._on_close = _patched_on_close
+# ============================================================
+
+# ----------------------------------------------------------------------
+# INDEX CONFIGURATION – Equity + Commodities (unchanged)
+# ----------------------------------------------------------------------
+# (Keep your INDEX_CONFIG as before – we skip for brevity)
+# We'll assume it's exactly as in the previous version.
+# Since the file is long, we'll skip re‑typing it but keep it in the final deploy.
+# In the actual answer, we'll include the entire file.
+# For this response, we'll focus on the changed parts.
 # ============================================================
 
 # ----------------------------------------------------------------------
@@ -944,6 +954,10 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
+                        # ---- ADD LOG ----
+                        if tf == "1min":
+                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                        # -----------------
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
@@ -1990,12 +2004,21 @@ def on_ws_data(wsapp, message):
             tick_counter += 1
 
             token = str(tick.get("token") or tick.get("tk") or "")
-            ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
+                        ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
             if isinstance(ltp, str):
                 try:
                     ltp = float(ltp)
                 except:
                     ltp = 0
+
+            # ---- SCALING FIX ----
+            # For equity spot: divide by 100 (unless already scaled)
+            # For commodities: we'll handle separately below
+            if ltp > 10000 and token in INDEX_TOKEN_SET:
+                ltp = ltp / 100.0
+            # For commodities, we'll divide if it's a commodity token
+            # (We'll detect commodity tokens later)
+            # ------------------------
             # --- Commodity scaling: if token belongs to a commodity, divide by 100 ---
             # Determine if token is commodity by checking INDEX_CONFIG
             is_comm = False
@@ -2048,6 +2071,47 @@ def on_ws_data(wsapp, message):
                         break
             if spot_matched:
                 continue
+#--------------------------------------------------------
+#------------------------------------------------------
+#------------------------------------------------------
+            # Spot indices
+            for idx, cfg in INDEX_CONFIG.items():
+                if cfg.get("token") == token:
+                    if ltp > 0:
+                        logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
+                        if cfg.get("is_commodity"):
+                            with _latest_ticks_lock:
+                                latest_ticks[idx]["price"] = ltp
+                                latest_ticks[idx]["volume"] = vol
+                                latest_ticks[idx]["bid"] = bid
+                                latest_ticks[idx]["ask"] = ask
+                            with _price_histories_lock:
+                                price_histories[idx].append(ltp)
+                            update_candle(idx, ltp, vol, time.time())
+                            last_tick_timestamp = time.time()
+                            with _latest_ticks_lock:
+                                last_known_prices[idx]["spot"] = ltp
+                                last_known_prices[idx]["timestamp"] = time.time()
+                        else:
+                            with _latest_ticks_lock:
+                                latest_ticks[idx]["spot_price"] = ltp
+                            with _price_histories_lock:
+                                price_histories[idx].append(ltp)
+                            update_candle(idx, ltp, vol, time.time())
+                            last_tick_timestamp = time.time()
+                            with _latest_ticks_lock:
+                                last_known_prices[idx]["spot"] = ltp
+                                last_known_prices[idx]["timestamp"] = time.time()
+                        # ---- ADD THIS LOG ----
+                        with _candle_histories_lock:
+                            candle_len = len(candle_histories[idx]["1min"])
+                            logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
+                        # -----------------------
+                        spot_matched = True
+                        break
+#--------------------------------------------------------
+#-------------------
+#--------------------------------------------------
 
             # ---- Option matching (only for equity) ----
             option_matched = False
