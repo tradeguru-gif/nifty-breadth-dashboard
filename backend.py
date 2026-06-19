@@ -1,5 +1,4 @@
-# === HYBRID v14.5 – FULL FIX: NONE COMPARISONS + COMMODITY SCALING ===
-# === v14.6 – FULL FIX: Candle Building + Price Scaling ===
+# === FINAL v14.6 – WEBSOCKET PRIMARY + SLOW REST FALLBACK ===
 import sys
 import logging
 import os
@@ -130,17 +129,7 @@ SmartWebSocketV2._on_close = _patched_on_close
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Equity + Commodities (unchanged)
-# ----------------------------------------------------------------------
-# (Keep your INDEX_CONFIG as before – we skip for brevity)
-# We'll assume it's exactly as in the previous version.
-# Since the file is long, we'll skip re‑typing it but keep it in the final deploy.
-# In the actual answer, we'll include the entire file.
-# For this response, we'll focus on the changed parts.
-# ============================================================
-
-# ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Equity + Commodities
+# INDEX CONFIGURATION – Equity + MCX
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -222,6 +211,7 @@ INDEX_CONFIG = {
 }
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
+INDEX_NAMES = list(INDEX_CONFIG.keys())
 
 # ----------------------------------------------------------------------
 # GLOBAL STATE
@@ -236,8 +226,6 @@ _ce_price_histories_lock = threading.Lock()
 _pe_price_histories_lock = threading.Lock()
 _current_candle_lock = threading.Lock()
 _prev_volume_lock = threading.Lock()
-
-INDEX_NAMES = list(INDEX_CONFIG.keys())
 
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_NAMES}
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_NAMES}
@@ -337,7 +325,6 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     ema_fast = ema(prices[-fast:], fast) if len(prices) >= fast else prices[-1]
     ema_slow = ema(prices[-slow:], slow) if len(prices) >= slow else prices[-1]
     macd_line = ema_fast - ema_slow
-    # signal line approximation
     sig_line = ema([macd_line], signal) if len(prices) >= signal else macd_line
     hist = macd_line - sig_line
     return macd_line, sig_line, hist
@@ -463,7 +450,7 @@ for idx in INDEX_NAMES:
                                             "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1,
                                             "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50}
     else:
-        greeks_cache_fallback_store[idx] = None  # commodities don't use Greeks
+        greeks_cache_fallback_store[idx] = None
 
 _greeks_cache = {idx: {"data": None, "timestamp": 0} for idx in INDEX_NAMES}
 _GREEKS_CACHE_TTL = 60
@@ -606,7 +593,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged, but safe)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -827,7 +814,7 @@ def get_next_expiry_date(index_name):
     if not config:
         return None
     if config.get("is_commodity"):
-        return None  # commodities don't have expiry for options
+        return None
     weekday = config.get("expiry_weekday")
     if weekday is None:
         return None
@@ -954,10 +941,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        # ---- ADD LOG ----
                         if tf == "1min":
                             logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
-                        # -----------------
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
@@ -1270,35 +1255,29 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "WAITING"
                 return
 
-        # Candle check – ensure we have a valid deque
-                # Candle check – ensure we have a valid deque (but don't reset once built)
-                # Candle check – ensure we have a valid deque (but do NOT reset once built)
-                # Candle check – ensure we have a valid deque
+        # ---- CANDLE CHECK – ALWAYS UPDATE ALERT_MESSAGE ----
         with _candle_histories_lock:
-            # Only create the structure if the index is completely missing
+            # Only create structure if the index is completely missing
             if index_name not in candle_histories:
-                logger.info(f"📊 Creating candle_histories for {index_name}")
                 candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
-                candle_histories[index_name]["1min"] = deque(maxlen=500)
-            
-            if "1min" not in candle_histories[index_name]:
-                logger.error(f"❌ 1min missing for {index_name} – recreating")
-                candle_histories[index_name]["1min"] = deque(maxlen=500)
-            
-            if candle_histories[index_name]["1min"] is None:
-                logger.error(f"❌ 1min is None for {index_name} – recreating")
+            if "1min" not in candle_histories[index_name] or candle_histories[index_name]["1min"] is None:
                 candle_histories[index_name]["1min"] = deque(maxlen=500)
 
             candle_len = len(candle_histories[index_name]["1min"])
 
             # Always update the alert_message so frontend shows progress
             with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/30)"
-                market_signal[index_name]["signal"] = "WAITING"
+                if candle_len < 30:
+                    market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/30)"
+                    market_signal[index_name]["signal"] = "WAITING"
+                else:
+                    market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
+                    # signal will be set later by the engine
 
             if candle_len < 30:
-                return  # <-- return AFTER updating the message
+                return  # Exit early, but message is already updated
 
+        # Now proceed with the rest of the engine only if candles >= 30
         with _market_signal_lock:
             if market_signal[index_name]["signal"] == "EXIT":
                 market_signal[index_name]["signal"] = "COOLDOWN"
@@ -1308,7 +1287,7 @@ def run_signal_engine_for_index(index_name):
         # --- Extract latest data with None guards ---
         with _latest_ticks_lock:
             if index_name not in latest_ticks:
-                latest_ticks[index_name] = {}  # fallback
+                latest_ticks[index_name] = {}
             if is_commodity:
                 latest_ticks[index_name].setdefault("price", 0.0)
                 latest_ticks[index_name].setdefault("volume", 0)
@@ -1338,7 +1317,6 @@ def run_signal_engine_for_index(index_name):
                 pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
                 pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
-        # If we have no price data, skip
         if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "No price data yet"
@@ -1364,7 +1342,7 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "BLOCKED"
                 return
 
-        # Volume profile (for both)
+        # Volume profile
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1386,9 +1364,8 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled"):
             greeks_data = get_option_greeks(index_name)
 
-        # Sentiment (same for both)
+        # Sentiment
         sentiment = compute_sentiment(index_name)
-        # sentiment is always a number (50+)
         action = get_signal_from_sentiment(sentiment)
         sentiment_label = get_sentiment_label(sentiment)
         with _market_signal_lock:
@@ -1401,7 +1378,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
             return
 
-        # --- Drawdown kill switch ---
+        # Drawdown kill switch
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
         peak = daily_drawdown[index_name]["peak_equity"]
@@ -1433,7 +1410,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "KILL_SWITCH"
             return
 
-        # --- Circuit breaker ---
+        # Circuit breaker
         if safety_state[index_name]["circuit_breaker"]:
             if now < safety_state[index_name]["circuit_breaker_until"]:
                 with _market_signal_lock:
@@ -1444,7 +1421,7 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
 
-        # --- Existing position handling ---
+        # Existing position handling
         with _signal_state_lock:
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
@@ -1468,11 +1445,9 @@ def run_signal_engine_for_index(index_name):
                             if new_sl > signal_state[index_name]["stop_loss"]:
                                 signal_state[index_name]["stop_loss"] = new_sl
 
-                    # --- GUARDED COMPARISONS ---
                     stop_loss_val = signal_state[index_name].get("stop_loss")
                     target_val = signal_state[index_name].get("target")
 
-                    # SL hit
                     if stop_loss_val is not None and prem <= stop_loss_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -1496,7 +1471,6 @@ def run_signal_engine_for_index(index_name):
                         reset_signal_state(index_name, now, "STOP_LOSS")
                         return
 
-                    # Target hit
                     if target_val is not None and prem >= target_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -1516,7 +1490,7 @@ def run_signal_engine_for_index(index_name):
                         reset_signal_state(index_name, now, "TARGET_HIT")
                         return
 
-                    # Time exit (dynamic)
+                    # Time exit
                     entry_time = signal_state[index_name].get("entry_time", 0)
                     if entry_time > 0:
                         elapsed_min = (now - entry_time) / 60
@@ -1635,7 +1609,6 @@ def run_signal_engine_for_index(index_name):
                 portfolio_state[index_name]["live_pnl"] = 0.0
             save_portfolio_state(index_name)
 
-        # Dynamic max trades based on regime
         if regime == "TRENDING":
             max_trades = 25
         else:
@@ -1660,7 +1633,7 @@ def run_signal_engine_for_index(index_name):
             return
 
         prem = ce_prem if side == "CE" else pe_prem
-        min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)  # 0 for commodities
+        min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
         if prem <= 0 or (min_prem > 0 and prem < min_prem):
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem}"
@@ -1691,7 +1664,7 @@ def run_signal_engine_for_index(index_name):
         else:
             pe_volume_histories[index_name].append(vol)
 
-        # --- PCR check (only for equity) ---
+        # --- PCR check ---
         if not is_commodity and INDEX_CONFIG[index_name].get("pcr_enabled"):
             if ce_oi > 0 and pe_oi > 0:
                 pcr = ce_oi / pe_oi
@@ -1725,7 +1698,7 @@ def run_signal_engine_for_index(index_name):
         else:
             beta_adj = 1.0
 
-        # --- Greeks filter (only equity) ---
+        # --- Greeks filter ---
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data is not None:
             delta = greeks_data.get("ce_delta") if side == "CE" else greeks_data.get("pe_delta")
             if delta is not None:
@@ -1741,7 +1714,7 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "BLOCKED"
                 return
 
-        # --- RSI, ADX, VIX (all numeric) ---
+        # --- RSI, ADX, VIX ---
         with _price_histories_lock:
             prices_spot = list(price_histories[index_name])
         rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50.0
@@ -1874,7 +1847,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ----------------------------------------------------------------------
-# EXIT HELPER FUNCTIONS (safe)
+# EXIT HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_prem, greeks_data=None):
     if len(prices_spot) < 60:
@@ -1917,15 +1890,15 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
     theta = greeks_data.get("ce_theta") if side == "CE" else greeks_data.get("pe_theta")
     if theta is None or theta == 0:
         return 45
-    theta_abs = abs(theta)  # per day
+    theta_abs = abs(theta)
     if theta_abs > prem * 0.05:
         return 30
     else:
         return 60
 
-# ----------------------------------------------------------------------
-# WEBSOCKET HANDLING (with commodity scaling)
-# ----------------------------------------------------------------------
+# ============================================================
+# WEBSOCKET + WATCHDOGS
+# ============================================================
 ws_running = False
 sws = None
 last_heartbeat = time.time()
@@ -1984,7 +1957,6 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
     with _ws_connect_lock:
         ws_running = False
     logger.warning(f"WebSocket closed: status={close_status_code}, msg={close_msg}")
-
 
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws
@@ -2080,14 +2052,13 @@ def on_ws_data(wsapp, message):
                                 last_known_prices[idx]["spot"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
 
-                        # ---- LOG CANDLE COUNT ----
+                        # Log candle count
                         with _candle_histories_lock:
                             candle_len = len(candle_histories[idx]["1min"])
                             logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
 
                         spot_matched = True
                         break
-
             if spot_matched:
                 continue
 
@@ -2152,9 +2123,51 @@ def on_ws_data(wsapp, message):
         import traceback
         logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")
 
-# ----------------------------------------------------------------------
-# WEBSOCKET CONNECTION MANAGER
-# ----------------------------------------------------------------------
+def tick_watchdog():
+    global ws_running, tick_counter, last_tick_timestamp, sws
+    last_count = 0
+    while True:
+        time.sleep(10)
+        if ws_running:
+            if time.time() - last_tick_timestamp > 60:
+                logger.warning("No ticks for 60s - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
+            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
+                logger.warning("Tick counter stalled - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
+            else:
+                last_count = tick_counter
+
+def ws_watchdog():
+    global ws_running, last_heartbeat, last_tick_timestamp, sws
+    while True:
+        time.sleep(10)
+        now = time.time()
+        with _ws_connect_lock:
+            is_running = ws_running
+        if is_running:
+            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
+                logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except Exception:
+                        pass
+
 def start_angel_websocket_improved():
     global sws, ws_running, last_heartbeat
     retry_delay = 5
@@ -2231,107 +2244,135 @@ def start_angel_websocket_improved():
                 ws_running = False
             time.sleep(10)
 
+# ----------------------------------------------------------------------
+# REST FALLBACK (ONLY WHEN WEBSOCKET FAILS)
+# ----------------------------------------------------------------------
 def start_rest_only_mode():
-    logger.info("Starting REST-only mode – GOLD only for testing")
+    logger.info("Starting REST fallback (only if WebSocket fails)")
     while True:
+        # Only run if WebSocket is NOT running
+        with _ws_connect_lock:
+            if ws_running:
+                time.sleep(30)
+                continue
+
         try:
-            # Only fetch GOLD
-            idx = "GOLD"
-            if not INDEX_CONFIG[idx].get("active"):
-                time.sleep(60)
+            # Determine which assets to fetch based on open markets
+            assets_to_fetch = []
+            for idx in INDEX_NAMES:
+                cfg = INDEX_CONFIG[idx]
+                if not cfg.get("active"):
+                    continue
+                if cfg.get("is_commodity") and is_mcx_open():
+                    assets_to_fetch.append(idx)
+                elif not cfg.get("is_commodity") and is_market_open():
+                    assets_to_fetch.append(idx)
+
+            if not assets_to_fetch:
+                time.sleep(30)
                 continue
 
-            # Check if MCX is open
-            if not is_mcx_open():
-                time.sleep(60)
-                continue
+            for idx in assets_to_fetch:
+                try:
+                    spot = get_index_spot(idx)
+                    if spot and spot > 0:
+                        with _latest_ticks_lock:
+                            if INDEX_CONFIG[idx].get("is_commodity"):
+                                latest_ticks[idx]["price"] = spot
+                            else:
+                                latest_ticks[idx]["spot_price"] = spot
+                        with _price_histories_lock:
+                            price_histories[idx].append(spot)
+                        update_candle(idx, spot, 0, time.time())
+                        with _latest_ticks_lock:
+                            last_known_prices[idx]["spot"] = spot
+                            last_known_prices[idx]["timestamp"] = time.time()
+                except Exception as e:
+                    logger.debug(f"REST fetch error for {idx}: {e}")
+                # Add a delay between assets to avoid rate limits
+                time.sleep(2)
 
-            try:
-                spot = get_index_spot(idx)
-                if spot and spot > 0:
-                    with _latest_ticks_lock:
-                        latest_ticks[idx]["price"] = spot
-                    with _price_histories_lock:
-                        price_histories[idx].append(spot)
-                    update_candle(idx, spot, 0, time.time())
-                    with _latest_ticks_lock:
-                        last_known_prices[idx]["spot"] = spot
-                        last_known_prices[idx]["timestamp"] = time.time()
-                    logger.info(f"REST GOLD: ltp={spot}, candles={len(candle_histories[idx]['1min'])}")
-            except Exception as e:
-                logger.error(f"GOLD fetch error: {e}")
-
-            # Run signal engine only on GOLD
-            run_signal_engine_for_index("GOLD")
-
-            # Sleep 30 seconds – well below rate limits
-            time.sleep(30)
-
-        except Exception as e:
-            logger.error(f"REST mode error: {e}")
-            time.sleep(30)
-
-                # For equity, also fetch option prices (but currently not needed since equity closed)
-                # We'll skip option fetches now to reduce calls.
-                time.sleep(1.5)  # 1.5 seconds between assets
-
-            # After fetching all assets, run the signal engine
+            # Run signal engine after fetching
             run_all_signals()
 
-            # Longer sleep between cycles
+            # Sleep longer between full cycles
             time.sleep(15)
 
         except Exception as e:
-            logger.error(f"REST-only mode error: {e}")
+            logger.error(f"REST fallback error: {e}")
             time.sleep(10)
 
-def tick_watchdog():
-    global ws_running, tick_counter, last_tick_timestamp, sws
-    last_count = 0
-    while True:
-        time.sleep(10)
-        if ws_running:
-            # If no tick for 60 seconds, force reconnect
-            if time.time() - last_tick_timestamp > 60:
-                logger.warning("No ticks for 60s - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except:
-                        pass
-            # Also check if tick counter hasn't increased (alternative)
-            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
-                logger.warning("Tick counter stalled - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except:
-                        pass
-            else:
-                last_count = tick_counter
+# ----------------------------------------------------------------------
+# CONNECTION MANAGER
+# ----------------------------------------------------------------------
+class ConnectionManager:
+    def __init__(self):
+        self.use_websocket = os.getenv("FORCE_REST_MODE", "0") != "1"
+        self._ws_thread = None
+        self._rest_thread = None
 
-def ws_watchdog():
-    global ws_running, last_heartbeat, last_tick_timestamp, sws
-    while True:
-        time.sleep(10)
-        now = time.time()
-        with _ws_connect_lock:
-            is_running = ws_running
-        if is_running:
-            # If heartbeat is stale OR no ticks for 60s
-            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
-                logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except Exception:
-                        pass
+    def start(self):
+        if self.use_websocket:
+            # Start WebSocket thread
+            self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
+            self._ws_thread.start()
+
+            # Start watchdogs
+            threading.Thread(target=ws_watchdog, daemon=True).start()
+            threading.Thread(target=tick_watchdog, daemon=True).start()
+
+            # Start REST fallback as a safety net (it will only fetch if ws_running is False)
+            self._rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
+            self._rest_thread.start()
+
+            logger.info("WebSocket thread started. REST fallback active (will only run if WS fails).")
+        else:
+            logger.info("FORCE_REST_MODE enabled – using REST-only")
+            threading.Thread(target=start_rest_only_mode, daemon=True).start()
+
+# ----------------------------------------------------------------------
+# BACKGROUND THREADS
+# ----------------------------------------------------------------------
+_init_completed = False
+_init_lock = threading.Lock()
+
+def _start_background_threads():
+    global _init_completed
+    with _init_lock:
+        if not _init_completed:
+            logger.info("Pre-fetching option tokens...")
+            max_retries = 5
+            for attempt in range(max_retries):
+                refresh_all_tokens()
+                ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
+                           if cfg.get("active") and cfg.get("token"))
+                total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
+                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
+                if ready == total_active:
+                    break
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+            conn_manager = ConnectionManager()
+            conn_manager.start()
+            _init_completed = True
+            logger.info("Background threads started with connection manager")
+
+_background_started = False
+_background_start_lock = threading.Lock()
+
+def auto_start_background():
+    global _background_started
+    with _background_start_lock:
+        if not _background_started:
+            init_db()
+            load_portfolio_state()
+            _start_background_threads()
+            _background_started = True
+            logger.info("Auto-start: Background threads initialized for production")
+
+auto_start_background()
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
@@ -2347,7 +2388,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v14.5 – Equity + MCX (Fully patched)",
+        "engine": "Hybrid v14.6 – WebSocket + Slow REST Fallback",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2388,7 +2429,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "14.5-hybrid-mcx-fixed"
+            "version": "14.6-hybrid-final"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -2444,49 +2485,8 @@ def connection_status():
     })
 
 # ----------------------------------------------------------------------
-# AUTO-START
+# RUN FLASK (for direct execution)
 # ----------------------------------------------------------------------
-_init_completed = False
-_init_lock = threading.Lock()
-
-def _start_background_threads():
-    global _init_completed
-    with _init_lock:
-        if not _init_completed:
-            logger.info("Pre-fetching option tokens...")
-            max_retries = 5
-            for attempt in range(max_retries):
-                refresh_all_tokens()
-                ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
-                           if cfg.get("active") and cfg.get("token"))
-                total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
-                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
-                if ready == total_active:
-                    break
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-            conn_manager = ConnectionManager()
-            conn_manager.start()
-            _init_completed = True
-            logger.info("Background threads started with connection manager")
-
-_background_started = False
-_background_start_lock = threading.Lock()
-
-def auto_start_background():
-    global _background_started
-    with _background_start_lock:
-        if not _background_started:
-            init_db()
-            load_portfolio_state()
-            _start_background_threads()
-            _background_started = True
-            logger.info("Auto-start: Background threads initialized for production")
-
-auto_start_background()
-
 if __name__ == "__main__":
     init_db()
     load_portfolio_state()
