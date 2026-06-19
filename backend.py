@@ -2004,8 +2004,7 @@ def on_ws_data(wsapp, message):
 
             token = str(tick.get("token") or tick.get("tk") or "")
             ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0 
-	<-- FIXED INDENTATION
-
+	
             if isinstance(ltp, str):
                 try:
                     ltp = float(ltp)
