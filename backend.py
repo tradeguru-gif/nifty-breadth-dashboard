@@ -2291,14 +2291,26 @@ class ConnectionManager:
             threading.Thread(target=start_rest_only_mode, daemon=True).start()
 
 def tick_watchdog():
-    global ws_running, tick_counter, last_tick_timestamp
+    global ws_running, tick_counter, last_tick_timestamp, sws
     last_count = 0
     while True:
-        time.sleep(15)
+        time.sleep(10)  # check every 10 seconds
         if ws_running:
-            if tick_counter == last_count:
-                if time.time() - last_tick_timestamp > 30:
-                    logger.warning("No new ticks for 30s - forcing reconnect")
+            # If no tick for 60 seconds, force reconnect
+            if time.time() - last_tick_timestamp > 60:
+                logger.warning("No ticks for 60s - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
+            # Also check if tick counter hasn't increased (alternative)
+            elif tick_counter == last_count:
+                # but only if we already have some ticks
+                if tick_counter > 0 and time.time() - last_tick_timestamp > 45:
+                    logger.warning("Tick counter stalled - forcing reconnect")
                     with _ws_connect_lock:
                         ws_running = False
                     if sws:
@@ -2308,7 +2320,6 @@ def tick_watchdog():
                             pass
             else:
                 last_count = tick_counter
-
 def ws_watchdog():
     global ws_running, last_heartbeat, sws
     while True:
