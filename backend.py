@@ -988,17 +988,47 @@ def update_candle(idx, price, cumulative_volume, timestamp):
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
+            # DEBUG: Log for 1min timeframe
+            if tf == "1min":
+                logger.info(f"🕒 update_candle {idx}: timestamp={timestamp}, candle_start={candle_start}, last_time={_last_candle_time[idx][tf]}")
+
+            # If this is a new minute, append the old candle and start a new one
             if _last_candle_time[idx][tf] != candle_start:
+                # If we have a previous candle, append it
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
                         if tf == "1min":
                             logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+
+                # Start new candle
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
                 }
                 _last_candle_time[idx][tf] = candle_start
+            else:
+                # Update current candle
+                if _current_candle[idx][tf] is not None:
+                    _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
+                    _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
+                    _current_candle[idx][tf]["close"] = price
+                    _current_candle[idx][tf]["volume"] += tick_vol
+
+            # FORCE FLUSH: If current candle is > 90 seconds old, force a new candle
+            if tf == "1min" and _current_candle[idx][tf] is not None:
+                current_age = timestamp - _current_candle[idx][tf]["timestamp"]
+                if current_age > 90:
+                    logger.warning(f"⏰ Forcing new candle for {idx} (age={current_age:.1f}s)")
+                    # Append current candle and start new one
+                    with _candle_histories_lock:
+                        candle_histories[idx][tf].append(_current_candle[idx][tf])
+                        logger.info(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
+                    _current_candle[idx][tf] = {
+                        "open": price, "high": price, "low": price, "close": price,
+                        "volume": tick_vol, "timestamp": candle_start
+                    }
+                    _last_candle_time[idx][tf] = candle_start
             else:
                 if _current_candle[idx][tf] is not None:
                     _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
