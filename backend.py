@@ -1967,6 +1967,7 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
         ws_running = False
     logger.warning(f"WebSocket closed: status={close_status_code}, msg={close_msg}")
 
+
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws
     last_heartbeat = time.time()
@@ -2003,8 +2004,8 @@ def on_ws_data(wsapp, message):
             tick_counter += 1
 
             token = str(tick.get("token") or tick.get("tk") or "")
-            ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0 
-	
+            ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
+
             if isinstance(ltp, str):
                 try:
                     ltp = float(ltp)
@@ -2012,11 +2013,9 @@ def on_ws_data(wsapp, message):
                     ltp = 0
 
             # ---- SCALING FIX ----
-            # Equity spot: divide by 100 if needed
             if ltp > 10000 and token in INDEX_TOKEN_SET:
                 ltp = ltp / 100.0
 
-            # Commodity scaling: divide by 100 if it's a commodity token
             is_comm = False
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("is_commodity") and cfg.get("token") == token:
@@ -2033,7 +2032,7 @@ def on_ws_data(wsapp, message):
             bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
             ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-            # ---- Spot matching (ONLY ONE BLOCK) ----
+            # ---- Spot matching ----
             spot_matched = False
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
@@ -2063,11 +2062,11 @@ def on_ws_data(wsapp, message):
                                 last_known_prices[idx]["spot"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
 
-                        # ---- NOW LOG THE CANDLE COUNT ----
+                        # ---- LOG CANDLE COUNT ----
                         with _candle_histories_lock:
                             candle_len = len(candle_histories[idx]["1min"])
                             logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
-                        # --------------------------------
+                        # -------------------------
 
                         spot_matched = True
                         break
@@ -2075,7 +2074,7 @@ def on_ws_data(wsapp, message):
             if spot_matched:
                 continue
 
-            # ---- Option matching (only for equity) ----
+            # ---- Option matching ----
             option_matched = False
             for idx, tokens in INDEX_TOKENS.items():
                 if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
