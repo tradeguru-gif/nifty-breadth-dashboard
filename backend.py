@@ -1271,23 +1271,30 @@ def run_signal_engine_for_index(index_name):
 
         # Candle check – ensure we have a valid deque
                 # Candle check – ensure we have a valid deque (but don't reset once built)
+                # Candle check – ensure we have a valid deque (but do NOT reset once built)
         with _candle_histories_lock:
+            # Only create the structure if the index is completely missing
             if index_name not in candle_histories:
+                logger.info(f"📊 Creating candle_histories for {index_name}")
                 candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
-                logger.info(f"📊 Created candle_histories for {index_name}")
+                # Also create "1min" now
+                candle_histories[index_name]["1min"] = deque(maxlen=500)
             
-            # Only create "1min" if it's missing – do NOT recreate if None (to avoid resetting)
+            # Now check if "1min" is missing (should never happen after creation)
             if "1min" not in candle_histories[index_name]:
-                logger.info(f"⚠️ WARNING: 1min missing for {index_name} – creating new deque")
-                candle_histories[index_name]["1min"] = deque(maxlen=500)
-            elif candle_histories[index_name]["1min"] is None:
-                logger.info(f"⚠️ WARNING: 1min is None for {index_name} – recreating deque")
+                logger.error(f"❌ CRITICAL: 1min missing for {index_name} – this should not happen! Recreating...")
                 candle_histories[index_name]["1min"] = deque(maxlen=500)
             
-            # Now check length – this will be accurate if the deque wasn't reset
-            if len(candle_histories[index_name]["1min"]) < 30:
+            # If the deque is None (should not happen), log and recreate but only once
+            if candle_histories[index_name]["1min"] is None:
+                logger.error(f"❌ CRITICAL: 1min is None for {index_name} – recreating, but this indicates a bug!")
+                candle_histories[index_name]["1min"] = deque(maxlen=500)
+
+            # Now safely get the length
+            candle_len = len(candle_histories[index_name]["1min"])
+            if candle_len < 30:
                 with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Building candles ({len(candle_histories[index_name]['1min'])}/30)"
+                    market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/30)"
                     market_signal[index_name]["signal"] = "WAITING"
                 return
 
