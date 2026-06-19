@@ -1270,11 +1270,21 @@ def run_signal_engine_for_index(index_name):
                 return
 
         # Candle check – ensure we have a valid deque
+                # Candle check – ensure we have a valid deque (but don't reset once built)
         with _candle_histories_lock:
             if index_name not in candle_histories:
                 candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
-            if "1min" not in candle_histories[index_name] or candle_histories[index_name]["1min"] is None:
+                logger.info(f"📊 Created candle_histories for {index_name}")
+            
+            # Only create "1min" if it's missing – do NOT recreate if None (to avoid resetting)
+            if "1min" not in candle_histories[index_name]:
+                logger.info(f"⚠️ WARNING: 1min missing for {index_name} – creating new deque")
                 candle_histories[index_name]["1min"] = deque(maxlen=500)
+            elif candle_histories[index_name]["1min"] is None:
+                logger.info(f"⚠️ WARNING: 1min is None for {index_name} – recreating deque")
+                candle_histories[index_name]["1min"] = deque(maxlen=500)
+            
+            # Now check length – this will be accurate if the deque wasn't reset
             if len(candle_histories[index_name]["1min"]) < 30:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Building candles ({len(candle_histories[index_name]['1min'])}/30)"
