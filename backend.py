@@ -1144,6 +1144,17 @@ def save_portfolio_state(idx):
 # ----------------------------------------------------------------------
 # MAIN SIGNAL ENGINE (unified for equity & commodities)
 # ----------------------------------------------------------------------
+#--------------------------------------------------------
+#--------------------------------------------------------
+# Ensure candle histories exist
+if index_name not in candle_histories:
+    candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
+elif "1min" not in candle_histories[index_name]:
+    candle_histories[index_name]["1min"] = deque(maxlen=500)
+# ----------------------------------------------------------------------
+#--------------------------------------------------------
+#--------------------------------------------------------
+
 def run_signal_engine_for_index(index_name):
     try:
         if not INDEX_CONFIG[index_name].get("active"):
@@ -1259,7 +1270,24 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["signal"] = "COOLDOWN"
 
     now = time.time()
-
+#------------------------------------------------------
+#---------------------------------------------------------
+#---------------------------------------------------------
+with _candle_histories_lock:
+    if index_name not in candle_histories:
+        candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
+    if "1min" not in candle_histories[index_name]:
+        candle_histories[index_name]["1min"] = deque(maxlen=500)
+    length = len(candle_histories[index_name]["1min"])
+    logger.info(f"📊 {index_name} candle count: {length}")
+    if length < 30:
+        with _market_signal_lock:
+            market_signal[index_name]["alert_message"] = f"Building candles ({length}/30)"
+            market_signal[index_name]["signal"] = "WAITING"
+        return
+#------------------------------------------------------
+#---------------------------------------------------------
+#---------------------------------------------------------
     # --- Extract latest data ---
     with _latest_ticks_lock:
         if is_commodity:
