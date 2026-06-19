@@ -2235,25 +2235,23 @@ def start_rest_only_mode():
     logger.info("Starting REST-only mode (WebSocket fallback)")
     while True:
         try:
-            if not is_market_open() and not is_mcx_open():
-                time.sleep(60)
-                continue
-
-            # Decide which indices to fetch based on open markets
-            indices_to_fetch = []
+            # Determine which assets to fetch based on open markets
+            # At this hour, only MCX is open, so fetch only commodities.
+            assets_to_fetch = []
             for idx in INDEX_NAMES:
-                if INDEX_CONFIG[idx].get("active"):
-                    if INDEX_CONFIG[idx].get("is_commodity") and is_mcx_open():
-                        indices_to_fetch.append(idx)
-                    elif not INDEX_CONFIG[idx].get("is_commodity") and is_market_open():
-                        indices_to_fetch.append(idx)
+                cfg = INDEX_CONFIG[idx]
+                if not cfg.get("active"):
+                    continue
+                if cfg.get("is_commodity") and is_mcx_open():
+                    assets_to_fetch.append(idx)
+                elif not cfg.get("is_commodity") and is_market_open():
+                    assets_to_fetch.append(idx)
 
-            # If no market is open, skip the whole iteration
-            if not indices_to_fetch:
-                time.sleep(10)
+            if not assets_to_fetch:
+                time.sleep(30)
                 continue
 
-            for idx in indices_to_fetch:
+            for idx in assets_to_fetch:
                 try:
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
@@ -2271,44 +2269,15 @@ def start_rest_only_mode():
                 except Exception as e:
                     logger.debug(f"REST fetch error for {idx}: {e}")
 
-                # For equity, also fetch option prices
-                if not INDEX_CONFIG[idx].get("is_commodity"):
-                    tokens = INDEX_TOKENS.get(idx, {})
-                    if tokens.get("ce_token") and tokens.get("pe_token"):
-                        try:
-                            auth_token, _, obj = get_auth_token()
-                            if obj:
-                                ce_resp = obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
-                                ce_price = safe_ltp(ce_resp)
-                                if ce_price and ce_price > 0:
-                                    if ce_price > 100000:
-                                        ce_price /= 100
-                                    with _latest_ticks_lock:
-                                        latest_ticks[idx]["ce_price"] = ce_price
-                                    with _latest_ticks_lock:
-                                        last_known_prices[idx]["ce"] = ce_price
-                                    volume_profile_engines[idx].update(ce_price, 0, option_type="CE")
-                                pe_resp = obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
-                                pe_price = safe_ltp(pe_resp)
-                                if pe_price and pe_price > 0:
-                                    if pe_price > 100000:
-                                        pe_price /= 100
-                                    with _latest_ticks_lock:
-                                        latest_ticks[idx]["pe_price"] = pe_price
-                                    with _latest_ticks_lock:
-                                        last_known_prices[idx]["pe"] = pe_price
-                                    volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
-                        except Exception as e:
-                            logger.debug(f"Option fetch error for {idx}: {e}")
+                # For equity, also fetch option prices (but currently not needed since equity closed)
+                # We'll skip option fetches now to reduce calls.
+                time.sleep(1.5)  # 1.5 seconds between assets
 
-                # Small delay between assets to avoid rate limits
-                time.sleep(0.5)
-
-            # Run signal engine after fetching all data
+            # After fetching all assets, run the signal engine
             run_all_signals()
 
-            # Longer sleep between iterations (10 seconds instead of 5)
-            time.sleep(10)
+            # Longer sleep between cycles
+            time.sleep(15)
 
         except Exception as e:
             logger.error(f"REST-only mode error: {e}")
