@@ -2066,7 +2066,6 @@ def on_ws_data(wsapp, message):
                         with _candle_histories_lock:
                             candle_len = len(candle_histories[idx]["1min"])
                             logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
-                        # -------------------------
 
                         spot_matched = True
                         break
@@ -2075,108 +2074,6 @@ def on_ws_data(wsapp, message):
                 continue
 
             # ---- Option matching ----
-            option_matched = False
-            for idx, tokens in INDEX_TOKENS.items():
-                if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
-                    continue
-                if token == tokens.get("ce_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["ce_price"] = ltp
-                            latest_ticks[idx]["ce_volume"] = vol
-                            latest_ticks[idx]["ce_oi"] = oi
-                            latest_ticks[idx]["ce_bid"] = bid
-                            latest_ticks[idx]["ce_ask"] = ask
-                        with _ce_price_histories_lock:
-                            ce_price_histories[idx].append(ltp)
-                        volume_profile_engines[idx].update(ltp, vol, option_type="CE")
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["ce"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                        option_matched = True
-                        break
-                elif token == tokens.get("pe_token"):
-                    if ltp > 0:
-                        with _latest_ticks_lock:
-                            latest_ticks[idx]["pe_price"] = ltp
-                            latest_ticks[idx]["pe_volume"] = vol
-                            latest_ticks[idx]["pe_oi"] = oi
-                            latest_ticks[idx]["pe_bid"] = bid
-                            latest_ticks[idx]["pe_ask"] = ask
-                        with _pe_price_histories_lock:
-                            pe_price_histories[idx].append(ltp)
-                        volume_profile_engines[idx].update(ltp, vol, option_type="PE")
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["pe"] = ltp
-                            last_known_prices[idx]["timestamp"] = time.time()
-                        option_matched = True
-                        break
-            if option_matched:
-                continue
-
-            # ---- VIX ----
-            if token == "99919017" and ltp > 0:
-                with _latest_ticks_lock:
-                    latest_ticks["VIX"]["vix"] = ltp
-                vix_history.append(ltp)
-                if DEBUG_MODE:
-                    logger.info(f"VIX TICK: {ltp}")
-
-        # Throttle signal runs every 5 ticks
-        if tick_counter % 5 == 0 and tick_counter > 0:
-            with _signal_run_lock:
-                now = time.time()
-                global _last_signal_run
-                if now - _last_signal_run >= 1.0:
-                    _last_signal_run = now
-                    threading.Thread(target=run_all_signals, daemon=True).start()
-
-    except Exception as e:
-        import traceback
-        logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")
-#--------------------------------------------------------
-#------------------------------------------------------
-#------------------------------------------------------
-            # Spot indices
-            for idx, cfg in INDEX_CONFIG.items():
-                if cfg.get("token") == token:
-                    if ltp > 0:
-                        logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
-                        if cfg.get("is_commodity"):
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["price"] = ltp
-                                latest_ticks[idx]["volume"] = vol
-                                latest_ticks[idx]["bid"] = bid
-                                latest_ticks[idx]["ask"] = ask
-                            with _price_histories_lock:
-                                price_histories[idx].append(ltp)
-                            update_candle(idx, ltp, vol, time.time())
-                            last_tick_timestamp = time.time()
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["spot"] = ltp
-                                last_known_prices[idx]["timestamp"] = time.time()
-                        else:
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["spot_price"] = ltp
-                            with _price_histories_lock:
-                                price_histories[idx].append(ltp)
-                            update_candle(idx, ltp, vol, time.time())
-                            last_tick_timestamp = time.time()
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["spot"] = ltp
-                                last_known_prices[idx]["timestamp"] = time.time()
-                        # ---- ADD THIS LOG ----
-                        with _candle_histories_lock:
-                            candle_len = len(candle_histories[idx]["1min"])
-                            logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
-                        # -----------------------
-                        spot_matched = True
-                        break
-#--------------------------------------------------------
-#-------------------
-#--------------------------------------------------
-
-            # ---- Option matching (only for equity) ----
             option_matched = False
             for idx, tokens in INDEX_TOKENS.items():
                 if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
