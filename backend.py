@@ -1223,27 +1223,31 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
 # ----------------------------------------------------------------------
 # MAIN SIGNAL ENGINE (FULLY GUARDED AGAINST NONE)
 # ----------------------------------------------------------------------
-def run_signal_engine_for_index(index_name):
-    logger.info(f"🔍 ENGINE RUNNING for {index_name}")
-    try:
-        if not INDEX_CONFIG[index_name].get("active"):
-            return
+        # ---- CANDLE CHECK – ALWAYS UPDATE ALERT_MESSAGE ----
+                # ---- CANDLE CHECK – ONCE CREATED, NEVER RECREATE ----
+        with _candle_histories_lock:
+            # Only create if the index is completely missing
+            if index_name not in candle_histories:
+                logger.info(f"📊 Creating candle_histories for {index_name}")
+                candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
+                candle_histories[index_name]["1min"] = deque(maxlen=500)
 
-        config = INDEX_CONFIG[index_name]
-        is_commodity = config.get("is_commodity", False)
+            # If it's None (should never happen), log and recreate (but this indicates a bug)
+            if candle_histories[index_name]["1min"] is None:
+                logger.error(f"❌ CRITICAL: 1min deque is None for {index_name} – recreating, but this indicates a bug.")
+                candle_histories[index_name]["1min"] = deque(maxlen=500)
 
-        # Market open check
-        if is_commodity:
-            if not is_mcx_open():
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "MCX closed"
-                    market_signal[index_name]["signal"] = "CLOSED"
-                return
-        else:
-            if not is_market_open():
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "Equity market closed"
-                    market_signal[index_name]["signal"] = "CLOSED"
+            candle_len = len(candle_histories[index_name]["1min"])
+
+            # Update frontend
+            with _market_signal_lock:
+                if candle_len < 30:
+                    market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/30)"
+                    market_signal[index_name]["signal"] = "WAITING"
+                else:
+                    market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
+
+            if candle_len < 30:
                 return
 
         # Option tokens only for equity
@@ -1254,28 +1258,6 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["alert_message"] = "Option tokens not loaded"
                     market_signal[index_name]["signal"] = "WAITING"
                 return
-
-        # ---- CANDLE CHECK – ALWAYS UPDATE ALERT_MESSAGE ----
-        with _candle_histories_lock:
-            # Only create structure if the index is completely missing
-            if index_name not in candle_histories:
-                candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
-            if "1min" not in candle_histories[index_name] or candle_histories[index_name]["1min"] is None:
-                candle_histories[index_name]["1min"] = deque(maxlen=500)
-
-            candle_len = len(candle_histories[index_name]["1min"])
-
-            # Always update the alert_message so frontend shows progress
-            with _market_signal_lock:
-                if candle_len < 30:
-                    market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/30)"
-                    market_signal[index_name]["signal"] = "WAITING"
-                else:
-                    market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
-                    # signal will be set later by the engine
-
-            if candle_len < 30:
-                return  # Exit early, but message is already updated
 
         # Now proceed with the rest of the engine only if candles >= 30
         with _market_signal_lock:
