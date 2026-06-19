@@ -101,28 +101,62 @@ from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 # ============================================================
 # MONKEY PATCH – Binary parsing (from original working code)
 # ============================================================
+# ============================================================
+# MONKEY PATCH – only add token if missing (fallback)
+# ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
+    # First, call the original parser
     try:
         result = _original_parse(self, binary_data)
-    except:
+        # If result already has a token, return it as-is
+        if result.get('token'):
+            return result
+    except Exception:
         result = {}
-    try:
-        token_bytes = binary_data[2:26]
-        token_int = int.from_bytes(token_bytes, byteorder='little')
-        result['token'] = str(token_int)
-    except:
-        pass
-    return result
-SmartWebSocketV2._parse_binary_data = _patched_parse
 
-_original_on_close = SmartWebSocketV2._on_close
-def _patched_on_close(self, wsapp, *args):
+    # If token is missing, try to extract from binary using a different offset
+    # Angel One WebSocket binary structure: token is a 64-bit integer at offset 2? 
+    # Let's try a few common offsets and lengths.
     try:
-        _original_on_close(self, wsapp)
+        # Try offset 2, length 8 (64-bit)
+        token_int = int.from_bytes(binary_data[2:10], byteorder='little')
+        if token_int > 0:
+            result['token'] = str(token_int)
+            return result
     except:
         pass
-SmartWebSocketV2._on_close = _patched_on_close
+    try:
+        # Try offset 1, length 8
+        token_int = int.from_bytes(binary_data[1:9], byteorder='little')
+        if token_int > 0:
+            result['token'] = str(token_int)
+            return result
+    except:
+        pass
+    try:
+        # Try offset 0, length 8
+        token_int = int.from_bytes(binary_data[0:8], byteorder='little')
+        if token_int > 0:
+            result['token'] = str(token_int)
+            return result
+    except:
+        pass
+
+    # If all fail, try to find any numeric token in the raw bytes (naive)
+    # This is a last resort – look for the token as a little-endian 64-bit anywhere
+    for offset in range(0, len(binary_data)-8, 2):
+        try:
+            token_int = int.from_bytes(binary_data[offset:offset+8], byteorder='little')
+            if token_int > 0 and token_int < 10**15:  # reasonable range
+                result['token'] = str(token_int)
+                return result
+        except:
+            pass
+
+    return result
+
+SmartWebSocketV2._parse_binary_data = _patched_parse
 # ============================================================
 
 # ----------------------------------------------------------------------
