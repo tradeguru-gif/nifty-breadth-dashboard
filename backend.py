@@ -2286,24 +2286,6 @@ class ConnectionManager:
         self.use_websocket = os.getenv("FORCE_REST_MODE", "0") != "1"
         self._ws_thread = None
 
-def ws_supervisor():
-    global ws_running
-    while True:
-        if not ws_running:
-            logger.warning("WS supervisor: ws_running is False, restarting WebSocket thread...")
-            # Kill any existing sws connection
-            global sws
-            if sws:
-                try:
-                    sws.close_connection()
-                except:
-                    pass
-                sws = None
-            # Restart the WS thread
-            ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
-            ws_thread.start()
-        time.sleep(30)
-
     def start(self):
         if self.use_websocket:
             self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
