@@ -2003,7 +2003,8 @@ def on_ws_data(wsapp, message):
             tick_counter += 1
 
             token = str(tick.get("token") or tick.get("tk") or "")
-                    ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0 <-- FIXED INDENTATION
+            ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0 
+	<-- FIXED INDENTATION
 
             if isinstance(ltp, str):
                 try:
