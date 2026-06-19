@@ -2232,42 +2232,44 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 def start_rest_only_mode():
-    logger.info("Starting REST-only mode (WebSocket fallback)")
+    logger.info("Starting REST-only mode – GOLD only for testing")
     while True:
         try:
-            # Determine which assets to fetch based on open markets
-            # At this hour, only MCX is open, so fetch only commodities.
-            assets_to_fetch = []
-            for idx in INDEX_NAMES:
-                cfg = INDEX_CONFIG[idx]
-                if not cfg.get("active"):
-                    continue
-                if cfg.get("is_commodity") and is_mcx_open():
-                    assets_to_fetch.append(idx)
-                elif not cfg.get("is_commodity") and is_market_open():
-                    assets_to_fetch.append(idx)
-
-            if not assets_to_fetch:
-                time.sleep(30)
+            # Only fetch GOLD
+            idx = "GOLD"
+            if not INDEX_CONFIG[idx].get("active"):
+                time.sleep(60)
                 continue
 
-            for idx in assets_to_fetch:
-                try:
-                    spot = get_index_spot(idx)
-                    if spot and spot > 0:
-                        with _latest_ticks_lock:
-                            if INDEX_CONFIG[idx].get("is_commodity"):
-                                latest_ticks[idx]["price"] = spot
-                            else:
-                                latest_ticks[idx]["spot_price"] = spot
-                        with _price_histories_lock:
-                            price_histories[idx].append(spot)
-                        update_candle(idx, spot, 0, time.time())
-                        with _latest_ticks_lock:
-                            last_known_prices[idx]["spot"] = spot
-                            last_known_prices[idx]["timestamp"] = time.time()
-                except Exception as e:
-                    logger.debug(f"REST fetch error for {idx}: {e}")
+            # Check if MCX is open
+            if not is_mcx_open():
+                time.sleep(60)
+                continue
+
+            try:
+                spot = get_index_spot(idx)
+                if spot and spot > 0:
+                    with _latest_ticks_lock:
+                        latest_ticks[idx]["price"] = spot
+                    with _price_histories_lock:
+                        price_histories[idx].append(spot)
+                    update_candle(idx, spot, 0, time.time())
+                    with _latest_ticks_lock:
+                        last_known_prices[idx]["spot"] = spot
+                        last_known_prices[idx]["timestamp"] = time.time()
+                    logger.info(f"REST GOLD: ltp={spot}, candles={len(candle_histories[idx]['1min'])}")
+            except Exception as e:
+                logger.error(f"GOLD fetch error: {e}")
+
+            # Run signal engine only on GOLD
+            run_signal_engine_for_index("GOLD")
+
+            # Sleep 30 seconds – well below rate limits
+            time.sleep(30)
+
+        except Exception as e:
+            logger.error(f"REST mode error: {e}")
+            time.sleep(30)
 
                 # For equity, also fetch option prices (but currently not needed since equity closed)
                 # We'll skip option fetches now to reduce calls.
@@ -2282,24 +2284,6 @@ def start_rest_only_mode():
         except Exception as e:
             logger.error(f"REST-only mode error: {e}")
             time.sleep(10)
-class ConnectionManager:
-    def __init__(self):
-        self.use_websocket = os.getenv("FORCE_REST_MODE", "0") != "1"
-        self._ws_thread = None
-
-    def start(self):
-        if self.use_websocket:
-            self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
-            self._ws_thread.start()
-            threading.Thread(target=ws_watchdog, daemon=True).start()
-            threading.Thread(target=tick_watchdog, daemon=True).start()
-            time.sleep(10)
-            if not ws_running:
-                logger.warning("WebSocket not yet connected, starting REST as parallel fallback")
-                threading.Thread(target=start_rest_only_mode, daemon=True).start()
-        else:
-            logger.info("WebSocket disabled via FORCE_REST_MODE, using REST-only")
-            threading.Thread(target=start_rest_only_mode, daemon=True).start()
 
 def tick_watchdog():
     global ws_running, tick_counter, last_tick_timestamp, sws
