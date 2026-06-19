@@ -2238,9 +2238,22 @@ def start_rest_only_mode():
             if not is_market_open() and not is_mcx_open():
                 time.sleep(60)
                 continue
+
+            # Decide which indices to fetch based on open markets
+            indices_to_fetch = []
             for idx in INDEX_NAMES:
-                if not INDEX_CONFIG[idx].get("active"):
-                    continue
+                if INDEX_CONFIG[idx].get("active"):
+                    if INDEX_CONFIG[idx].get("is_commodity") and is_mcx_open():
+                        indices_to_fetch.append(idx)
+                    elif not INDEX_CONFIG[idx].get("is_commodity") and is_market_open():
+                        indices_to_fetch.append(idx)
+
+            # If no market is open, skip the whole iteration
+            if not indices_to_fetch:
+                time.sleep(10)
+                continue
+
+            for idx in indices_to_fetch:
                 try:
                     spot = get_index_spot(idx)
                     if spot and spot > 0:
@@ -2255,10 +2268,14 @@ def start_rest_only_mode():
                         with _latest_ticks_lock:
                             last_known_prices[idx]["spot"] = spot
                             last_known_prices[idx]["timestamp"] = time.time()
-                    # Option tokens for equity
-                    if not INDEX_CONFIG[idx].get("is_commodity"):
-                        tokens = INDEX_TOKENS.get(idx, {})
-                        if tokens.get("ce_token") and tokens.get("pe_token"):
+                except Exception as e:
+                    logger.debug(f"REST fetch error for {idx}: {e}")
+
+                # For equity, also fetch option prices
+                if not INDEX_CONFIG[idx].get("is_commodity"):
+                    tokens = INDEX_TOKENS.get(idx, {})
+                    if tokens.get("ce_token") and tokens.get("pe_token"):
+                        try:
                             auth_token, _, obj = get_auth_token()
                             if obj:
                                 ce_resp = obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
@@ -2281,14 +2298,21 @@ def start_rest_only_mode():
                                     with _latest_ticks_lock:
                                         last_known_prices[idx]["pe"] = pe_price
                                     volume_profile_engines[idx].update(pe_price, 0, option_type="PE")
-                except Exception as e:
-                    logger.debug(f"REST fetch error for {idx}: {e}")
+                        except Exception as e:
+                            logger.debug(f"Option fetch error for {idx}: {e}")
+
+                # Small delay between assets to avoid rate limits
+                time.sleep(0.5)
+
+            # Run signal engine after fetching all data
             run_all_signals()
-            time.sleep(5)
+
+            # Longer sleep between iterations (10 seconds instead of 5)
+            time.sleep(10)
+
         except Exception as e:
             logger.error(f"REST-only mode error: {e}")
             time.sleep(10)
-
 class ConnectionManager:
     def __init__(self):
         self.use_websocket = os.getenv("FORCE_REST_MODE", "0") != "1"
