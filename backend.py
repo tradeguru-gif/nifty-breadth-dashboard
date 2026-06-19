@@ -1,4 +1,4 @@
-# === HYBRID v14.8 – REST PRIMARY + WS FALLBACK (FULLY PATCHED) ===
+# === HYBRID v14.9 – REST PRIMARY + DEBUG LOGGING (FULLY PATCHED) ===
 import sys
 import logging
 import os
@@ -739,21 +739,29 @@ def safe_ltp(resp):
     return None
 
 def get_index_spot(index_name):
+    """Fetch spot price with debug logging."""
     config = INDEX_CONFIG.get(index_name)
     if not config:
+        logger.warning(f"get_index_spot: No config for {index_name}")
         return None
     _, _, obj = get_auth_token()
     if not obj:
+        logger.warning(f"get_index_spot: Auth failed for {index_name}")
         return None
     try:
+        logger.info(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
+        logger.info(f"get_index_spot: {index_name} raw resp={resp}")
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
                 ltp /= 100
+            logger.info(f"get_index_spot: {index_name} LTP={ltp}")
             return ltp
+        else:
+            logger.warning(f"get_index_spot: {index_name} LTP invalid: {ltp}, resp={resp}")
     except Exception as e:
-        logger.error(f"Spot fetch {index_name}: {e}")
+        logger.error(f"get_index_spot: {index_name} exception: {e}")
     return None
 
 _scrip_cache = {"data": None, "timestamp": 0}
@@ -906,27 +914,35 @@ def refresh_all_tokens():
     get_mcx_futures_tokens()
 
 # ----------------------------------------------------------------------
-# MARKET HOURS
+# MARKET HOURS (with proper IST timezone)
 # ----------------------------------------------------------------------
 def is_market_open():
-    # Allow override for testing
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
+        logger.info("Market open forced by FORCE_MARKET_OPEN=1")
         return True
-    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 15)
-    return now_ist.weekday() < 5 and open_time <= current <= close_time
+    is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
+    logger.info(f"Market check: IST={now_ist}, current={current}, open={is_open}")
+    return is_open
 
 def is_mcx_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
+        logger.info("MCX open forced by FORCE_MARKET_OPEN=1")
         return True
-    now = datetime.now()
-    if now.weekday() >= 5:
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    current = now_ist.time()
+    if now_ist.weekday() >= 5:
         return False
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
-    return open_time <= now.time() <= close_time
+    is_open = open_time <= current <= close_time
+    logger.info(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
+    return is_open
 
 def is_index_market_open(idx):
     cfg = INDEX_CONFIG.get(idx, {})
@@ -1237,20 +1253,9 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
 # NEW REST HELPER FUNCTIONS
 # ============================================================
 def get_vix_ltp():
-    """Fetch VIX via REST API."""
-    _, _, obj = get_auth_token()
-    if not obj:
-        return None
-    try:
-        resp = obj.ltpData("NSE", "INDIAVIX", "99919017")
-        ltp = safe_ltp(resp)
-        if ltp and ltp > 0:
-            if ltp > 1000:
-                ltp /= 100
-            return ltp
-    except Exception as e:
-        logger.debug(f"VIX fetch error: {e}")
-    return None
+    """VIX via REST is unreliable (token 99919017 not supported). Return None to use fallback."""
+    logger.debug("VIX REST fetch skipped – using fallback value 15.0")
+    return None  # Always fallback to default
 
 def get_option_quote(index_name, option_type):
     """Fetch full quote (LTP, volume, OI, bid, ask) for options."""
@@ -2347,18 +2352,21 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (FETCHES OPTION PRICES AND VIX)
+# ENHANCED REST FALLBACK WITH VERBOSE LOGGING
 # ----------------------------------------------------------------------
 def start_rest_only_mode():
     global last_rest_fetch
     logger.info("Starting REST fallback (fetches spot + option LTPs + VIX)")
+    cycle_count = 0
     while True:
         # Only run if WebSocket is NOT running (or if FORCE_REST_MODE=1)
         with _ws_connect_lock:
             if ws_running:
+                logger.info(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
                 time.sleep(30)
                 continue
 
+        cycle_count += 1
         try:
             # Determine which assets to fetch based on open markets
             assets_to_fetch = []
@@ -2366,12 +2374,16 @@ def start_rest_only_mode():
                 cfg = INDEX_CONFIG[idx]
                 if not cfg.get("active"):
                     continue
-                if cfg.get("is_commodity") and is_mcx_open():
+                is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
+                if is_open:
                     assets_to_fetch.append(idx)
-                elif not cfg.get("is_commodity") and is_market_open():
-                    assets_to_fetch.append(idx)
+                else:
+                    logger.info(f"REST: {idx} market closed, skipping")
+
+            logger.info(f"REST cycle {cycle_count}: Fetching {len(assets_to_fetch)} assets: {assets_to_fetch}")
 
             if not assets_to_fetch:
+                logger.info("REST: No markets open, sleeping 30s")
                 time.sleep(30)
                 continue
 
@@ -2384,6 +2396,7 @@ def start_rest_only_mode():
                         get_current_atm_tokens(idx)
 
             for idx in assets_to_fetch:
+                logger.info(f"REST: Fetching {idx}...")
                 # 1. Fetch spot price
                 try:
                     spot = get_index_spot(idx)
@@ -2399,6 +2412,9 @@ def start_rest_only_mode():
                         with _latest_ticks_lock:
                             last_known_prices[idx]["spot"] = spot
                             last_known_prices[idx]["timestamp"] = time.time()
+                        logger.info(f"REST: {idx} spot={spot}")
+                    else:
+                        logger.warning(f"REST: {idx} spot fetch FAILED")
                 except Exception as e:
                     logger.debug(f"REST spot fetch error for {idx}: {e}")
 
@@ -2420,8 +2436,9 @@ def start_rest_only_mode():
                                     last_known_prices[idx]["ce"] = ce_quote["ltp"]
                                 with _ce_price_histories_lock:
                                     ce_price_histories[idx].append(ce_quote["ltp"])
-                                # Volume profile update uses volume, but we need to pass volume separately
-                                # We'll update volume profile later using the stored values
+                                logger.info(f"REST: {idx} CE={ce_quote['ltp']} vol={ce_quote['volume']}")
+                            else:
+                                logger.warning(f"REST: {idx} CE quote fetch FAILED")
                             if pe_quote:
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["pe_price"] = pe_quote["ltp"]
@@ -2433,15 +2450,19 @@ def start_rest_only_mode():
                                     last_known_prices[idx]["pe"] = pe_quote["ltp"]
                                 with _pe_price_histories_lock:
                                     pe_price_histories[idx].append(pe_quote["ltp"])
+                                logger.info(f"REST: {idx} PE={pe_quote['ltp']} vol={pe_quote['volume']}")
+                            else:
+                                logger.warning(f"REST: {idx} PE quote fetch FAILED")
                         except Exception as e:
                             logger.debug(f"REST option quote error for {idx}: {e}")
 
                 # Small delay between assets to avoid rate limits (1 second)
                 time.sleep(1)
 
-            # 3. Fetch VIX
+            # 3. Fetch VIX (will return None – fallback)
             try:
                 vix = get_vix_ltp()
+                logger.info(f"REST: VIX={vix} (using fallback if None)")
                 if vix:
                     with _latest_ticks_lock:
                         latest_ticks["VIX"]["vix"] = vix
@@ -2457,6 +2478,7 @@ def start_rest_only_mode():
 
             # Sleep longer between full cycles (configurable, default 10s)
             cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
+            logger.info(f"REST cycle {cycle_count} complete. Sleeping {cycle_interval}s")
             time.sleep(cycle_interval)
 
         except Exception as e:
@@ -2489,7 +2511,7 @@ class ConnectionManager:
         logger.info("REST fallback thread started (will fetch data every ~10s).")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS (with token status logging)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2505,6 +2527,15 @@ def _start_background_threads():
                 ready = sum(1 for idx, cfg in INDEX_CONFIG.items()
                            if cfg.get("active") and cfg.get("token"))
                 total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
+                
+                # Log detailed token status
+                for idx in INDEX_NAMES:
+                    if INDEX_CONFIG[idx].get("is_commodity"):
+                        logger.info(f"Token status {idx}: token={INDEX_CONFIG[idx].get('token')}")
+                    else:
+                        tokens = INDEX_TOKENS.get(idx, {})
+                        logger.info(f"Token status {idx}: ce={tokens.get('ce_token')}, pe={tokens.get('pe_token')}, spot_token={INDEX_CONFIG[idx].get('token')}")
+                
                 logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
                 if ready == total_active:
                     break
@@ -2546,7 +2577,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v14.8 – REST Primary + WS Fallback (Fully Patched)",
+        "engine": "Hybrid v14.9 – REST Primary + Debug Logging",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2587,7 +2618,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "14.8-rest-primary"
+            "version": "14.9-rest-primary-debug"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
