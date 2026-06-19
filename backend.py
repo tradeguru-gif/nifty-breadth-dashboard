@@ -1186,55 +1186,6 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "WAITING"
                 return
 
-        # Candle check – ensure candle_histories exists and is not None
-        with _candle_histories_lock:
-            if index_name not in candle_histories:
-                candle_histories[index_name] = {tf: deque(maxlen=500) for tf in TIMEFRAMES}
-            if "1min" not in candle_histories[index_name] or candle_histories[index_name]["1min"] is None:
-                candle_histories[index_name]["1min"] = deque(maxlen=500)
-            if len(candle_histories[index_name]["1min"]) < 30:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Building candles ({len(candle_histories[index_name]['1min'])}/30)"
-                    market_signal[index_name]["signal"] = "WAITING"
-                return
-
-        with _market_signal_lock:
-            if market_signal[index_name]["signal"] == "EXIT":
-                market_signal[index_name]["signal"] = "COOLDOWN"
-
-        now = time.time()
-
-def run_signal_engine_for_index(index_name):
-    try:
-        if not INDEX_CONFIG[index_name].get("active"):
-            return
-
-        config = INDEX_CONFIG[index_name]
-        is_commodity = config.get("is_commodity", False)
-
-        # Market open check
-        if is_commodity:
-            if not is_mcx_open():
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "MCX closed"
-                    market_signal[index_name]["signal"] = "CLOSED"
-                return
-        else:
-            if not is_market_open():
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "Equity market closed"
-                    market_signal[index_name]["signal"] = "CLOSED"
-                return
-
-        # Option tokens only for equity
-        if not is_commodity:
-            tokens = INDEX_TOKENS.get(index_name, {})
-            if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "Option tokens not loaded"
-                    market_signal[index_name]["signal"] = "WAITING"
-                return
-
         # Candle check – ensure we have a valid deque
         with _candle_histories_lock:
             if index_name not in candle_histories:
@@ -1415,8 +1366,13 @@ def run_signal_engine_for_index(index_name):
                             new_sl = prem - atr * 1.8
                             if new_sl > signal_state[index_name]["stop_loss"]:
                                 signal_state[index_name]["stop_loss"] = new_sl
+
+                    # --- GUARDED COMPARISONS ---
+                    stop_loss_val = signal_state[index_name].get("stop_loss")
+                    target_val = signal_state[index_name].get("target")
+
                     # SL hit
-                    if prem <= signal_state[index_name]["stop_loss"]:
+                    if stop_loss_val is not None and prem <= stop_loss_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
@@ -1438,8 +1394,9 @@ def run_signal_engine_for_index(index_name):
                         send_telegram_alert(f"EXIT {index_name} | SL | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
                         reset_signal_state(index_name, now, "STOP_LOSS")
                         return
+
                     # Target hit
-                    if prem >= signal_state[index_name]["target"]:
+                    if target_val is not None and prem >= target_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
@@ -1457,6 +1414,7 @@ def run_signal_engine_for_index(index_name):
                         send_telegram_alert(f"EXIT {index_name} | TARGET | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
                         reset_signal_state(index_name, now, "TARGET_HIT")
                         return
+
                     # Time exit (dynamic)
                     entry_time = signal_state[index_name].get("entry_time", 0)
                     if entry_time > 0:
@@ -1479,6 +1437,7 @@ def run_signal_engine_for_index(index_name):
                             send_telegram_alert(f"EXIT {index_name} | TIME ({time_limit}m) | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
                             reset_signal_state(index_name, now, "TIME_EXIT")
                             return
+
                     # Market analysis exit
                     with _price_histories_lock:
                         prices_spot = list(price_histories[index_name])
@@ -1499,6 +1458,7 @@ def run_signal_engine_for_index(index_name):
                         send_telegram_alert(f"EXIT {index_name} | {exit_reason} | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
                         reset_signal_state(index_name, now, exit_reason)
                         return
+
                     # VWAP exit (only for options)
                     if not is_commodity:
                         if "CE" in active:
@@ -1539,6 +1499,7 @@ def run_signal_engine_for_index(index_name):
                                 send_telegram_alert(f"EXIT {index_name} | VWAP (premium below VWAP) | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
                                 reset_signal_state(index_name, now, "VWAP_EXIT")
                                 return
+
                 with _market_signal_lock:
                     market_signal[index_name].update({
                         "alert_message": f"ACTIVE {active}",
@@ -1799,6 +1760,7 @@ def run_signal_engine_for_index(index_name):
     except Exception as e:
         import traceback
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
+
         # --- Extract latest data with None guards ---
         with _latest_ticks_lock:
             if index_name not in latest_ticks:
