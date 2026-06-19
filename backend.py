@@ -1986,7 +1986,6 @@ def on_ws_data(wsapp, message):
                 logger.error(f"JSON parse error: {e}")
                 return
         elif isinstance(message, bytes):
-            # Should not happen due to monkey patch, but fallback
             try:
                 decoded = message.decode('utf-8')
                 data = json.loads(decoded)
@@ -2004,7 +2003,8 @@ def on_ws_data(wsapp, message):
             tick_counter += 1
 
             token = str(tick.get("token") or tick.get("tk") or "")
-                        ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
+                    ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0 <-- FIXED INDENTATION
+
             if isinstance(ltp, str):
                 try:
                     ltp = float(ltp)
@@ -2012,15 +2012,11 @@ def on_ws_data(wsapp, message):
                     ltp = 0
 
             # ---- SCALING FIX ----
-            # For equity spot: divide by 100 (unless already scaled)
-            # For commodities: we'll handle separately below
+            # Equity spot: divide by 100 if needed
             if ltp > 10000 and token in INDEX_TOKEN_SET:
                 ltp = ltp / 100.0
-            # For commodities, we'll divide if it's a commodity token
-            # (We'll detect commodity tokens later)
-            # ------------------------
-            # --- Commodity scaling: if token belongs to a commodity, divide by 100 ---
-            # Determine if token is commodity by checking INDEX_CONFIG
+
+            # Commodity scaling: divide by 100 if it's a commodity token
             is_comm = False
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("is_commodity") and cfg.get("token") == token:
@@ -2028,7 +2024,6 @@ def on_ws_data(wsapp, message):
                     break
             if is_comm and ltp > 10000:
                 ltp = ltp / 100.0
-            # For equity, we already handle >100000 scaling
 
             if tick_counter % 100 == 0:
                 logger.info(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
@@ -2038,7 +2033,7 @@ def on_ws_data(wsapp, message):
             bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
             ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-            # ---- Spot matching (both equity and commodities) ----
+            # ---- Spot matching (ONLY ONE BLOCK) ----
             spot_matched = False
             for idx, cfg in INDEX_CONFIG.items():
                 if cfg.get("token") == token:
@@ -2067,10 +2062,79 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["spot"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
+
+                        # ---- NOW LOG THE CANDLE COUNT ----
+                        with _candle_histories_lock:
+                            candle_len = len(candle_histories[idx]["1min"])
+                            logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
+                        # --------------------------------
+
                         spot_matched = True
                         break
+
             if spot_matched:
                 continue
+
+            # ---- Option matching (only for equity) ----
+            option_matched = False
+            for idx, tokens in INDEX_TOKENS.items():
+                if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
+                    continue
+                if token == tokens.get("ce_token"):
+                    if ltp > 0:
+                        with _latest_ticks_lock:
+                            latest_ticks[idx]["ce_price"] = ltp
+                            latest_ticks[idx]["ce_volume"] = vol
+                            latest_ticks[idx]["ce_oi"] = oi
+                            latest_ticks[idx]["ce_bid"] = bid
+                            latest_ticks[idx]["ce_ask"] = ask
+                        with _ce_price_histories_lock:
+                            ce_price_histories[idx].append(ltp)
+                        volume_profile_engines[idx].update(ltp, vol, option_type="CE")
+                        with _latest_ticks_lock:
+                            last_known_prices[idx]["ce"] = ltp
+                            last_known_prices[idx]["timestamp"] = time.time()
+                        option_matched = True
+                        break
+                elif token == tokens.get("pe_token"):
+                    if ltp > 0:
+                        with _latest_ticks_lock:
+                            latest_ticks[idx]["pe_price"] = ltp
+                            latest_ticks[idx]["pe_volume"] = vol
+                            latest_ticks[idx]["pe_oi"] = oi
+                            latest_ticks[idx]["pe_bid"] = bid
+                            latest_ticks[idx]["pe_ask"] = ask
+                        with _pe_price_histories_lock:
+                            pe_price_histories[idx].append(ltp)
+                        volume_profile_engines[idx].update(ltp, vol, option_type="PE")
+                        with _latest_ticks_lock:
+                            last_known_prices[idx]["pe"] = ltp
+                            last_known_prices[idx]["timestamp"] = time.time()
+                        option_matched = True
+                        break
+            if option_matched:
+                continue
+
+            # ---- VIX ----
+            if token == "99919017" and ltp > 0:
+                with _latest_ticks_lock:
+                    latest_ticks["VIX"]["vix"] = ltp
+                vix_history.append(ltp)
+                if DEBUG_MODE:
+                    logger.info(f"VIX TICK: {ltp}")
+
+        # Throttle signal runs every 5 ticks
+        if tick_counter % 5 == 0 and tick_counter > 0:
+            with _signal_run_lock:
+                now = time.time()
+                global _last_signal_run
+                if now - _last_signal_run >= 1.0:
+                    _last_signal_run = now
+                    threading.Thread(target=run_all_signals, daemon=True).start()
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")
 #--------------------------------------------------------
 #------------------------------------------------------
 #------------------------------------------------------
