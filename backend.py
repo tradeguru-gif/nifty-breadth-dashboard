@@ -1288,7 +1288,19 @@ def run_signal_engine_for_index(index_name):
 
         # Sentiment (same for both)
         sentiment = compute_sentiment(index_name)
+        if sentiment is None:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = "Sentiment computation failed"
+                market_signal[index_name]["signal"] = "WAITING"
+            return
+
         action = get_signal_from_sentiment(sentiment)
+        if action is None:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = "Signal mapping failed"
+                market_signal[index_name]["signal"] = "WAITING"
+            return
+
         sentiment_label = get_sentiment_label(sentiment)
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
@@ -1760,6 +1772,9 @@ def run_signal_engine_for_index(index_name):
     except Exception as e:
         import traceback
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
+#-------------------------------------------------------------
+#------------------------------------------------------------
+#-------------------------------------------------------------
 
         # --- Extract latest data with None guards ---
         with _latest_ticks_lock:
