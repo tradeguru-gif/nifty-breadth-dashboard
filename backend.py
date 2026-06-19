@@ -1,4 +1,4 @@
-# === HYBRID v14.9 – REST PRIMARY + DEBUG LOGGING (FULLY PATCHED) ===
+# === HYBRID v15.0 – WEBSOCKET FIRST, REST FALLBACK (FULLY PATCHED) ===
 import sys
 import logging
 import os
@@ -2486,29 +2486,30 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER (REST primary on Render)
+# CONNECTION MANAGER (WS FIRST, REST FALLBACK)
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
-        # FORCE_REST_MODE=1 means REST only, =0 or not set means try WS but REST fallback
-        force_rest = os.getenv("FORCE_REST_MODE", "1") == "1"
-        self.use_websocket = not force_rest  # Default to REST (force_rest=1 => use_websocket=False)
+        # Default: attempt WebSocket (FORCE_REST_MODE=0 or unset)
+        # Set FORCE_REST_MODE=1 to force REST-only
+        force_rest = os.getenv("FORCE_REST_MODE", "0") == "1"
+        self.use_websocket = not force_rest  # True unless explicitly forced to REST
         self._ws_thread = None
         self._rest_thread = None
 
     def start(self):
         if self.use_websocket:
-            logger.info("WebSocket enabled (FORCE_REST_MODE=0 or not set). Starting WS thread.")
+            logger.info("WebSocket mode enabled (FORCE_REST_MODE not set to 1). Starting WS thread.")
             self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
             self._ws_thread.start()
             threading.Thread(target=ws_watchdog, daemon=True).start()
             threading.Thread(target=tick_watchdog, daemon=True).start()
         else:
-            logger.info("REST mode enabled (FORCE_REST_MODE=1). REST only.")
-        # Always start REST fallback as the primary data source (since ws_running is false initially)
+            logger.info("REST-only mode forced (FORCE_REST_MODE=1). No WebSocket thread.")
+        # Always start REST fallback as a backup (it will sleep if WS is running)
         self._rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
         self._rest_thread.start()
-        logger.info("REST fallback thread started (will fetch data every ~10s).")
+        logger.info("REST fallback thread started (will take over if WS disconnects).")
 
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS (with token status logging)
@@ -2577,7 +2578,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v14.9 – REST Primary + Debug Logging",
+        "engine": "Hybrid v15.0 – WS First + REST Fallback",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2618,7 +2619,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "14.9-rest-primary-debug"
+            "version": "15.0-ws-first"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
