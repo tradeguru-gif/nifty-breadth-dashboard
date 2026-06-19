@@ -2707,11 +2707,44 @@ def live_signals():
         for tf in TIMEFRAMES:
             trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
 
+    # ---- FORCE REFRESH FOR COMMODITIES WITH STALE DATA ----
+    with _market_signal_lock:
+        for idx in INDEX_NAMES:
+            if not INDEX_CONFIG[idx].get("active"):
+                continue
+            # If alert_message is empty but we have candles, re-run the engine
+            if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
+                with _candle_histories_lock:
+                    candle_len = len(candle_histories[idx]["1min"])
+                if candle_len >= 30:
+                    logger.info(f"🔄 API refresh: re-running signal for {idx} (candles={candle_len})")
+                    # Release the lock before calling the engine to avoid deadlock
+                    # but we need to call it outside the lock
+                    pass  # we'll call it after releasing locks
+
+    # Now, call the engine for any index that needs refreshing
+    # We do this after releasing the locks to avoid deadlock
+    for idx in INDEX_NAMES:
+        if not INDEX_CONFIG[idx].get("active"):
+            continue
+        with _market_signal_lock:
+            if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
+                with _candle_histories_lock:
+                    candle_len = len(candle_histories[idx]["1min"])
+                if candle_len >= 30:
+                    # Re-run the engine for this index
+                    run_signal_engine_for_index(idx)
+
+    # Build the response
     with _market_signal_lock, _portfolio_state_lock:
         portfolio_with_trades = {}
         for idx, port in portfolio_state.items():
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
+
+        # Log what we're about to return (for debugging)
+        if "GOLD" in market_signal:
+            logger.info(f"📤 API RESPONSE: GOLD signal={market_signal['GOLD'].get('signal')}, alert={market_signal['GOLD'].get('alert_message')}")
 
         return jsonify({
             "timestamp": datetime.now().isoformat(),
@@ -2728,7 +2761,6 @@ def live_signals():
             },
             "version": "15.1-ws-first-fixed"
         })
-
 @app.route("/api/signal-audio", methods=["GET"])
 def signal_audio():
     latest_action = "NO_TRADE"
