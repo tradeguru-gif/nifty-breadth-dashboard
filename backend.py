@@ -2294,7 +2294,7 @@ def tick_watchdog():
     global ws_running, tick_counter, last_tick_timestamp, sws
     last_count = 0
     while True:
-        time.sleep(10)  # check every 10 seconds
+        time.sleep(10)
         if ws_running:
             # If no tick for 60 seconds, force reconnect
             if time.time() - last_tick_timestamp > 60:
@@ -2307,35 +2307,36 @@ def tick_watchdog():
                     except:
                         pass
             # Also check if tick counter hasn't increased (alternative)
-            elif tick_counter == last_count:
-                # but only if we already have some ticks
-                if tick_counter > 0 and time.time() - last_tick_timestamp > 45:
-                    logger.warning("Tick counter stalled - forcing reconnect")
-                    with _ws_connect_lock:
-                        ws_running = False
-                    if sws:
-                        try:
-                            sws.close_connection()
-                        except:
-                            pass
+            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
+                logger.warning("Tick counter stalled - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
             else:
                 last_count = tick_counter
+
 def ws_watchdog():
-    global ws_running, last_heartbeat, sws
+    global ws_running, last_heartbeat, last_tick_timestamp, sws
     while True:
         time.sleep(10)
         now = time.time()
         with _ws_connect_lock:
             is_running = ws_running
-        if is_running and (now - last_heartbeat > 25):
-            logger.warning("Data starvation – no tick for 25s, forcing reconnect")
-            with _ws_connect_lock:
-                ws_running = False
-            if sws:
-                try:
-                    sws.close_connection()
-                except Exception:
-                    pass
+        if is_running:
+            # If heartbeat is stale OR no ticks for 60s
+            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
+                logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except Exception:
+                        pass
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
