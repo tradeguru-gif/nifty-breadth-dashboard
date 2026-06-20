@@ -2394,9 +2394,13 @@ def start_angel_websocket_improved():
             retry_delay = 5
 
             while True:
-                time.sleep(5)
-                with _ws_connect_lock:
-                    is_running = ws_running
+    try:
+        force_ws = os.getenv("FORCE_WS", "0") == "1"
+
+        if not force_ws:
+            if not is_market_open() and not is_mcx_open():
+                time.sleep(60)
+                continue
 
                 if not is_running:
                     logger.warning("WebSocket disconnected detected")
