@@ -274,7 +274,9 @@ price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
 
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
-market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0} for idx in INDEX_NAMES}
+
+# UPDATED: Added strike_price and trading_symbol to market_signal
+market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": ""} for idx in INDEX_NAMES}
 
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
@@ -1898,6 +1900,13 @@ def run_signal_engine_for_index(index_name):
                                 reset_signal_state(index_name, now, "VWAP_EXIT")
                                 return
 
+                # ---- Update market_signal with strike info for ACTIVE trade ----
+                token_info = INDEX_TOKENS.get(index_name, {})
+                atm_strike = token_info.get("atm_strike", 0)
+                if "CE" in active:
+                    trading_symbol = token_info.get("ce_symbol", "")
+                else:
+                    trading_symbol = token_info.get("pe_symbol", "")
                 with _market_signal_lock:
                     market_signal[index_name].update({
                         "alert_message": f"ACTIVE {active}",
@@ -1906,6 +1915,8 @@ def run_signal_engine_for_index(index_name):
                         "stop_loss": signal_state[index_name]["stop_loss"],
                         "target": signal_state[index_name]["target"],
                         "current_pnl": round(pnl, 2),
+                        "strike_price": atm_strike,
+                        "trading_symbol": trading_symbol
                     })
             else:
                 with _market_signal_lock:
@@ -2202,6 +2213,14 @@ def run_signal_engine_for_index(index_name):
         send_telegram_alert(msg)
         logger.info(msg)
 
+        # ---- Get strike info for frontend ----
+        token_info = INDEX_TOKENS.get(index_name, {})
+        atm_strike = token_info.get("atm_strike", 0)
+        if side == "CE":
+            trading_symbol = token_info.get("ce_symbol", "")
+        else:
+            trading_symbol = token_info.get("pe_symbol", "")
+
         with _market_signal_lock:
             market_signal[index_name].update({
                 "signal": action,
@@ -2211,7 +2230,9 @@ def run_signal_engine_for_index(index_name):
                 "target": target,
                 "sentiment_score": sentiment,
                 "exit_reason": "",
-                "quality_score": compute_signal_quality(index_name)
+                "quality_score": compute_signal_quality(index_name),
+                "strike_price": atm_strike,
+                "trading_symbol": trading_symbol
             })
         logger.info(f"📢 SET SIGNAL for {index_name}: action={action}, alert={market_signal[index_name]['alert_message']}")
 
@@ -2874,7 +2895,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.2 – WS Binary Fix + Lower Candle Threshold",
+        "engine": "Hybrid v15.2 – Equity & MCX + Lower Candle Threshold",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2928,7 +2949,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.2-ws-binary-fixed"
+            "version": "15.2-Equity & MCX"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
