@@ -807,14 +807,14 @@ def get_index_spot(index_name):
         logger.warning(f"get_index_spot: Auth failed for {index_name}")
         return None
     try:
-        logger.info(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
+        logger.debug(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
-        logger.info(f"get_index_spot: {index_name} raw resp={resp}")
+        logger.debug(f"get_index_spot: {index_name} raw resp={resp}")
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
                 ltp /= 100
-            logger.info(f"get_index_spot: {index_name} LTP={ltp}")
+            logger.debug(f"get_index_spot: {index_name} LTP={ltp}")
             return ltp
         else:
             logger.warning(f"get_index_spot: {index_name} LTP invalid: {ltp}, resp={resp}")
@@ -984,7 +984,7 @@ def is_market_open():
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 15)
     is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
-    logger.info(f"Market check: IST={now_ist}, current={current}, open={is_open}")
+    logger.debug(f"Market check: IST={now_ist}, current={current}, open={is_open}")
     return is_open
 
 def is_mcx_open():
@@ -999,7 +999,7 @@ def is_mcx_open():
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
     is_open = open_time <= current <= close_time
-    logger.info(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
+    logger.debug(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
     return is_open
 
 def is_index_market_open(idx):
@@ -1010,19 +1010,23 @@ def is_index_market_open(idx):
         return is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (with volume fix)
+# CANDLE UPDATE (with volume fix for REST and first tick)
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
     with _prev_volume_lock:
         prev = _prev_volume.get(idx, 0)
+        # If cumulative_volume is 0 (e.g., REST fallback), set a minimal volume
         if cumulative_volume > 0:
             if prev > 0:
                 tick_vol = max(0, cumulative_volume - prev)
             else:
-                tick_vol = 0
+                # First tick with volume – assign cumulative volume (at least 1)
+                tick_vol = max(1, cumulative_volume)
             _prev_volume[idx] = cumulative_volume
         else:
-            tick_vol = 0
+            # No volume info – assign a small positive value to keep indicators alive
+            tick_vol = 1
+            # Do not update prev_volume because cumulative is not reliable
 
         if tick_vol > 1000000:
             tick_vol = 0
@@ -1030,15 +1034,12 @@ def update_candle(idx, price, cumulative_volume, timestamp):
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
-            if tf == "1min":
-                logger.info(f"🕒 update_candle {idx}: timestamp={timestamp}, candle_start={candle_start}, last_time={_last_candle_time[idx][tf]}")
-
             if _last_candle_time[idx][tf] != candle_start:
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
                         if tf == "1min":
-                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                            logger.debug(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
 
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
@@ -1058,7 +1059,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     logger.warning(f"⏰ Forcing new candle for {idx} (age={current_age:.1f}s)")
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        logger.info(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
+                        logger.debug(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
                     _current_candle[idx][tf] = {
                         "open": price, "high": price, "low": price, "close": price,
                         "volume": tick_vol, "timestamp": candle_start
@@ -1076,7 +1077,8 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 60:
+        # Lowered requirement from 60 to 20 candles for faster signal generation
+        if len(closes) < 20:
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -2344,7 +2346,7 @@ def on_ws_data(wsapp, message):
                     if parsed and parsed.get('token'):
                         ticks = [parsed]
                         if tick_counter % 100 == 0:
-                            logger.info(f"✅ PARSED BINARY: token={parsed.get('token')} ltp={parsed.get('last_traded_price')}")
+                            logger.debug(f"✅ PARSED BINARY: token={parsed.get('token')} ltp={parsed.get('last_traded_price')}")
                     else:
                         logger.warning("Binary parse returned empty, skipping tick")
                         return
@@ -2386,7 +2388,7 @@ def on_ws_data(wsapp, message):
                     ltp = ltp / 100.0
 
                 if tick_counter % 100 == 0:
-                    logger.info(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
+                    logger.debug(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
@@ -2398,7 +2400,7 @@ def on_ws_data(wsapp, message):
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("token") == token:
                         if ltp > 0:
-                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
+                            logger.debug(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             if cfg.get("is_commodity"):
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["price"] = ltp
@@ -2425,7 +2427,7 @@ def on_ws_data(wsapp, message):
 
                             with _candle_histories_lock:
                                 candle_len = len(candle_histories[idx]["1min"])
-                                logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
+                                logger.debug(f"CANDLE COUNT for {idx}: {candle_len}")
 
                             spot_matched = True
                             break
@@ -2478,7 +2480,7 @@ def on_ws_data(wsapp, message):
                         latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
                     if DEBUG_MODE:
-                        logger.info(f"VIX TICK: {ltp}")
+                        logger.debug(f"VIX TICK: {ltp}")
 
             except Exception as e:
                 logger.error(f"Error processing tick: {e}\n{traceback.format_exc()}")
@@ -2677,7 +2679,7 @@ def start_rest_only_mode():
     while True:
         with _ws_connect_lock:
             if ws_running:
-                logger.info(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
+                logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
                 time.sleep(30)
                 continue
 
@@ -2693,7 +2695,7 @@ def start_rest_only_mode():
                     assets_to_fetch.append(idx)
 
             if not assets_to_fetch:
-                logger.info("REST: No markets open, sleeping 30s")
+                logger.debug("REST: No markets open, sleeping 30s")
                 time.sleep(30)
                 continue
 
@@ -2707,7 +2709,11 @@ def start_rest_only_mode():
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
                 for future in as_completed(futures):
-                    result = future.result()
+                    try:
+                        result = future.result()   # Safe: exception caught
+                    except Exception as e:
+                        logger.error(f"Future for {futures[future]} failed: {e}")
+                        continue
                     idx = result["index"]
                     try:
                         spot = result.get("spot")
@@ -2719,13 +2725,13 @@ def start_rest_only_mode():
                                     latest_ticks[idx]["spot_price"] = spot
                             with _price_histories_lock:
                                 price_histories[idx].append(spot)
+                            # Use cumulative volume 0, update_candle will assign minimal volume
                             update_candle(idx, spot, 0, time.time())
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["spot"] = spot
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            # Update last_tick_timestamp so watchdog sees fresh data
                             last_tick_timestamp = time.time()
-                            logger.info(f"REST: {idx} spot={spot} (tick time updated)")
+                            logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
                         if not INDEX_CONFIG[idx].get("is_commodity"):
                             ce = result.get("ce")
@@ -2742,7 +2748,7 @@ def start_rest_only_mode():
                                 with _ce_price_histories_lock:
                                     ce_price_histories[idx].append(ce["ltp"])
                                 last_tick_timestamp = time.time()
-                                logger.info(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
+                                logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
                             else:
                                 logger.warning(f"REST: {idx} CE quote fetch FAILED")
                             if pe:
@@ -2757,7 +2763,7 @@ def start_rest_only_mode():
                                 with _pe_price_histories_lock:
                                     pe_price_histories[idx].append(pe["ltp"])
                                 last_tick_timestamp = time.time()
-                                logger.info(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
+                                logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
                             else:
                                 logger.warning(f"REST: {idx} PE quote fetch FAILED")
                     except Exception as e:
@@ -2785,10 +2791,10 @@ def start_rest_only_mode():
                 time.sleep(1)
                 with _ws_connect_lock:
                     if ws_running:
-                        logger.info("REST cycle interrupted: WS reconnected")
+                        logger.debug("REST cycle interrupted: WS reconnected")
                         break
 
-            logger.info(f"REST cycle {cycle_count} complete.")
+            logger.debug(f"REST cycle {cycle_count} complete.")
 
         except Exception as e:
             logger.error(f"REST fallback error: {e}")
