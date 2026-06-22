@@ -275,8 +275,8 @@ price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
 
-# ===== ADDED strike_price and trading_symbol =====
-market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": ""} for idx in INDEX_NAMES}
+# ===== ADDED strike_price, trading_symbol, and lots =====
+market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": "", "lots": 0} for idx in INDEX_NAMES}
 
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
@@ -1930,7 +1930,8 @@ def run_signal_engine_for_index(index_name):
                         "target": signal_state[index_name]["target"],
                         "current_pnl": round(pnl, 2),
                         "strike_price": atm_strike,
-                        "trading_symbol": trading_symbol
+                        "trading_symbol": trading_symbol,
+                        "lots": signal_state[index_name].get("lots", 0)   # <--- ADDED
                     })
             else:
                 with _market_signal_lock:
@@ -2246,7 +2247,8 @@ def run_signal_engine_for_index(index_name):
                 "exit_reason": "",
                 "quality_score": compute_signal_quality(index_name),
                 "strike_price": atm_strike,
-                "trading_symbol": trading_symbol
+                "trading_symbol": trading_symbol,
+                "lots": lots       # <--- ADDED
             })
         logger.info(f"📢 SET SIGNAL for {index_name}: action={action}, alert={market_signal[index_name]['alert_message']}")
 
@@ -2509,16 +2511,6 @@ def on_ws_data(wsapp, message):
                 continue
 
         # ---- Run signals from WebSocket (with complete-data guard) ----
-        ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
-        if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
-            with _signal_run_lock:
-                now = time.time()
-                if now - _last_signal_run >= 1.0:
-                    _last_signal_run = now
-                    threading.Thread(target=run_all_signals, daemon=True).start()
-
-    except Exception as e:
-        logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")        # ---- Run signals from WebSocket (with complete-data guard) ----
         ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
         if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
             with _signal_run_lock:
