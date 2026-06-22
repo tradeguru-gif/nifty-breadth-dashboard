@@ -2324,7 +2324,6 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
 
-    # CRITICAL DEBUG: Log raw data arrival
     logger.warning(f"RAW WS DATA RECEIVED: {str(message)[:200]}")
     last_heartbeat = time.time()
 
@@ -2381,6 +2380,10 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
+                # ----- DEBUG: Log token and ltp -----
+                logger.info(f"🔍 WS TICK: token={token}, ltp={ltp}")
+
+                # Normalise ltp (divide by 100 if needed)
                 if ltp > 10000 and token in INDEX_TOKEN_SET:
                     ltp = ltp / 100.0
 
@@ -2403,9 +2406,13 @@ def on_ws_data(wsapp, message):
                 # ---- Spot matching ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
+                    # ----- DEBUG: Compare tokens -----
+                    cfg_token = cfg.get("token")
+                    if cfg_token is not None:
+                        logger.debug(f"   Comparing token {token} with {cfg_token} (idx={idx})")
                     if cfg.get("token") == token:
                         if ltp > 0:
-                            logger.debug(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
+                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             if cfg.get("is_commodity"):
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["price"] = ltp
@@ -2492,6 +2499,16 @@ def on_ws_data(wsapp, message):
                 continue
 
         # ---- Run signals from WebSocket (with complete-data guard) ----
+        ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
+        if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
+            with _signal_run_lock:
+                now = time.time()
+                if now - _last_signal_run >= 1.0:
+                    _last_signal_run = now
+                    threading.Thread(target=run_all_signals, daemon=True).start()
+
+    except Exception as e:
+        logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")        # ---- Run signals from WebSocket (with complete-data guard) ----
         ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
         if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
             with _signal_run_lock:
