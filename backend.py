@@ -121,21 +121,22 @@ def _patched_parse(self, binary_data):
             token_int = int.from_bytes(binary_data[2:10], byteorder='little')
             if token_int > 0:
                 result['token'] = str(token_int)
-
+                
                 # Extract LTP (bytes 26-33, int64, divide by 100)
                 if len(binary_data) >= 34:
                     ltp_raw = int.from_bytes(binary_data[26:34], byteorder='little', signed=True)
                     result['last_traded_price'] = ltp_raw / 100.0
-
+                
                 # Extract Volume (bytes 42-49)
                 if len(binary_data) >= 50:
                     vol_raw = int.from_bytes(binary_data[42:50], byteorder='little', signed=True)
                     result['volume'] = vol_raw
-
+                
                 # Extract Bid/Ask Prices (bytes 50-57, 66-73) with sanity checks
                 if len(binary_data) >= 74:
                     bid_raw = int.from_bytes(binary_data[50:58], byteorder='little', signed=True)
                     ask_raw = int.from_bytes(binary_data[66:74], byteorder='little', signed=True)
+                    # Filter out anomalous data jumps
                     if 0 < bid_raw < 100000000:
                         result['best_bid_price'] = bid_raw / 100.0
                     if 0 < ask_raw < 100000000:
@@ -145,7 +146,7 @@ def _patched_parse(self, binary_data):
                 if len(binary_data) >= 90:
                     oi_raw = int.from_bytes(binary_data[82:90], byteorder='little', signed=True)
                     result['open_interest'] = oi_raw
-
+                
                 return result
     except Exception as e:
         logger.debug(f"Critical error in custom binary fallback parser: {e}")
@@ -274,9 +275,7 @@ price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
 
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
-
-# ===== ADDED strike_price and trading_symbol =====
-market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": ""} for idx in INDEX_NAMES}
+market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0} for idx in INDEX_NAMES}
 
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
@@ -359,30 +358,23 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-# ---------- FIXED calculate_macd ----------
 def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow:
+    if len(prices) < slow + signal:
         return 0.0, 0.0, 0.0
-
-    macd_history = []
-    for i in range(slow, len(prices) + 1):
-        sub_prices = prices[:i]
-        ema_fast = calculate_ema(sub_prices, fast)
-        ema_slow = calculate_ema(sub_prices, slow)
-        if ema_fast is not None and ema_slow is not None:
-            macd_history.append(ema_fast - ema_slow)
-        else:
-            macd_history.append(0.0)
-
-    if len(macd_history) < signal:
-        return macd_history[-1] if macd_history else 0.0, 0.0, 0.0
-
-    sig_line = calculate_ema(macd_history, signal)
-    macd_line = macd_history[-1]
-    if sig_line is None:
-        sig_line = macd_line
+    def ema(series, period):
+        if period <= 0:
+            return 0.0
+        alpha = 2.0 / (period + 1)
+        val = series[0]
+        for x in series[1:]:
+            val = alpha * x + (1 - alpha) * val
+        return val
+    ema_fast = ema(prices[-fast:], fast) if len(prices) >= fast else prices[-1]
+    ema_slow = ema(prices[-slow:], slow) if len(prices) >= slow else prices[-1]
+    macd_line = ema_fast - ema_slow
+    sig_line = ema([macd_line], signal) if len(prices) >= signal else macd_line
     hist = macd_line - sig_line
-    return float(macd_line), float(sig_line), float(hist)
+    return macd_line, sig_line, hist
 
 def calculate_atr(highs, lows, closes, period=14):
     if period <= 0 or len(closes) < period + 1:
@@ -547,6 +539,7 @@ def _estimate_greeks_fallback(index_name):
     def get_rank(hist, current):
         if len(hist) < 20:
             return 50.0
+        # Removed unused sorted_hist
         rank = sum(1 for x in hist if x < current) / len(hist) * 100.0
         return rank
     iv_rank_ce = get_rank(list(_historical_iv_ce[index_name]), iv_ce)
@@ -619,6 +612,7 @@ def get_option_greeks(index_name):
                             def get_rank(hist, current):
                                 if len(hist) < 20:
                                     return 50.0
+                                # Removed unused sorted_hist
                                 rank = sum(1 for x in hist if x < current) / len(hist) * 100.0
                                 return rank
                             iv_rank_ce = get_rank(list(_historical_iv_ce[index_name]), ce_iv)
@@ -807,14 +801,14 @@ def get_index_spot(index_name):
         logger.warning(f"get_index_spot: Auth failed for {index_name}")
         return None
     try:
-        logger.debug(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
+        logger.info(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
-        logger.debug(f"get_index_spot: {index_name} raw resp={resp}")
+        logger.info(f"get_index_spot: {index_name} raw resp={resp}")
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
                 ltp /= 100
-            logger.debug(f"get_index_spot: {index_name} LTP={ltp}")
+            logger.info(f"get_index_spot: {index_name} LTP={ltp}")
             return ltp
         else:
             logger.warning(f"get_index_spot: {index_name} LTP invalid: {ltp}, resp={resp}")
@@ -984,7 +978,7 @@ def is_market_open():
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 15)
     is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
-    logger.debug(f"Market check: IST={now_ist}, current={current}, open={is_open}")
+    logger.info(f"Market check: IST={now_ist}, current={current}, open={is_open}")
     return is_open
 
 def is_mcx_open():
@@ -999,7 +993,7 @@ def is_mcx_open():
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
     is_open = open_time <= current <= close_time
-    logger.debug(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
+    logger.info(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
     return is_open
 
 def is_index_market_open(idx):
@@ -1010,23 +1004,19 @@ def is_index_market_open(idx):
         return is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (with volume fix for REST and first tick)
+# CANDLE UPDATE (with volume fix)
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
     with _prev_volume_lock:
         prev = _prev_volume.get(idx, 0)
-        # If cumulative_volume is 0 (e.g., REST fallback), set a minimal volume
         if cumulative_volume > 0:
             if prev > 0:
                 tick_vol = max(0, cumulative_volume - prev)
             else:
-                # First tick with volume – assign cumulative volume (at least 1)
-                tick_vol = max(1, cumulative_volume)
+                tick_vol = 0
             _prev_volume[idx] = cumulative_volume
         else:
-            # No volume info – assign a small positive value to keep indicators alive
-            tick_vol = 1
-            # Do not update prev_volume because cumulative is not reliable
+            tick_vol = 0
 
         if tick_vol > 1000000:
             tick_vol = 0
@@ -1034,12 +1024,15 @@ def update_candle(idx, price, cumulative_volume, timestamp):
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
+            if tf == "1min":
+                logger.info(f"🕒 update_candle {idx}: timestamp={timestamp}, candle_start={candle_start}, last_time={_last_candle_time[idx][tf]}")
+
             if _last_candle_time[idx][tf] != candle_start:
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
                         if tf == "1min":
-                            logger.debug(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
 
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
@@ -1059,7 +1052,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     logger.warning(f"⏰ Forcing new candle for {idx} (age={current_age:.1f}s)")
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        logger.debug(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
+                        logger.info(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
                     _current_candle[idx][tf] = {
                         "open": price, "high": price, "low": price, "close": price,
                         "volume": tick_vol, "timestamp": candle_start
@@ -1077,8 +1070,7 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        # Lowered requirement from 60 to 20 candles for faster signal generation
-        if len(closes) < 20:
+        if len(closes) < 60:
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -1602,34 +1594,11 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET NO PRICE for {index_name}")
             return
 
-        # ---------- FIX: Commodity price validation ----------
-        if is_commodity:
-            prem = spot  # use spot as execution price
-            # commodity valid price check
-            if prem <= 0.0:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
-                    market_signal[index_name]["signal"] = "BLOCKED"
-                logger.warning(f"{index_name} commodity price invalid: {prem}")
-                return
-            # we also need to set ce_prem/pe_prem for later use
-            ce_prem = spot
-            pe_prem = spot
-            ce_vol = latest_ticks[index_name]["volume"] or 0
-            pe_vol = ce_vol
-            ce_oi = 0
-            pe_oi = 0
-            ce_bid = latest_ticks[index_name]["bid"] or 0.0
-            ce_ask = latest_ticks[index_name]["ask"] or 0.0
-            pe_bid = ce_bid
-            pe_ask = ce_ask
-        else:
-            # Option premium validation
+        if not is_commodity:
             if ce_bid > 0 and ce_ask > 0:
                 ce_prem = (ce_bid + ce_ask) / 2
             if pe_bid > 0 and pe_ask > 0:
                 pe_prem = (pe_bid + pe_ask) / 2
-
             if not spread_ok(ce_bid, ce_ask, ce_prem) or not spread_ok(pe_bid, pe_ask, pe_prem):
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = "Wide bid-ask spread"
@@ -1637,12 +1606,6 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
-            # Option price bounds
-            min_prem = config.get("min_premium", 0)
-            max_prem = config.get("max_premium", 8000)
-            # we'll check later when side is known
-
-        # --- Volume profile ---
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1676,45 +1639,44 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
-        # ---- Drawdown & lock protected ----
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
-            peak = daily_drawdown[index_name]["peak_equity"]
-            if current_equity > peak:
-                daily_drawdown[index_name]["peak_equity"] = current_equity
-            drawdown = (peak - current_equity) / peak * 100 if peak > 0 else 0
-            daily_drawdown[index_name]["current_drawdown"] = drawdown
+        peak = daily_drawdown[index_name]["peak_equity"]
+        if current_equity > peak:
+            daily_drawdown[index_name]["peak_equity"] = current_equity
+        drawdown = (peak - current_equity) / peak * 100 if peak > 0 else 0
+        daily_drawdown[index_name]["current_drawdown"] = drawdown
 
-            if drawdown >= 2.0 and drawdown < 3.0:
-                if not daily_drawdown[index_name].get("dd_warning_sent", False):
-                    send_telegram_alert(f"⚠️ {index_name} drawdown: {drawdown:.1f}% (warning at 2%)")
-                    daily_drawdown[index_name]["dd_warning_sent"] = True
-            elif drawdown < 1.5:
-                daily_drawdown[index_name]["dd_warning_sent"] = False
+        if drawdown >= 2.0 and drawdown < 3.0:
+            if not daily_drawdown[index_name].get("dd_warning_sent", False):
+                send_telegram_alert(f"⚠️ {index_name} drawdown: {drawdown:.1f}% (warning at 2%)")
+                daily_drawdown[index_name]["dd_warning_sent"] = True
+        elif drawdown < 1.5:
+            daily_drawdown[index_name]["dd_warning_sent"] = False
 
-            if drawdown >= INDEX_CONFIG[index_name].get("max_daily_drawdown_pct", 3.0):
-                with _signal_state_lock:
-                    if signal_state[index_name]["action"] != "HOLD":
-                        active = signal_state[index_name]["action"]
-                        # for commodities, prem = spot
-                        exit_prem = spot if is_commodity else (ce_prem if "CE" in active else pe_prem)
-                        if exit_prem > 0:
-                            pnl = exit_prem - signal_state[index_name]["entry_price"]
-                            pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+        if drawdown >= INDEX_CONFIG[index_name].get("max_daily_drawdown_pct", 3.0):
+            with _signal_state_lock:
+                if signal_state[index_name]["action"] != "HOLD":
+                    active = signal_state[index_name]["action"]
+                    prem = ce_prem if "CE" in active else pe_prem
+                    if prem > 0:
+                        pnl = prem - signal_state[index_name]["entry_price"]
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                        with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
                             portfolio_state[index_name]["total_pnl"] += pnl_total
                             portfolio_state[index_name]["live_pnl"] = 0.0
-                            save_portfolio_state(index_name)
-                            log_trade(index_name, active, signal_state[index_name]["entry_price"], exit_prem, pnl_total,
-                                      pnl_total / portfolio_state[index_name]["equity"] * 100, "KILL_SWITCH",
-                                      active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], "KILL_SWITCH")
-                            reset_signal_state(index_name, now, "KILL_SWITCH")
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "KILL SWITCH: Max drawdown hit. Trading halted."
-                    market_signal[index_name]["signal"] = "KILL_SWITCH"
-                return
+                        save_portfolio_state(index_name)
+                        log_trade(index_name, active, signal_state[index_name]["entry_price"], prem, pnl_total,
+                                  pnl_total / portfolio_state[index_name]["equity"] * 100, "KILL_SWITCH",
+                                  active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], "KILL_SWITCH")
+                        reset_signal_state(index_name, now, "KILL_SWITCH")
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = "KILL SWITCH: Max drawdown hit. Trading halted."
+                market_signal[index_name]["signal"] = "KILL_SWITCH"
+            return
 
         if safety_state[index_name]["circuit_breaker"]:
             if now < safety_state[index_name]["circuit_breaker_until"]:
@@ -1730,11 +1692,7 @@ def run_signal_engine_for_index(index_name):
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
             active = current_action
-            # get current premium/price
-            if is_commodity:
-                prem = spot
-            else:
-                prem = ce_prem if "CE" in active else pe_prem
+            prem = ce_prem if "CE" in active else pe_prem
             if prem <= 0:
                 prem = last_known_prices[index_name].get("ce" if "CE" in active else "pe", 0) or 0.0
             if prem > 0:
@@ -1857,7 +1815,7 @@ def run_signal_engine_for_index(index_name):
                         reset_signal_state(index_name, now, exit_reason)
                         return
 
-                    # VWAP exit (only for options)
+                    # VWAP exit
                     if not is_commodity:
                         if "CE" in active:
                             vwap_data = vp_engine.analyze(ce_prem, ce_vol, option_type="CE")
@@ -1902,13 +1860,6 @@ def run_signal_engine_for_index(index_name):
                                 reset_signal_state(index_name, now, "VWAP_EXIT")
                                 return
 
-                # ---- Update market_signal with strike info for ACTIVE trade ----
-                token_info = INDEX_TOKENS.get(index_name, {})
-                atm_strike = token_info.get("atm_strike", 0)
-                if "CE" in active:
-                    trading_symbol = token_info.get("ce_symbol", "")
-                else:
-                    trading_symbol = token_info.get("pe_symbol", "")
                 with _market_signal_lock:
                     market_signal[index_name].update({
                         "alert_message": f"ACTIVE {active}",
@@ -1917,8 +1868,6 @@ def run_signal_engine_for_index(index_name):
                         "stop_loss": signal_state[index_name]["stop_loss"],
                         "target": signal_state[index_name]["target"],
                         "current_pnl": round(pnl, 2),
-                        "strike_price": atm_strike,
-                        "trading_symbol": trading_symbol
                     })
             else:
                 with _market_signal_lock:
@@ -1935,25 +1884,22 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "COOLDOWN"
                 return
 
-            # Reset daily counters if new day (with lock)
-            now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-            today = now_ist.strftime("%Y-%m-%d")
-            if last_trade_date[index_name] != today:
-                daily_trade_count[index_name] = 0
-                last_trade_date[index_name] = today
-                with _portfolio_state_lock:
-                    daily_drawdown[index_name]["peak_equity"] = portfolio_state[index_name]["equity"]
-                    portfolio_state[index_name]["daily_pnl"] = 0.0
-                    portfolio_state[index_name]["live_pnl"] = 0.0
-                save_portfolio_state(index_name)
+        now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        today = now_ist.strftime("%Y-%m-%d")
+        if last_trade_date[index_name] != today:
+            daily_trade_count[index_name] = 0
+            last_trade_date[index_name] = today
+            daily_drawdown[index_name]["peak_equity"] = portfolio_state[index_name]["equity"]
+            with _portfolio_state_lock:
+                portfolio_state[index_name]["daily_pnl"] = 0.0
+                portfolio_state[index_name]["live_pnl"] = 0.0
+            save_portfolio_state(index_name)
 
         if regime == "TRENDING":
             max_trades = 25
         else:
             max_trades = 15
-        with _signal_state_lock:
-            current_trades = daily_trade_count[index_name]
-        if current_trades >= max_trades:
+        if daily_trade_count[index_name] >= max_trades:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Max daily trades ({max_trades})"
                 market_signal[index_name]["signal"] = "BLOCKED"
@@ -1973,31 +1919,16 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "NO_TRADE"
             return
 
-        # Determine execution price
-        if is_commodity:
-            prem = spot
-        else:
-            prem = ce_prem if side == "CE" else pe_prem
+        prem = ce_prem if side == "CE" else pe_prem
+        min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
+        if prem <= 0 or (min_prem > 0 and prem < min_prem):
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"Premium invalid: Rs{prem}"
+                market_signal[index_name]["signal"] = "WAITING"
+            logger.info(f"📢 SET PREMIUM INVALID for {index_name}")
+            return
 
-        # Premium/Price validation
-        if is_commodity:
-            if prem <= 0.0:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
-                    market_signal[index_name]["signal"] = "BLOCKED"
-                logger.warning(f"{index_name} commodity price invalid: {prem}")
-                return
-        else:
-            min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
-            max_prem = INDEX_CONFIG[index_name].get("max_premium", 8000)
-            if prem <= 0 or prem < min_prem or prem > max_prem:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Premium invalid: {prem:.2f}"
-                    market_signal[index_name]["signal"] = "WAITING"
-                logger.info(f"📢 SET PREMIUM INVALID for {index_name}: {prem}")
-                return
-
-        # VWAP entry filter (only for options)
+        # VWAP entry filter
         if not is_commodity:
             spot_vwap = vp_engine.analyze(spot, ce_vol + pe_vol, option_type=None)["vwap"]
             if spot_vwap > 0:
@@ -2040,7 +1971,6 @@ def run_signal_engine_for_index(index_name):
         else:
             pe_volume_histories[index_name].append(vol)
 
-        # PCR check only for options
         if not is_commodity and INDEX_CONFIG[index_name].get("pcr_enabled"):
             if ce_oi > 0 and pe_oi > 0:
                 pcr = ce_oi / pe_oi
@@ -2080,7 +2010,6 @@ def run_signal_engine_for_index(index_name):
         else:
             beta_adj = corr_adjust
 
-        # Greeks filter only for options
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data is not None:
             delta = greeks_data.get("ce_delta") if side == "CE" else greeks_data.get("pe_delta")
             if delta is not None:
@@ -2203,10 +2132,9 @@ def run_signal_engine_for_index(index_name):
                 "highest": prem,
                 "cooldown": 0
             })
-            daily_trade_count[index_name] += 1
-
         with _portfolio_state_lock:
             portfolio_state[index_name]["open_positions"] = 1
+        daily_trade_count[index_name] += 1
         save_portfolio_state(index_name)
 
         emoji = "🔥" if "STRONG" in action and "CE" in action else "❄️" if "STRONG" in action and "PE" in action else "⚡" if "LOW" in action else "📊"
@@ -2214,14 +2142,6 @@ def run_signal_engine_for_index(index_name):
                f"Sentiment:{sentiment:.0f} ({sentiment_label}) | Regime:{regime} | Lots:{lots} Risk:{risk_pct:.1f}%")
         send_telegram_alert(msg)
         logger.info(msg)
-
-        # ---- Get strike info for frontend ----
-        token_info = INDEX_TOKENS.get(index_name, {})
-        atm_strike = token_info.get("atm_strike", 0)
-        if side == "CE":
-            trading_symbol = token_info.get("ce_symbol", "")
-        else:
-            trading_symbol = token_info.get("pe_symbol", "")
 
         with _market_signal_lock:
             market_signal[index_name].update({
@@ -2232,9 +2152,7 @@ def run_signal_engine_for_index(index_name):
                 "target": target,
                 "sentiment_score": sentiment,
                 "exit_reason": "",
-                "quality_score": compute_signal_quality(index_name),
-                "strike_price": atm_strike,
-                "trading_symbol": trading_symbol
+                "quality_score": compute_signal_quality(index_name)
             })
         logger.info(f"📢 SET SIGNAL for {index_name}: action={action}, alert={market_signal[index_name]['alert_message']}")
 
@@ -2346,7 +2264,7 @@ def on_ws_data(wsapp, message):
                     if parsed and parsed.get('token'):
                         ticks = [parsed]
                         if tick_counter % 100 == 0:
-                            logger.debug(f"✅ PARSED BINARY: token={parsed.get('token')} ltp={parsed.get('last_traded_price')}")
+                            logger.info(f"✅ PARSED BINARY: token={parsed.get('token')} ltp={parsed.get('last_traded_price')}")
                     else:
                         logger.warning("Binary parse returned empty, skipping tick")
                         return
@@ -2388,7 +2306,7 @@ def on_ws_data(wsapp, message):
                     ltp = ltp / 100.0
 
                 if tick_counter % 100 == 0:
-                    logger.debug(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
+                    logger.info(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
@@ -2400,7 +2318,7 @@ def on_ws_data(wsapp, message):
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("token") == token:
                         if ltp > 0:
-                            logger.debug(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
+                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             if cfg.get("is_commodity"):
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["price"] = ltp
@@ -2427,7 +2345,7 @@ def on_ws_data(wsapp, message):
 
                             with _candle_histories_lock:
                                 candle_len = len(candle_histories[idx]["1min"])
-                                logger.debug(f"CANDLE COUNT for {idx}: {candle_len}")
+                                logger.info(f"CANDLE COUNT for {idx}: {candle_len}")
 
                             spot_matched = True
                             break
@@ -2480,7 +2398,7 @@ def on_ws_data(wsapp, message):
                         latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
                     if DEBUG_MODE:
-                        logger.debug(f"VIX TICK: {ltp}")
+                        logger.info(f"VIX TICK: {ltp}")
 
             except Exception as e:
                 logger.error(f"Error processing tick: {e}\n{traceback.format_exc()}")
@@ -2644,7 +2562,7 @@ def schedule_token_refresh():
     while True:
         now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
         if now_ist.weekday() < 5:
-            open_time = datetime.combine(now_ist.date(), dt_time(9, 10), tzinfo=now_ist.tzinfo)
+            open_time = datetime.combine(now_ist.date(), dt_time(9, 10))
             wait = (open_time - now_ist).total_seconds()
             if wait > 0:
                 time.sleep(wait)
@@ -2679,7 +2597,7 @@ def start_rest_only_mode():
     while True:
         with _ws_connect_lock:
             if ws_running:
-                logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
+                logger.info(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
                 time.sleep(30)
                 continue
 
@@ -2695,7 +2613,7 @@ def start_rest_only_mode():
                     assets_to_fetch.append(idx)
 
             if not assets_to_fetch:
-                logger.debug("REST: No markets open, sleeping 30s")
+                logger.info("REST: No markets open, sleeping 30s")
                 time.sleep(30)
                 continue
 
@@ -2709,11 +2627,7 @@ def start_rest_only_mode():
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
                 for future in as_completed(futures):
-                    try:
-                        result = future.result()   # Safe: exception caught
-                    except Exception as e:
-                        logger.error(f"Future for {futures[future]} failed: {e}")
-                        continue
+                    result = future.result()
                     idx = result["index"]
                     try:
                         spot = result.get("spot")
@@ -2725,13 +2639,13 @@ def start_rest_only_mode():
                                     latest_ticks[idx]["spot_price"] = spot
                             with _price_histories_lock:
                                 price_histories[idx].append(spot)
-                            # Use cumulative volume 0, update_candle will assign minimal volume
                             update_candle(idx, spot, 0, time.time())
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["spot"] = spot
                                 last_known_prices[idx]["timestamp"] = time.time()
+                            # Update last_tick_timestamp so watchdog sees fresh data
                             last_tick_timestamp = time.time()
-                            logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+                            logger.info(f"REST: {idx} spot={spot} (tick time updated)")
 
                         if not INDEX_CONFIG[idx].get("is_commodity"):
                             ce = result.get("ce")
@@ -2748,7 +2662,7 @@ def start_rest_only_mode():
                                 with _ce_price_histories_lock:
                                     ce_price_histories[idx].append(ce["ltp"])
                                 last_tick_timestamp = time.time()
-                                logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
+                                logger.info(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
                             else:
                                 logger.warning(f"REST: {idx} CE quote fetch FAILED")
                             if pe:
@@ -2763,7 +2677,7 @@ def start_rest_only_mode():
                                 with _pe_price_histories_lock:
                                     pe_price_histories[idx].append(pe["ltp"])
                                 last_tick_timestamp = time.time()
-                                logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
+                                logger.info(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
                             else:
                                 logger.warning(f"REST: {idx} PE quote fetch FAILED")
                     except Exception as e:
@@ -2791,10 +2705,10 @@ def start_rest_only_mode():
                 time.sleep(1)
                 with _ws_connect_lock:
                     if ws_running:
-                        logger.debug("REST cycle interrupted: WS reconnected")
+                        logger.info("REST cycle interrupted: WS reconnected")
                         break
 
-            logger.debug(f"REST cycle {cycle_count} complete.")
+            logger.info(f"REST cycle {cycle_count} complete.")
 
         except Exception as e:
             logger.error(f"REST fallback error: {e}")
@@ -2901,7 +2815,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.2 – Equity & MCX + Lower Candle Threshold",
+        "engine": "Hybrid v15.2 – WS Binary Fix + Lower Candle Threshold",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2955,7 +2869,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.2-Equity & MCX"
+            "version": "15.2-ws-binary-fixed"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3061,11 +2975,6 @@ if __name__ == "__main__":
     load_portfolio_state()
     get_mcx_futures_tokens()
     refresh_all_tokens()
-    # Force REST mode
-    if os.getenv("FORCE_REST_MODE", "0") == "1":
-        import threading
-        threading.Thread(target=start_rest_only_mode, daemon=True).start()
-        logger.info("REST mode started directly.")
-    else:
-        _start_background_threads()
+    _start_background_threads()
+    logger.info("Background workers initiated. Starting Flask API Server...")
     app.run(host="0.0.0.0", port=5000, debug=False)
