@@ -2819,7 +2819,9 @@ class ConnectionManager:
 
     def start(self):
         if self.use_websocket:
-            logger.info("WebSocket mode enabled. Starting WS thread.")
+            logger.info(
+            f"WebSocket mode enabled. FORCE_REST_MODE={os.getenv('FORCE_REST_MODE')}"
+       )
             self._ws_thread = threading.Thread(target=start_angel_websocket_improved, daemon=True)
             self._ws_thread.start()
             threading.Thread(target=ws_watchdog, daemon=True).start()
