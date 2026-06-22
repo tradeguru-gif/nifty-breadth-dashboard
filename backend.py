@@ -2562,7 +2562,7 @@ def schedule_token_refresh():
     while True:
         now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
         if now_ist.weekday() < 5:
-            open_time = datetime.combine(now_ist.date(), dt_time(9, 10))
+            open_time = datetime.combine(now_ist.date(), dt_time(9, 10), tzinfo=now_ist.tzinfo)
             wait = (open_time - now_ist).total_seconds()
             if wait > 0:
                 time.sleep(wait)
