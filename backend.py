@@ -3061,6 +3061,11 @@ if __name__ == "__main__":
     load_portfolio_state()
     get_mcx_futures_tokens()
     refresh_all_tokens()
-    _start_background_threads()
-    logger.info("Background workers initiated. Starting Flask API Server...")
+    # Force REST mode
+    if os.getenv("FORCE_REST_MODE", "0") == "1":
+        import threading
+        threading.Thread(target=start_rest_only_mode, daemon=True).start()
+        logger.info("REST mode started directly.")
+    else:
+        _start_background_threads()
     app.run(host="0.0.0.0", port=5000, debug=False)
