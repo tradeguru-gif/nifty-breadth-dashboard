@@ -1039,13 +1039,15 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
                         if tf == "1min":
-                            logger.debug(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                            logger.info(f"   Open={_current_candle[idx][tf]['open']:.2f}, High={_current_candle[idx][tf]['high']:.2f}, Low={_current_candle[idx][tf]['low']:.2f}, Close={_current_candle[idx][tf]['close']:.2f}")
 
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
                 }
                 _last_candle_time[idx][tf] = candle_start
+                logger.debug(f"🕒 update_candle {idx} {tf}: new candle at {candle_start}, price={price}")
             else:
                 if _current_candle[idx][tf] is not None:
                     _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
@@ -1059,7 +1061,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     logger.warning(f"⏰ Forcing new candle for {idx} (age={current_age:.1f}s)")
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        logger.debug(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
+                        logger.info(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
                     _current_candle[idx][tf] = {
                         "open": price, "high": price, "low": price, "close": price,
                         "volume": tick_vol, "timestamp": candle_start
@@ -2321,6 +2323,9 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
+
+    # CRITICAL DEBUG: Log raw data arrival
+    logger.warning(f"RAW WS DATA RECEIVED: {str(message)[:200]}")
     last_heartbeat = time.time()
 
     if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
@@ -2638,23 +2643,27 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER
+# PRE-MARKET TOKEN REFRESH SCHEDULER (FIXED timezone)
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
         now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
         if now_ist.weekday() < 5:
-            open_time = datetime.combine(now_ist.date(), dt_time(9, 10))
+            # FIX: make open_time timezone-aware
+            open_time = now_ist.replace(hour=9, minute=10, second=0, microsecond=0)
             wait = (open_time - now_ist).total_seconds()
             if wait > 0:
                 time.sleep(wait)
                 logger.info("⏰ Pre-market token refresh triggered")
-                refresh_all_tokens()
+                try:
+                    refresh_all_tokens()
+                except Exception as e:
+                    logger.error(f"Token refresh error: {e}")
                 logger.info("Pre-market token refresh completed")
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (concurrent)
+# ENHANCED REST FALLBACK (concurrent) – with exception recovery
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2677,128 +2686,133 @@ def start_rest_only_mode():
     logger.info("Starting REST fallback (concurrent fetch mode)")
     cycle_count = 0
     while True:
-        with _ws_connect_lock:
-            if ws_running:
-                logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
-                time.sleep(30)
-                continue
-
-        cycle_count += 1
         try:
-            assets_to_fetch = []
-            for idx in INDEX_NAMES:
-                cfg = INDEX_CONFIG[idx]
-                if not cfg.get("active"):
+            with _ws_connect_lock:
+                if ws_running:
+                    logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
+                    time.sleep(30)
                     continue
-                is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
-                if is_open:
-                    assets_to_fetch.append(idx)
 
-            if not assets_to_fetch:
-                logger.debug("REST: No markets open, sleeping 30s")
-                time.sleep(30)
-                continue
-
-            for idx in assets_to_fetch:
-                if not INDEX_CONFIG[idx].get("is_commodity"):
-                    tokens = INDEX_TOKENS.get(idx, {})
-                    if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                        logger.warning(f"Tokens missing for {idx}, retrying...")
-                        get_current_atm_tokens(idx)
-
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()   # Safe: exception caught
-                    except Exception as e:
-                        logger.error(f"Future for {futures[future]} failed: {e}")
-                        continue
-                    idx = result["index"]
-                    try:
-                        spot = result.get("spot")
-                        if spot and spot > 0:
-                            with _latest_ticks_lock:
-                                if INDEX_CONFIG[idx].get("is_commodity"):
-                                    latest_ticks[idx]["price"] = spot
-                                else:
-                                    latest_ticks[idx]["spot_price"] = spot
-                            with _price_histories_lock:
-                                price_histories[idx].append(spot)
-                            # Use cumulative volume 0, update_candle will assign minimal volume
-                            update_candle(idx, spot, 0, time.time())
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["spot"] = spot
-                                last_known_prices[idx]["timestamp"] = time.time()
-                            last_tick_timestamp = time.time()
-                            logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
-
-                        if not INDEX_CONFIG[idx].get("is_commodity"):
-                            ce = result.get("ce")
-                            pe = result.get("pe")
-                            if ce:
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["ce_price"] = ce["ltp"]
-                                    latest_ticks[idx]["ce_volume"] = ce["volume"]
-                                    latest_ticks[idx]["ce_oi"] = ce["oi"]
-                                    latest_ticks[idx]["ce_bid"] = ce["bid"]
-                                    latest_ticks[idx]["ce_ask"] = ce["ask"]
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["ce"] = ce["ltp"]
-                                with _ce_price_histories_lock:
-                                    ce_price_histories[idx].append(ce["ltp"])
-                                last_tick_timestamp = time.time()
-                                logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
-                            else:
-                                logger.warning(f"REST: {idx} CE quote fetch FAILED")
-                            if pe:
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["pe_price"] = pe["ltp"]
-                                    latest_ticks[idx]["pe_volume"] = pe["volume"]
-                                    latest_ticks[idx]["pe_oi"] = pe["oi"]
-                                    latest_ticks[idx]["pe_bid"] = pe["bid"]
-                                    latest_ticks[idx]["pe_ask"] = pe["ask"]
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["pe"] = pe["ltp"]
-                                with _pe_price_histories_lock:
-                                    pe_price_histories[idx].append(pe["ltp"])
-                                last_tick_timestamp = time.time()
-                                logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
-                            else:
-                                logger.warning(f"REST: {idx} PE quote fetch FAILED")
-                    except Exception as e:
-                        logger.error(f"Error processing REST result for {idx}: {e}")
-
-            # VIX
+            cycle_count += 1
             try:
-                vix = get_vix_ltp()
-                if vix:
-                    with _latest_ticks_lock:
-                        latest_ticks["VIX"]["vix"] = vix
-                    vix_history.append(vix)
+                assets_to_fetch = []
+                for idx in INDEX_NAMES:
+                    cfg = INDEX_CONFIG[idx]
+                    if not cfg.get("active"):
+                        continue
+                    is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
+                    if is_open:
+                        assets_to_fetch.append(idx)
+
+                if not assets_to_fetch:
+                    logger.debug("REST: No markets open, sleeping 30s")
+                    time.sleep(30)
+                    continue
+
+                for idx in assets_to_fetch:
+                    if not INDEX_CONFIG[idx].get("is_commodity"):
+                        tokens = INDEX_TOKENS.get(idx, {})
+                        if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                            logger.warning(f"Tokens missing for {idx}, retrying...")
+                            get_current_atm_tokens(idx)
+
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()   # Safe: exception caught
+                        except Exception as e:
+                            logger.error(f"Future for {futures[future]} failed: {e}")
+                            continue
+                        idx = result["index"]
+                        try:
+                            spot = result.get("spot")
+                            if spot and spot > 0:
+                                with _latest_ticks_lock:
+                                    if INDEX_CONFIG[idx].get("is_commodity"):
+                                        latest_ticks[idx]["price"] = spot
+                                    else:
+                                        latest_ticks[idx]["spot_price"] = spot
+                                with _price_histories_lock:
+                                    price_histories[idx].append(spot)
+                                # Use cumulative volume 0, update_candle will assign minimal volume
+                                update_candle(idx, spot, 0, time.time())
+                                with _latest_ticks_lock:
+                                    last_known_prices[idx]["spot"] = spot
+                                    last_known_prices[idx]["timestamp"] = time.time()
+                                last_tick_timestamp = time.time()
+                                logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+
+                            if not INDEX_CONFIG[idx].get("is_commodity"):
+                                ce = result.get("ce")
+                                pe = result.get("pe")
+                                if ce:
+                                    with _latest_ticks_lock:
+                                        latest_ticks[idx]["ce_price"] = ce["ltp"]
+                                        latest_ticks[idx]["ce_volume"] = ce["volume"]
+                                        latest_ticks[idx]["ce_oi"] = ce["oi"]
+                                        latest_ticks[idx]["ce_bid"] = ce["bid"]
+                                        latest_ticks[idx]["ce_ask"] = ce["ask"]
+                                    with _latest_ticks_lock:
+                                        last_known_prices[idx]["ce"] = ce["ltp"]
+                                    with _ce_price_histories_lock:
+                                        ce_price_histories[idx].append(ce["ltp"])
+                                    last_tick_timestamp = time.time()
+                                    logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
+                                else:
+                                    logger.warning(f"REST: {idx} CE quote fetch FAILED")
+                                if pe:
+                                    with _latest_ticks_lock:
+                                        latest_ticks[idx]["pe_price"] = pe["ltp"]
+                                        latest_ticks[idx]["pe_volume"] = pe["volume"]
+                                        latest_ticks[idx]["pe_oi"] = pe["oi"]
+                                        latest_ticks[idx]["pe_bid"] = pe["bid"]
+                                        latest_ticks[idx]["pe_ask"] = pe["ask"]
+                                    with _latest_ticks_lock:
+                                        last_known_prices[idx]["pe"] = pe["ltp"]
+                                    with _pe_price_histories_lock:
+                                        pe_price_histories[idx].append(pe["ltp"])
+                                    last_tick_timestamp = time.time()
+                                    logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
+                                else:
+                                    logger.warning(f"REST: {idx} PE quote fetch FAILED")
+                        except Exception as e:
+                            logger.error(f"Error processing REST result for {idx}: {e}")
+
+                # VIX
+                try:
+                    vix = get_vix_ltp()
+                    if vix:
+                        with _latest_ticks_lock:
+                            latest_ticks["VIX"]["vix"] = vix
+                        vix_history.append(vix)
+                except Exception as e:
+                    logger.debug(f"VIX REST fetch error: {e}")
+
+                last_rest_fetch = time.time()
+
+                # Run signals only if complete data exists
+                ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
+                if ready_indices:
+                    run_all_signals()
+
+                cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
+                for _ in range(cycle_interval):
+                    time.sleep(1)
+                    with _ws_connect_lock:
+                        if ws_running:
+                            logger.debug("REST cycle interrupted: WS reconnected")
+                            break
+
+                logger.debug(f"REST cycle {cycle_count} complete.")
+
             except Exception as e:
-                logger.debug(f"VIX REST fetch error: {e}")
-
-            last_rest_fetch = time.time()
-
-            # Run signals only if complete data exists
-            ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
-            if ready_indices:
-                run_all_signals()
-
-            cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
-            for _ in range(cycle_interval):
-                time.sleep(1)
-                with _ws_connect_lock:
-                    if ws_running:
-                        logger.debug("REST cycle interrupted: WS reconnected")
-                        break
-
-            logger.debug(f"REST cycle {cycle_count} complete.")
+                logger.error(f"REST cycle error: {e}\n{traceback.format_exc()}")
+                last_rest_fetch = time.time()
+                time.sleep(10)
 
         except Exception as e:
-            logger.error(f"REST fallback error: {e}")
-            last_rest_fetch = time.time()
+            logger.error(f"REST fallback outer error: {e}\n{traceback.format_exc()}")
             time.sleep(10)
 
 # ----------------------------------------------------------------------
@@ -2841,7 +2855,10 @@ def _start_background_threads():
             logger.info("Pre-fetching option tokens...")
             max_retries = 5
             for attempt in range(max_retries):
-                refresh_all_tokens()
+                try:
+                    refresh_all_tokens()
+                except Exception as e:
+                    logger.error(f"Token refresh attempt {attempt+1} failed: {e}")
                 ready = 0
                 for idx, cfg in INDEX_CONFIG.items():
                     if not cfg.get("active"):
