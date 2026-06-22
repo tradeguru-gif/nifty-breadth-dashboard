@@ -1013,6 +1013,7 @@ def is_index_market_open(idx):
 # CANDLE UPDATE (with volume fix for REST and first tick)
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
+    logger.info(f"🕒 update_candle called for {idx} at {timestamp}, price={price}")
     with _prev_volume_lock:
         prev = _prev_volume.get(idx, 0)
         # If cumulative_volume is 0 (e.g., REST fallback), set a minimal volume
@@ -1047,13 +1048,14 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     "volume": tick_vol, "timestamp": candle_start
                 }
                 _last_candle_time[idx][tf] = candle_start
-                logger.debug(f"🕒 update_candle {idx} {tf}: new candle at {candle_start}, price={price}")
+                logger.info(f"🕒 NEW CANDLE {idx} {tf} start={candle_start}, price={price}")
             else:
                 if _current_candle[idx][tf] is not None:
                     _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
                     _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
                     _current_candle[idx][tf]["close"] = price
                     _current_candle[idx][tf]["volume"] += tick_vol
+                    logger.debug(f"🔄 Updating candle {idx} {tf} close={price}")
 
             if tf == "1min" and _current_candle[idx][tf] is not None:
                 current_age = timestamp - _current_candle[idx][tf]["timestamp"]
@@ -1072,6 +1074,13 @@ def update_candle(idx, price, cumulative_volume, timestamp):
 # SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
 def compute_sentiment(index_name):
+    with _candle_histories_lock:
+        candle_count = len(candle_histories[index_name]["1min"])
+    logger.info(f"compute_sentiment {index_name}: candles in 1min = {candle_count}")
+
+    if candle_count < 10:
+        return 50.0
+
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1079,7 +1088,6 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        # Lowered requirement from 60 to 20 candles for faster signal generation
         if len(closes) < 20:
             continue
         ema9 = calculate_ema(closes, 9)
@@ -1087,37 +1095,39 @@ def compute_sentiment(index_name):
         ema50 = calculate_ema(closes, 50) if len(closes) >= 50 else ema21
         price = closes[-1]
         recent = closes[-30:]
-        price_range = (max(recent)-min(recent))/sum(recent)*len(recent) if sum(recent) else 0
+        price_range = (max(recent) - min(recent)) / sum(recent) * len(recent) if sum(recent) else 0
         if price_range < 0.005:
             score = 0
-        elif tf in ["1min","2min","3min"]:
+        elif tf in ["1min", "2min", "3min"]:
             if ema9 > ema21 and price > ema9:
                 score = TIMEFRAME_WEIGHTS[tf]
             elif ema9 < ema21 and price < ema9:
                 score = -TIMEFRAME_WEIGHTS[tf]
             else:
                 score = 0
-        elif tf in ["5min","8min","10min"]:
+        elif tf in ["5min", "8min", "10min"]:
             if ema9 > ema21 > ema50 and price > ema9:
                 score = TIMEFRAME_WEIGHTS[tf]
             elif ema9 < ema21 < ema50 and price < ema9:
                 score = -TIMEFRAME_WEIGHTS[tf]
             elif ema9 > ema21 and price > ema9:
-                score = TIMEFRAME_WEIGHTS[tf]-5
+                score = TIMEFRAME_WEIGHTS[tf] - 5
             elif ema9 < ema21 and price < ema9:
-                score = -TIMEFRAME_WEIGHTS[tf]+5
+                score = -TIMEFRAME_WEIGHTS[tf] + 5
             else:
                 score = 0
         else:
             if ema9 > ema21 > ema50:
-                score = TIMEFRAME_WEIGHTS[tf]-5
+                score = TIMEFRAME_WEIGHTS[tf] - 5
             elif ema9 < ema21 < ema50:
-                score = -TIMEFRAME_WEIGHTS[tf]+5
+                score = -TIMEFRAME_WEIGHTS[tf] + 5
             else:
                 score = 0
         sentiment_scores.append(score)
+
     if not sentiment_scores:
         return 50.0
+
     total = sum(sentiment_scores)
     sentiment = 50.0 + (total / 3.5)
     return max(0.0, min(100.0, sentiment))
