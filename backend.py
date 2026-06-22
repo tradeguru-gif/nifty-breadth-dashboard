@@ -2551,6 +2551,11 @@ def start_angel_websocket_improved():
         try:
             with _ws_connect_lock:
                 ws_running = False
+            logger.info(
+                f"WS LOOP | FORCE_WS={os.getenv('FORCE_WS')} "
+                f"| NSE={is_market_open()} "
+                f"| MCX={is_mcx_open()}"
+            )
 
             if not is_market_open() and not is_mcx_open():
                 time.sleep(60)
