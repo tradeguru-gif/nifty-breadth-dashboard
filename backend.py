@@ -1,4 +1,5 @@
 # === HYBRID v15.2 – WS BINARY FIX + LOWER CANDLE THRESHOLD ===
+# MODIFIED: More responsive to slow trends (lower candle req, relaxed confirmation, adjusted thresholds)
 import sys
 import logging
 import os
@@ -206,7 +207,8 @@ INDEX_CONFIG = {
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 20,  # MODIFIED: lowered from 25 to 20 for faster trend detection
+        "regime_atr_threshold": 0.5, "is_commodity": False
     },
     # ---- MCX Commodities (Futures) ----
     "GOLD": {
@@ -1088,7 +1090,8 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 20:
+        # MODIFIED: lowered required candles from 20 to 10 for faster sentiment
+        if len(closes) < 10:   # previously 20
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -1222,10 +1225,11 @@ def confirm_signal_with_candles(index_name, side, spot):
     if ema9 == 0:
         return False
     last_3_closes = [c["close"] for c in candles[-3:]]
+    # MODIFIED: relaxed from all( ) to at least 2 out of 3
     if side == "CE":
-        return all(c > ema9 for c in last_3_closes)
+        return sum(1 for c in last_3_closes if c > ema9) >= 2
     else:
-        return all(c < ema9 for c in last_3_closes)
+        return sum(1 for c in last_3_closes if c < ema9) >= 2
 
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
@@ -1461,16 +1465,17 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
     return False, ""
 
 def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
+    # MODIFIED: extend time exit for slow trends
     if not greeks_data:
-        return 45
+        return 90  # increased from 45
     theta = greeks_data.get("ce_theta") if side == "CE" else greeks_data.get("pe_theta")
     if theta is None or theta == 0:
-        return 45
+        return 90
     theta_abs = abs(theta)
     if theta_abs > prem * 0.05:
-        return 30
+        return 45   # faster decay, exit earlier
     else:
-        return 60
+        return 90   # slow decay, hold longer
 
 # ============================================================
 # REST HELPER FUNCTIONS
@@ -1931,7 +1936,7 @@ def run_signal_engine_for_index(index_name):
                         "current_pnl": round(pnl, 2),
                         "strike_price": atm_strike,
                         "trading_symbol": trading_symbol,
-                        "lots": signal_state[index_name].get("lots", 0)   # <--- ADDED
+                        "lots": signal_state[index_name].get("lots", 0)
                     })
             else:
                 with _market_signal_lock:
@@ -2010,7 +2015,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET PREMIUM INVALID for {index_name}: {prem}")
                 return
 
-        # VWAP entry filter (only for options)
+        # VWAP entry filter (only for options) – relaxed for PE
         if not is_commodity:
             spot_vwap = vp_engine.analyze(spot, ce_vol + pe_vol, option_type=None)["vwap"]
             if spot_vwap > 0:
@@ -2021,7 +2026,7 @@ def run_signal_engine_for_index(index_name):
                             market_signal[index_name]["signal"] = "BLOCKED"
                         logger.info(f"📢 SET VWAP EXTENDED for {index_name}")
                         return
-                elif side == "PE" and spot < spot_vwap * 0.997:
+                elif side == "PE" and spot < spot_vwap * 0.99:   # MODIFIED: relaxed from 0.997 to 0.99
                     if "STRONG" not in action:
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = "Spot below VWAP, extended"
@@ -2248,7 +2253,7 @@ def run_signal_engine_for_index(index_name):
                 "quality_score": compute_signal_quality(index_name),
                 "strike_price": atm_strike,
                 "trading_symbol": trading_symbol,
-                "lots": lots       # <--- ADDED
+                "lots": lots
             })
         logger.info(f"📢 SET SIGNAL for {index_name}: action={action}, alert={market_signal[index_name]['alert_message']}")
 
