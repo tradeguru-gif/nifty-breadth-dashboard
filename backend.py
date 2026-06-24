@@ -1588,10 +1588,14 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity:
             tokens = INDEX_TOKENS.get(index_name, {})
             if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "Option tokens not loaded"
-                    market_signal[index_name]["signal"] = "WAITING"
-                return
+                logger.info(f"{index_name}: option tokens missing, refreshing...")
+                get_current_atm_tokens(index_name)   # try to fetch now
+                tokens = INDEX_TOKENS.get(index_name, {})
+                if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                    with _market_signal_lock:
+                        market_signal[index_name]["alert_message"] = "Option tokens not loaded"
+                        market_signal[index_name]["signal"] = "WAITING"
+                    return
 
         with _candle_histories_lock:
             candle_len = len(candle_histories[index_name]["1min"])
@@ -2041,23 +2045,25 @@ def run_signal_engine_for_index(index_name):
             if spot_vwap > 0:
                 if side == "CE" and spot > spot_vwap * 1.005:
                     if "STRONG" not in action:
-                        logger.info(f"{index_name} BLOCKED BY VWAP")  # FIX 10
+                        logger.info(f"{index_name} BLOCKED BY VWAP")
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = "Spot above VWAP, extended"
                             market_signal[index_name]["signal"] = "BLOCKED"
                         return
                 elif side == "PE" and spot < spot_vwap * 0.995:
                     if "STRONG" not in action:
-                        logger.info(f"{index_name} BLOCKED BY VWAP")  # FIX 10
+                        logger.info(f"{index_name} BLOCKED BY VWAP")
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = "Spot below VWAP, extended"
                             market_signal[index_name]["signal"] = "BLOCKED"
                         return
 
         # FIX 4: Relaxed candle confirmation
-                # FIX 4: Relaxed candle confirmation
         if not confirm_signal_with_candles(index_name, side, spot):
-            
+            logger.info(f"{index_name} BLOCKED BY CANDLE")
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = "Candle confirmation failed"
+                market_signal[index_name]["signal"] = "BLOCKED"
             return
 
         # FIX 5: Relaxed volume filter (0.25 instead of 0.5) – skip for MCX
@@ -2136,7 +2142,6 @@ def run_signal_engine_for_index(index_name):
         with _price_histories_lock:
             prices_spot = list(price_histories[index_name])
         rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50.0
-        # continue with the rest of the code (risk, entry, etc.)
         with _candle_histories_lock:
             candles = list(candle_histories[index_name]["5min"])
             highs = [c["high"] for c in candles]
@@ -2149,7 +2154,7 @@ def run_signal_engine_for_index(index_name):
                 vix = 15.0
 
         ml_prob = compute_ml_score(index_name, side, prem, spot, rsi, adx_calc, vix, sentiment)
-        if ml_prob < 0.4 and "STRONG" not in action:
+        if ml_prob < 0.25 and "STRONG" not in action:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
                 market_signal[index_name]["signal"] = "BLOCKED"
@@ -2698,6 +2703,18 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
+# PERIODIC TOKEN REFRESH (every 5 minutes)
+# ----------------------------------------------------------------------
+def periodic_token_refresh():
+    while True:
+        time.sleep(300)  # 5 minutes
+        try:
+            refresh_all_tokens()
+            logger.info("Periodic token refresh completed")
+        except Exception as e:
+            logger.error(f"Periodic token refresh error: {e}")
+
+# ----------------------------------------------------------------------
 # ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
@@ -2857,6 +2874,7 @@ class ConnectionManager:
         self._ws_thread = None
         self._rest_thread = None
         self._refresh_thread = None
+        self._periodic_thread = None
 
     def start(self):
         if self.use_websocket:
@@ -2870,9 +2888,16 @@ class ConnectionManager:
         self._rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
         self._rest_thread.start()
         logger.info("REST fallback thread started (will take over if WS disconnects).")
+        
+        # Pre-market token refresh (runs at 9:10 AM)
         self._refresh_thread = threading.Thread(target=schedule_token_refresh, daemon=True)
         self._refresh_thread.start()
-        logger.info("Pre-market token refresh scheduler started.")
+        
+        # Periodic token refresh (every 5 minutes)
+        self._periodic_thread = threading.Thread(target=periodic_token_refresh, daemon=True)
+        self._periodic_thread.start()
+        
+        logger.info("Pre-market and periodic token refresh schedulers started.")
 
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS
@@ -2950,7 +2975,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v16.1 – Enhanced Signal Generation with Relaxed Filters",
+        "engine": "Hybrid v16.2 – Full Relaxation (Equity + MCX)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -3005,7 +3030,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.1-Relaxed Filters"
+            "version": "16.2-Full Relaxation"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
