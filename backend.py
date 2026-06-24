@@ -2063,8 +2063,8 @@ def run_signal_engine_for_index(index_name):
                             market_signal[index_name]["signal"] = "BLOCKED"
                         return
 
-        # FIX 4: Relaxed candle confirmation – uses the updated function
-        if not confirm_signal_with_candles(index_name, side, spot):
+        # FIX 4: Relaxed candle confirmation – skip for MCX
+        if not is_commodity and not confirm_signal_with_candles(index_name, side, spot):
             logger.info(f"{index_name} BLOCKED BY CANDLE")
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "Candle confirmation failed"
@@ -2229,11 +2229,17 @@ def run_signal_engine_for_index(index_name):
 
         stop_dist = prem - sl
         if stop_dist <= 0:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Invalid stop distance"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            logger.warning(f"Invalid stop distance for {index_name}: prem={prem}, sl={sl}")
-            return
+            # Fallback: set a minimum stop distance
+            if is_commodity:
+                sl = prem * 0.995   # 0.5% for commodities
+            else:
+                sl = prem * 0.99    # 1% for equity
+            stop_dist = prem - sl
+            if stop_dist <= 0:
+                # Extreme fallback: 0.1 point
+                sl = prem - 0.1
+                stop_dist = 0.1
+            logger.warning(f"Invalid stop distance fixed: prem={prem}, sl={sl}, stop_dist={stop_dist}")
 
         risk_amount = portfolio_state[index_name]["equity"] * (risk_pct / 100)
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
