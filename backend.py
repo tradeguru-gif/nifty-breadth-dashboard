@@ -1,6 +1,7 @@
-# === HYBRID v16.0 – ENHANCED TREND CAPTURE WITH ADX CONFIRMATION ===
-# MODIFIED: ADX-filtered signal generation, regime-based thresholds, commodity-specific logic
-# FEATURES: Captures slow bullish/bearish trends with multiple confirmation layers
+# === HYBRID v16.2 – FULL RELAXATION (EQUITY + MCX) ===
+# MODIFIED: Lowered thresholds for both equity and commodities, removed range block,
+#           relaxed volume, sentiment sensitivity, candle confirmation.
+# FEATURES: More signals across all instruments while maintaining quality.
 import sys
 import logging
 import os
@@ -107,7 +108,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================
-# MONKEY PATCHES – fix SmartAPI WS bugs (ENHANCED BINARY PARSER)
+# MONKEY PATCHES – fix SmartAPI WS bugs
 # ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
@@ -118,23 +119,16 @@ def _patched_parse(self, binary_data):
     except Exception:
         result = {}
     try:
-        # Fallback manual byte parsing for SmartWebSocketV2 (Angel One binary format)
         if len(binary_data) >= 10:
             token_int = int.from_bytes(binary_data[2:10], byteorder='little')
             if token_int > 0:
                 result['token'] = str(token_int)
-
-                # Extract LTP (bytes 26-33, int64, divide by 100)
                 if len(binary_data) >= 34:
                     ltp_raw = int.from_bytes(binary_data[26:34], byteorder='little', signed=True)
                     result['last_traded_price'] = ltp_raw / 100.0
-
-                # Extract Volume (bytes 42-49)
                 if len(binary_data) >= 50:
                     vol_raw = int.from_bytes(binary_data[42:50], byteorder='little', signed=True)
                     result['volume'] = vol_raw
-
-                # Extract Bid/Ask Prices (bytes 50-57, 66-73) with sanity checks
                 if len(binary_data) >= 74:
                     bid_raw = int.from_bytes(binary_data[50:58], byteorder='little', signed=True)
                     ask_raw = int.from_bytes(binary_data[66:74], byteorder='little', signed=True)
@@ -142,12 +136,9 @@ def _patched_parse(self, binary_data):
                         result['best_bid_price'] = bid_raw / 100.0
                     if 0 < ask_raw < 100000000:
                         result['best_ask_price'] = ask_raw / 100.0
-
-                # Extract Open Interest (bytes 82-89)
                 if len(binary_data) >= 90:
                     oi_raw = int.from_bytes(binary_data[82:90], byteorder='little', signed=True)
                     result['open_interest'] = oi_raw
-
                 return result
     except Exception as e:
         logger.debug(f"Critical error in custom binary fallback parser: {e}")
@@ -321,11 +312,11 @@ _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# TIMEFRAME DEFINITIONS
+# TIMEFRAME DEFINITIONS - ENHANCED WEIGHTS FOR BETTER SENTIMENT
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min", "8min", "10min", "15min", "20min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "8min":480, "10min":600, "15min":900, "20min":1200}
-TIMEFRAME_WEIGHTS = {"1min":8, "2min":8, "3min":8, "5min":12, "8min":12, "10min":12, "15min":14, "20min":14}
+TIMEFRAME_WEIGHTS = {"1min":12, "2min":12, "3min":12, "5min":15, "8min":15, "10min":15, "15min":18, "20min":18}
 
 candle_histories = {idx: {tf: deque(maxlen=500) for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_NAMES}
@@ -364,7 +355,6 @@ def calculate_rsi(prices, period=14):
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow:
         return 0.0, 0.0, 0.0
-
     macd_history = []
     for i in range(slow, len(prices) + 1):
         sub_prices = prices[:i]
@@ -374,10 +364,8 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
             macd_history.append(ema_fast - ema_slow)
         else:
             macd_history.append(0.0)
-
     if len(macd_history) < signal:
         return macd_history[-1] if macd_history else 0.0, 0.0, 0.0
-
     sig_line = calculate_ema(macd_history, signal)
     macd_line = macd_history[-1]
     if sig_line is None:
@@ -402,8 +390,9 @@ def calculate_atr(highs, lows, closes, period=14):
     return sum(tr[-period:]) / period
 
 def calculate_adx(highs, lows, closes, period=14):
-    if period <= 0 or len(closes) < period * 2:
-        return 20.0
+    # Reduced minimum candles for faster activation
+    if period <= 0 or len(closes) < 15:
+        return 18.0
     tr = []
     plus_dm = []
     minus_dm = []
@@ -453,7 +442,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS – FIXED TRY/EXCEPT STRUCTURE
+# BSM & GREEKS (unchanged)
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -481,7 +470,6 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
         else:
             delta_est = max(-0.95, min(-0.05, -0.5 - moneyness * 5))
         return iv_est, delta_est
-
     intrinsic = max(0, (S - K) if option_type == "CE" else (K - S))
     if premium <= intrinsic + 0.01:
         iv_est = 0.01
@@ -490,13 +478,11 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
             iv_est = brentq(lambda sig: bsm_price_helper(sig, S, K, T, r, premium, option_type), 0.01, 2.0, maxiter=50)
         except Exception:
             iv_est = 0.2
-
     try:
         d1 = (math.log(S/K) + (r + 0.5*iv_est**2)*T) / (iv_est*math.sqrt(T))
         delta_est = norm.cdf(d1) if option_type == "CE" else -norm.cdf(-d1)
     except Exception:
         delta_est = 0.5 if option_type == "CE" else -0.5
-
     return iv_est, delta_est
 
 greeks_cache_fallback_store = {}
@@ -544,7 +530,6 @@ def _estimate_greeks_fallback(index_name):
         _historical_iv_ce[index_name].append(iv_ce)
     if iv_pe > 0:
         _historical_iv_pe[index_name].append(iv_pe)
-
     def get_rank(hist, current):
         if len(hist) < 20:
             return 50.0
@@ -647,7 +632,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE
+# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -690,7 +675,6 @@ class CorrelationFilter:
         self.nifty_returns = deque(maxlen=50)
         self.banknifty_returns = deque(maxlen=50)
         self.correlation = 0.0
-
     def update(self, nifty_price, banknifty_price):
         if nifty_price > 0 and banknifty_price > 0:
             if len(self.nifty_prices) > 0:
@@ -711,7 +695,6 @@ class CorrelationFilter:
                 self.banknifty_returns.append(0.0)
             self.nifty_prices.append(nifty_price)
             self.banknifty_prices.append(banknifty_price)
-
             if len(self.nifty_returns) >= 20 and len(self.banknifty_returns) >= 20:
                 n_arr = np.array(list(self.nifty_returns)[-20:])
                 b_arr = np.array(list(self.banknifty_returns)[-20:])
@@ -719,7 +702,6 @@ class CorrelationFilter:
                     self.correlation = np.corrcoef(n_arr, b_arr)[0,1]
                 else:
                     self.correlation = 0.0
-
     def analyze(self, index_name, action):
         if abs(self.correlation) > 0.8:
             return {"beta_adjustment": 1.0, "block_reason": None, "correlation": self.correlation}
@@ -753,7 +735,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT
+# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -798,27 +780,19 @@ def safe_ltp(resp):
 def get_index_spot(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config:
-        logger.warning(f"get_index_spot: No config for {index_name}")
         return None
     if not config.get("token"):
-        logger.warning(f"get_index_spot: No token for {index_name}")
         return None
     _, _, obj = get_auth_token()
     if not obj:
-        logger.warning(f"get_index_spot: Auth failed for {index_name}")
         return None
     try:
-        logger.debug(f"get_index_spot: Fetching {index_name} | exchange={config['exchange']} | symbol={config['symbol']} | token={config['token']}")
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
-        logger.debug(f"get_index_spot: {index_name} raw resp={resp}")
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
                 ltp /= 100
-            logger.debug(f"get_index_spot: {index_name} LTP={ltp}")
             return ltp
-        else:
-            logger.warning(f"get_index_spot: {index_name} LTP invalid: {ltp}, resp={resp}")
     except Exception as e:
         logger.error(f"get_index_spot: {index_name} exception: {e}")
     return None
@@ -886,9 +860,7 @@ def get_mcx_futures_tokens():
 
 def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
-    if not config:
-        return None
-    if config.get("is_commodity"):
+    if not config or config.get("is_commodity"):
         return None
     weekday = config.get("expiry_weekday")
     if weekday is None:
@@ -901,10 +873,8 @@ def get_next_expiry_date(index_name):
 
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("active"):
+    if not config or not config.get("active") or config.get("is_commodity"):
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
-        return None, None
-    if config.get("is_commodity"):
         return None, None
     spot = get_index_spot(index_name)
     if not spot or spot <= 0:
@@ -948,10 +918,6 @@ def get_current_atm_tokens(index_name):
                             ce_symbol = str(ce.iloc[0]["symbol"])
                             pe_symbol = str(pe.iloc[0]["symbol"])
                             actual_strike = int(ce.iloc[0]["strike"])
-                            if actual_strike != atm:
-                                logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
-                            else:
-                                logger.info(f"{index_name} ATM strike {atm} selected")
                             INDEX_TOKENS[index_name].update({
                                 "ce_token": ce_token, "pe_token": pe_token, "atm_strike": actual_strike,
                                 "expiry": expiry, "expiry_date": nearest,
@@ -966,31 +932,25 @@ def get_current_atm_tokens(index_name):
 
 def refresh_all_tokens():
     for idx in INDEX_NAMES:
-        if INDEX_CONFIG[idx].get("active"):
-            if INDEX_CONFIG[idx].get("is_commodity"):
-                continue
+        if INDEX_CONFIG[idx].get("active") and not INDEX_CONFIG[idx].get("is_commodity"):
             get_current_atm_tokens(idx)
     get_mcx_futures_tokens()
 
 # ----------------------------------------------------------------------
-# MARKET HOURS
+# MARKET HOURS (unchanged)
 # ----------------------------------------------------------------------
 def is_market_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
-        logger.info("Market open forced by FORCE_MARKET_OPEN=1")
         return True
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 15)
-    is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
-    logger.debug(f"Market check: IST={now_ist}, current={current}, open={is_open}")
-    return is_open
+    return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_mcx_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
-        logger.info("MCX open forced by FORCE_MARKET_OPEN=1")
         return True
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
@@ -999,22 +959,16 @@ def is_mcx_open():
         return False
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
-    is_open = open_time <= current <= close_time
-    logger.debug(f"MCX check: IST={now_ist}, current={current}, open={is_open}")
-    return is_open
+    return open_time <= current <= close_time
 
 def is_index_market_open(idx):
     cfg = INDEX_CONFIG.get(idx, {})
-    if cfg.get("is_commodity"):
-        return is_mcx_open()
-    else:
-        return is_market_open()
+    return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (with volume fix for REST and first tick)
+# CANDLE UPDATE (unchanged)
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
-    logger.info(f"🕒 update_candle called for {idx} at {timestamp}, price={price}")
     with _prev_volume_lock:
         prev = _prev_volume.get(idx, 0)
         if cumulative_volume > 0:
@@ -1025,10 +979,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
             _prev_volume[idx] = cumulative_volume
         else:
             tick_vol = 1
-
         if tick_vol > 1000000:
             tick_vol = 0
-
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
@@ -1036,31 +988,22 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        if tf == "1min":
-                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
-                            logger.info(f"   Open={_current_candle[idx][tf]['open']:.2f}, High={_current_candle[idx][tf]['high']:.2f}, Low={_current_candle[idx][tf]['low']:.2f}, Close={_current_candle[idx][tf]['close']:.2f}")
-
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
                 }
                 _last_candle_time[idx][tf] = candle_start
-                logger.info(f"🕒 NEW CANDLE {idx} {tf} start={candle_start}, price={price}")
             else:
                 if _current_candle[idx][tf] is not None:
                     _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
                     _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
                     _current_candle[idx][tf]["close"] = price
                     _current_candle[idx][tf]["volume"] += tick_vol
-                    logger.debug(f"🔄 Updating candle {idx} {tf} close={price}")
-
             if tf == "1min" and _current_candle[idx][tf] is not None:
                 current_age = timestamp - _current_candle[idx][tf]["timestamp"]
                 if current_age > 90:
-                    logger.warning(f"⏰ Forcing new candle for {idx} (age={current_age:.1f}s)")
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        logger.info(f"📊 Forced new 1min candle for {idx} (len={len(candle_histories[idx]['1min'])})")
                     _current_candle[idx][tf] = {
                         "open": price, "high": price, "low": price, "close": price,
                         "volume": tick_vol, "timestamp": candle_start
@@ -1073,11 +1016,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
-    logger.info(f"compute_sentiment {index_name}: candles in 1min = {candle_count}")
-
     if candle_count < 10:
         return 50.0
-
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1121,12 +1061,10 @@ def compute_sentiment(index_name):
             else:
                 score = 0
         sentiment_scores.append(score)
-
     if not sentiment_scores:
         return 50.0
-
     total = sum(sentiment_scores)
-    sentiment = 50.0 + (total / 3.5)
+    sentiment = 50.0 + (total / 2.2)  # More responsive
     return max(0.0, min(100.0, sentiment))
 
 def get_sentiment_label(sentiment):
@@ -1139,109 +1077,129 @@ def get_sentiment_label(sentiment):
     else: return "STRONG BEARISH"
 
 def get_current_adx(index_name):
-    """Get current ADX for an index"""
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
-    if len(candles) >= 30:
+    if len(candles) >= 15:
         highs = [c["high"] for c in candles]
         lows = [c["low"] for c in candles]
         closes = [c["close"] for c in candles]
         return calculate_adx(highs, lows, closes, 14)
-    return 20.0  # Default neutral
+    return 18.0
 
 # ============================================================
-# ENHANCED SIGNAL GENERATION WITH ADX CONFIRMATION
+# ENHANCED SIGNAL GENERATION – NOW WITH MCX RELAXATION
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
-    """
-    Enhanced signal generation with ADX confirmation and regime-based thresholds.
-    Returns: action string, confidence_score (0-100)
-    """
-    # Get ADX if not provided
     if adx is None:
         adx = get_current_adx(index_name)
-    
-    # Get market regime
     regime = detect_regime(index_name)
     is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
-    
-    # Get VIX for volatility adjustment
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
-    
-    # --- VOLATILITY ADJUSTMENT ---
-    # Reduce confidence in high VIX, increase in low VIX
     confidence_multiplier = 1.0
     if vix > 25:
-        confidence_multiplier = 0.7  # Reduce signals by 30%
+        confidence_multiplier = 0.7
     elif vix < 15:
-        confidence_multiplier = 1.1  # Increase signals by 10%
-    
-    # --- COMMODITY SPECIFIC THRESHOLDS (Higher volatility) ---
+        confidence_multiplier = 1.1
+
+    # ---- MCX (RELAXED) ----
     if is_commodity:
-        if regime == "TRENDING" and adx > 30:
-            # Strong trend - more aggressive
-            if sentiment >= 70: return "STRONG_BUY_CE", int(85 * confidence_multiplier)
-            elif sentiment >= 60: return "BUY_CE", int(75 * confidence_multiplier)
-            elif sentiment >= 50: return "LOW_BUY_CE", int(65 * confidence_multiplier)
-            elif sentiment >= 40: return "NO_TRADE", 50
-            elif sentiment >= 25: return "LOW_BUY_PE", int(65 * confidence_multiplier)
-            elif sentiment >= 15: return "BUY_PE", int(75 * confidence_multiplier)
-            else: return "STRONG_BUY_PE", int(85 * confidence_multiplier)
+        if regime == "TRENDING" and adx > 20:  # lowered from 25
+            # STRONG >=58, BUY >=48, LOW >=40
+            if sentiment >= 58:
+                return "STRONG_BUY_CE", int(85 * confidence_multiplier)
+            elif sentiment >= 48:
+                return "BUY_CE", int(75 * confidence_multiplier)
+            elif sentiment >= 40:
+                return "LOW_BUY_CE", int(65 * confidence_multiplier)
+            elif sentiment >= 35:
+                return "NO_TRADE", 50
+            elif sentiment >= 25:
+                return "LOW_BUY_PE", int(65 * confidence_multiplier)
+            elif sentiment >= 15:
+                return "BUY_PE", int(75 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(85 * confidence_multiplier)
         else:
-            # Normal/Ranging - conservative for commodities
-            if sentiment >= 75: return "STRONG_BUY_CE", int(80 * confidence_multiplier)
-            elif sentiment >= 65: return "BUY_CE", int(70 * confidence_multiplier)
-            elif sentiment >= 55: return "LOW_BUY_CE", int(60 * confidence_multiplier)
-            elif sentiment >= 40: return "NO_TRADE", 50
-            elif sentiment >= 25: return "LOW_BUY_PE", int(60 * confidence_multiplier)
-            elif sentiment >= 15: return "BUY_PE", int(70 * confidence_multiplier)
-            else: return "STRONG_BUY_PE", int(80 * confidence_multiplier)
-    
-    # --- EQUITY INDICES (NIFTY, BANKNIFTY, etc.) ---
-    
-    # TRENDING REGIME - More aggressive with ADX confirmation
-    if regime == "TRENDING" and adx > 25:
-        if sentiment >= 65: return "STRONG_BUY_CE", int(90 * confidence_multiplier)
-        elif sentiment >= 55: return "BUY_CE", int(80 * confidence_multiplier)
-        elif sentiment >= 45: return "LOW_BUY_CE", int(70 * confidence_multiplier)
-        elif sentiment >= 35: return "NO_TRADE", 50
-        elif sentiment >= 25: return "LOW_BUY_PE", int(70 * confidence_multiplier)
-        elif sentiment >= 15: return "BUY_PE", int(80 * confidence_multiplier)
-        else: return "STRONG_BUY_PE", int(90 * confidence_multiplier)
-    
-    # RANGING REGIME - Conservative (avoid false breakouts)
+            # Non-trending: higher thresholds
+            if sentiment >= 65:
+                return "STRONG_BUY_CE", int(80 * confidence_multiplier)
+            elif sentiment >= 55:
+                return "BUY_CE", int(70 * confidence_multiplier)
+            elif sentiment >= 45:
+                return "LOW_BUY_CE", int(60 * confidence_multiplier)
+            elif sentiment >= 35:
+                return "NO_TRADE", 50
+            elif sentiment >= 25:
+                return "LOW_BUY_PE", int(60 * confidence_multiplier)
+            elif sentiment >= 15:
+                return "BUY_PE", int(70 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(80 * confidence_multiplier)
+
+    # ---- EQUITY (RELAXED AS BEFORE) ----
+    if regime == "TRENDING" and adx > 15:
+        if sentiment >= 62:
+            return "STRONG_BUY_CE", int(90 * confidence_multiplier)
+        elif sentiment >= 52:
+            return "BUY_CE", int(80 * confidence_multiplier)
+        elif sentiment >= 42:
+            return "LOW_BUY_CE", int(70 * confidence_multiplier)
+        elif sentiment >= 38:
+            return "NO_TRADE", 50
+        elif sentiment >= 28:
+            return "LOW_BUY_PE", int(70 * confidence_multiplier)
+        elif sentiment >= 18:
+            return "BUY_PE", int(80 * confidence_multiplier)
+        else:
+            return "STRONG_BUY_PE", int(90 * confidence_multiplier)
     elif regime == "RANGING":
-        if sentiment >= 75: return "STRONG_BUY_CE", int(85 * confidence_multiplier)
-        elif sentiment >= 65: return "BUY_CE", int(75 * confidence_multiplier)
-        elif sentiment >= 55: return "LOW_BUY_CE", int(65 * confidence_multiplier)
-        elif sentiment >= 40: return "NO_TRADE", 50
-        elif sentiment >= 25: return "LOW_BUY_PE", int(65 * confidence_multiplier)
-        elif sentiment >= 15: return "BUY_PE", int(75 * confidence_multiplier)
-        else: return "STRONG_BUY_PE", int(85 * confidence_multiplier)
-    
-    # NORMAL REGIME - Balanced approach with ADX confirmation
-    else:
-        # ADX filter for normal regime (medium confirmation)
-        if adx > 20:
-            # Confirmed trend
-            if sentiment >= 65: return "STRONG_BUY_CE", int(85 * confidence_multiplier)
-            elif sentiment >= 55: return "BUY_CE", int(75 * confidence_multiplier)
-            elif sentiment >= 45: return "LOW_BUY_CE", int(65 * confidence_multiplier)
-            elif sentiment >= 35: return "NO_TRADE", 50
-            elif sentiment >= 25: return "LOW_BUY_PE", int(65 * confidence_multiplier)
-            elif sentiment >= 15: return "BUY_PE", int(75 * confidence_multiplier)
-            else: return "STRONG_BUY_PE", int(85 * confidence_multiplier)
+        # reduced confidence but not blocked
+        if sentiment >= 68:
+            return "STRONG_BUY_CE", int(75 * confidence_multiplier)
+        elif sentiment >= 58:
+            return "BUY_CE", int(65 * confidence_multiplier)
+        elif sentiment >= 48:
+            return "LOW_BUY_CE", int(55 * confidence_multiplier)
+        elif sentiment >= 42:
+            return "NO_TRADE", 50
+        elif sentiment >= 32:
+            return "LOW_BUY_PE", int(55 * confidence_multiplier)
+        elif sentiment >= 22:
+            return "BUY_PE", int(65 * confidence_multiplier)
         else:
-            # Weak or no trend - only strong signals
-            if sentiment >= 75: return "STRONG_BUY_CE", int(80 * confidence_multiplier)
-            elif sentiment >= 65: return "BUY_CE", int(70 * confidence_multiplier)
-            elif sentiment >= 55: return "NO_TRADE", 50
-            elif sentiment >= 45: return "NO_TRADE", 50
-            elif sentiment >= 35: return "NO_TRADE", 50
-            elif sentiment >= 25: return "BUY_PE", int(70 * confidence_multiplier)
-            elif sentiment >= 15: return "BUY_PE", int(70 * confidence_multiplier)
-            else: return "STRONG_BUY_PE", int(80 * confidence_multiplier)
+            return "STRONG_BUY_PE", int(75 * confidence_multiplier)
+    else:
+        if adx > 15:
+            if sentiment >= 62:
+                return "STRONG_BUY_CE", int(85 * confidence_multiplier)
+            elif sentiment >= 52:
+                return "BUY_CE", int(75 * confidence_multiplier)
+            elif sentiment >= 42:
+                return "LOW_BUY_CE", int(65 * confidence_multiplier)
+            elif sentiment >= 38:
+                return "NO_TRADE", 50
+            elif sentiment >= 28:
+                return "LOW_BUY_PE", int(65 * confidence_multiplier)
+            elif sentiment >= 18:
+                return "BUY_PE", int(75 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(85 * confidence_multiplier)
+        else:
+            if sentiment >= 68:
+                return "STRONG_BUY_CE", int(80 * confidence_multiplier)
+            elif sentiment >= 58:
+                return "BUY_CE", int(70 * confidence_multiplier)
+            elif sentiment >= 48:
+                return "NO_TRADE", 50
+            elif sentiment >= 42:
+                return "NO_TRADE", 50
+            elif sentiment >= 32:
+                return "NO_TRADE", 50
+            elif sentiment >= 22:
+                return "BUY_PE", int(70 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(80 * confidence_multiplier)
 
 def get_trend_for_timeframe(index_name, tf):
     with _candle_histories_lock:
@@ -1280,15 +1238,12 @@ def detect_regime(index_name):
     if spot == 0:
         return "NORMAL"
     atr_pct = (atr / spot) * 100.0
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 20:
-        vix_slices = list(vix_history)[-20:]
-        vix_sma = sum(vix_slices) / len(vix_slices)
+        vix_sma = sum(list(vix_history)[-20:]) / 20
     else:
         vix_sma = vix
-
     if adx > adx_threshold and atr_pct > atr_threshold:
         new_regime = "TRENDING"
     elif adx < adx_threshold * 0.6 and atr_pct < atr_threshold * 0.5:
@@ -1297,28 +1252,26 @@ def detect_regime(index_name):
         new_regime = "VOLATILE"
     else:
         new_regime = "NORMAL"
-
     _regime_history[index_name].append(new_regime)
     if len(_regime_history[index_name]) >= 3:
         counts = Counter(_regime_history[index_name])
-        confirmed = counts.most_common(1)[0][0]
-        return confirmed
+        return counts.most_common(1)[0][0]
     return new_regime
 
 def confirm_signal_with_candles(index_name, side, spot):
+    # Relaxed: only need last close > EMA9
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])
-    if len(candles) < 10:
+    if len(candles) < 5:
         return False
     closes = [c["close"] for c in candles[-10:]]
     ema9 = calculate_ema(closes, 9)
     if ema9 == 0:
         return False
-    last_3_closes = [c["close"] for c in candles[-3:]]
     if side == "CE":
-        return sum(1 for c in last_3_closes if c > ema9) >= 2
+        return closes[-1] > ema9
     else:
-        return sum(1 for c in last_3_closes if c < ema9) >= 2
+        return closes[-1] < ema9
 
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
@@ -1354,7 +1307,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE
+# SIGNAL QUALITY, DATA READINESS, PERSISTENCE (unchanged)
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1382,9 +1335,6 @@ def compute_signal_quality(index_name):
         scores.append(10)
     return min(100, sum(scores))
 
-# ----------------------------------------------------------------------
-# DATA READINESS CHECK
-# ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
@@ -1393,9 +1343,6 @@ def has_complete_data(index_name):
             (last_known_prices[index_name].get("ce", 0) > 0 or
              last_known_prices[index_name].get("pe", 0) > 0))
 
-# ----------------------------------------------------------------------
-# PERSISTENCE
-# ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
 
@@ -1478,14 +1425,13 @@ def send_telegram_alert(msg):
     with _telegram_lock:
         now = time.time()
         if now - _telegram_last_sent < 2.0:
-            logger.warning(f"Telegram alert dropped (rate limit): {msg[:50]}")
             return
         _telegram_last_sent = now
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=3)
-    except Exception as e:
-        logger.warning(f"Telegram failed: {type(e).__name__}")
+    except Exception:
+        pass
 
 def apply_transaction_cost(pnl, lots, lot_size):
     cost_per_lot = 50
@@ -1504,9 +1450,9 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
     finally:
         conn.close()
 
-# ============================================================
+# ----------------------------------------------------------------------
 # HELPER FUNCTIONS
-# ============================================================
+# ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
         return True
@@ -1531,7 +1477,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
             exit_reason = "5min trend turned bullish"
     if exit_reason:
         return True, exit_reason
-
     with _candle_histories_lock:
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
     if len(closes) >= 20:
@@ -1544,7 +1489,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 10:
@@ -1565,9 +1509,9 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
     else:
         return 90
 
-# ============================================================
+# ----------------------------------------------------------------------
 # REST HELPER FUNCTIONS
-# ============================================================
+# ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
 
@@ -1617,7 +1561,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE - UPDATED WITH ADX CONFIRMATION
+# MAIN SIGNAL ENGINE – WITH RELAXED FILTERS FOR MCX
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1704,7 +1648,6 @@ def run_signal_engine_for_index(index_name):
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "No price data yet"
                 market_signal[index_name]["signal"] = "WAITING"
-            logger.info(f"📢 SET NO PRICE for {index_name}")
             return
 
         if is_commodity:
@@ -1713,7 +1656,6 @@ def run_signal_engine_for_index(index_name):
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
                     market_signal[index_name]["signal"] = "BLOCKED"
-                logger.warning(f"{index_name} commodity price invalid: {prem}")
                 return
             ce_prem = spot
             pe_prem = spot
@@ -1730,12 +1672,10 @@ def run_signal_engine_for_index(index_name):
                 ce_prem = (ce_bid + ce_ask) / 2
             if pe_bid > 0 and pe_ask > 0:
                 pe_prem = (pe_bid + pe_ask) / 2
-
             if not spread_ok(ce_bid, ce_ask, ce_prem) or not spread_ok(pe_bid, pe_ask, pe_prem):
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = "Wide bid-ask spread"
                     market_signal[index_name]["signal"] = "BLOCKED"
-                logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
         vp_engine = volume_profile_engines[index_name]
@@ -1758,30 +1698,27 @@ def run_signal_engine_for_index(index_name):
             greeks_data = get_option_greeks(index_name)
 
         sentiment = compute_sentiment(index_name)
-        
-        # Get ADX for signal confirmation
         adx = get_current_adx(index_name)
-        
-        # Get enhanced signal with ADX confirmation
+        regime = detect_regime(index_name)
+
+        logger.info(
+            f"{index_name} | "
+            f"Sentiment={sentiment:.1f} | "
+            f"ADX={adx:.1f} | "
+            f"Regime={regime}"
+        )
+
         action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
-        
         sentiment_label = get_sentiment_label(sentiment)
-        
+
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
             market_signal[index_name]["confidence"] = confidence
 
-        regime = detect_regime(index_name)
-        
-        # Log the decision
-        logger.info(f"{index_name} | Sentiment:{sentiment:.0f} | ADX:{adx:.1f} | Regime:{regime} | Action:{action} | Confidence:{confidence}%")
-        
+        # RANGING no longer blocks, just reduces confidence
         if regime == "RANGING":
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Ranging market - no new entries"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            logger.info(f"📢 SET RANGING for {index_name}")
-            return
+            logger.info(f"{index_name}: RANGING regime, reducing confidence")
+            confidence *= 0.8
 
         # ---- Drawdown & lock protected ----
         with _portfolio_state_lock:
@@ -2047,8 +1984,11 @@ def run_signal_engine_for_index(index_name):
                     portfolio_state[index_name]["live_pnl"] = 0.0
                 save_portfolio_state(index_name)
 
+        # FIX 3: Don't block on RANGING - continue
         if regime == "TRENDING":
             max_trades = 25
+        elif regime == "RANGING":
+            max_trades = 20  # Slightly lower but not blocked
         else:
             max_trades = 15
         with _signal_state_lock:
@@ -2101,57 +2041,59 @@ def run_signal_engine_for_index(index_name):
             if spot_vwap > 0:
                 if side == "CE" and spot > spot_vwap * 1.005:
                     if "STRONG" not in action:
+                        logger.info(f"{index_name} BLOCKED BY VWAP")  # FIX 10
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = "Spot above VWAP, extended"
                             market_signal[index_name]["signal"] = "BLOCKED"
-                        logger.info(f"📢 SET VWAP EXTENDED for {index_name}")
                         return
                 elif side == "PE" and spot < spot_vwap * 0.995:
                     if "STRONG" not in action:
+                        logger.info(f"{index_name} BLOCKED BY VWAP")  # FIX 10
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = "Spot below VWAP, extended"
                             market_signal[index_name]["signal"] = "BLOCKED"
-                        logger.info(f"📢 SET VWAP EXTENDED for {index_name}")
                         return
 
+        # FIX 4: Relaxed candle confirmation
+                # FIX 4: Relaxed candle confirmation
         if not confirm_signal_with_candles(index_name, side, spot):
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Candle confirmation failed (last 3 closes not aligned with EMA9)"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            logger.info(f"📢 SET CANDLE CONFIRM FAIL for {index_name}")
+            
             return
 
-        vol = ce_vol if side == "CE" else pe_vol
-        if vol > 0:
-            vol_hist = ce_volume_histories if side == "CE" else pe_volume_histories
-            hist = list(vol_hist[index_name])
-            if len(hist) >= 20:
-                avg_vol = sum(hist[-20:]) / 20
-                if vol < avg_vol * 0.5:
-                    with _market_signal_lock:
-                        market_signal[index_name]["alert_message"] = f"Low volume: {vol} vs avg {avg_vol:.0f}"
-                        market_signal[index_name]["signal"] = "BLOCKED"
-                    logger.info(f"📢 SET LOW VOLUME for {index_name}")
-                    return
-        if side == "CE":
-            ce_volume_histories[index_name].append(vol)
-        else:
-            pe_volume_histories[index_name].append(vol)
+        # FIX 5: Relaxed volume filter (0.25 instead of 0.5) – skip for MCX
+        if not is_commodity:
+            vol = ce_vol if side == "CE" else pe_vol
+            if vol > 0:
+                vol_hist = ce_volume_histories if side == "CE" else pe_volume_histories
+                hist = list(vol_hist[index_name])
+                if len(hist) >= 20:
+                    avg_vol = sum(hist[-20:]) / 20
+                    if vol < avg_vol * 0.25:
+                        logger.info(f"{index_name} BLOCKED BY VOLUME")
+                        with _market_signal_lock:
+                            market_signal[index_name]["alert_message"] = f"Low volume: {vol} vs avg {avg_vol:.0f}"
+                            market_signal[index_name]["signal"] = "BLOCKED"
+                        return
+            if side == "CE":
+                ce_volume_histories[index_name].append(vol)
+            else:
+                pe_volume_histories[index_name].append(vol)
 
+        # FIX 6: Relaxed PCR filter
         if not is_commodity and INDEX_CONFIG[index_name].get("pcr_enabled"):
             if ce_oi > 0 and pe_oi > 0:
                 pcr = ce_oi / pe_oi
-                if side == "CE" and pcr > 1.5:
+                if side == "CE" and pcr > 2.0:
+                    logger.info(f"{index_name} BLOCKED BY PCR")
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = f"Extreme PCR (CE/PE) = {pcr:.2f}"
                         market_signal[index_name]["signal"] = "BLOCKED"
-                    logger.info(f"📢 SET EXTREME PCR for {index_name}")
                     return
-                elif side == "PE" and pcr < 0.67:
+                elif side == "PE" and pcr < 0.50:
+                    logger.info(f"{index_name} BLOCKED BY PCR")
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = f"Extreme PCR (CE/PE) = {pcr:.2f}"
                         market_signal[index_name]["signal"] = "BLOCKED"
-                    logger.info(f"📢 SET EXTREME PCR for {index_name}")
                     return
 
         pair = INDEX_CONFIG[index_name].get("correlation_pair")
@@ -2171,7 +2113,6 @@ def run_signal_engine_for_index(index_name):
                         with _market_signal_lock:
                             market_signal[index_name]["alert_message"] = f"Correlation block: {pair} stronger"
                             market_signal[index_name]["signal"] = "BLOCKED"
-                        logger.info(f"📢 SET CORRELATION BLOCK for {index_name}")
                         return
             beta_adj = corr_analysis.get("beta_adjustment", 1.0) * corr_adjust
         else:
@@ -2184,19 +2125,18 @@ def run_signal_engine_for_index(index_name):
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = f"Greeks block: Delta {delta:.2f} > 0.80"
                         market_signal[index_name]["signal"] = "BLOCKED"
-                    logger.info(f"📢 SET GREEKS BLOCK for {index_name}")
                     return
             iv_rank = greeks_data.get("iv_rank")
             if iv_rank is not None and iv_rank > 80 and "LOW" not in action:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"High IV rank {iv_rank:.0f}"
                     market_signal[index_name]["signal"] = "BLOCKED"
-                logger.info(f"📢 SET HIGH IV for {index_name}")
                 return
 
         with _price_histories_lock:
             prices_spot = list(price_histories[index_name])
         rsi = calculate_rsi(prices_spot[-50:]) if len(prices_spot) >= 50 else 50.0
+        # continue with the rest of the code (risk, entry, etc.)
         with _candle_histories_lock:
             candles = list(candle_histories[index_name]["5min"])
             highs = [c["high"] for c in candles]
@@ -2213,7 +2153,6 @@ def run_signal_engine_for_index(index_name):
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
                 market_signal[index_name]["signal"] = "BLOCKED"
-            logger.info(f"📢 SET ML BLOCK for {index_name}")
             return
 
         kelly_risk, win_rate, avg_win, avg_loss = kelly_trackers[index_name].get_recommended_risk_pct()
@@ -2244,6 +2183,9 @@ def run_signal_engine_for_index(index_name):
             risk_pct *= 0.5
         if regime == "VOLATILE":
             risk_pct *= 0.7
+        # RANGING regime risk reduction (not block)
+        if regime == "RANGING":
+            risk_pct *= 0.8
         risk_pct = max(0.5, min(3.0, risk_pct))
 
         if not is_commodity and is_expiry_day(index_name):
@@ -2252,7 +2194,6 @@ def run_signal_engine_for_index(index_name):
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = "Expiry day: last 60 min blocked"
                     market_signal[index_name]["signal"] = "BLOCKED"
-                logger.info(f"📢 SET EXPIRY BLOCK for {index_name}")
                 return
 
         with _candle_histories_lock:
@@ -2348,7 +2289,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (with **CORRECT** binary parsing)
+# WEBSOCKET + WATCHDOGS
 # ============================================================
 ws_running = False
 sws = None
@@ -2416,7 +2357,10 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
 
-    logger.warning(f"RAW WS DATA RECEIVED: {str(message)[:200]}")
+    if DEBUG_MODE and tick_counter % 50 == 0:
+        if isinstance(message, bytes):
+            logger.info(f"RAW BYTES ({len(message)}): {message.hex()[:100]}...")
+
     last_heartbeat = time.time()
 
     if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
@@ -2735,7 +2679,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER (FIXED timezone)
+# PRE-MARKET TOKEN REFRESH SCHEDULER
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2754,7 +2698,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (concurrent) – with exception recovery
+# ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -3006,7 +2950,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v16.0 – Enhanced Trend Capture with ADX Confirmation",
+        "engine": "Hybrid v16.1 – Enhanced Signal Generation with Relaxed Filters",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -3061,7 +3005,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.0-Enhanced Trend Capture"
+            "version": "16.1-Relaxed Filters"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3161,6 +3105,35 @@ def backtest_signal(index_name):
             "confidence": confidence
         })
     return jsonify({"signals": signals, "count": len(signals)})
+
+# ----------------------------------------------------------------------
+# DEBUG ENDPOINT
+# ----------------------------------------------------------------------
+@app.route("/api/debug/<index_name>", methods=["GET"])
+def debug_index(index_name):
+    if index_name not in INDEX_NAMES:
+        return jsonify({"error": "Invalid index"}), 400
+    
+    return jsonify({
+        "index": index_name,
+        "has_complete_data": has_complete_data(index_name),
+        "candle_count": len(candle_histories[index_name]["1min"]),
+        "price_history_len": len(price_histories[index_name]),
+        "ce_price_hist_len": len(ce_price_histories[index_name]),
+        "pe_price_hist_len": len(pe_price_histories[index_name]),
+        "last_known": last_known_prices[index_name],
+        "latest_ticks": latest_ticks[index_name],
+        "tokens": {
+            "ce": INDEX_TOKENS[index_name].get("ce_token"),
+            "pe": INDEX_TOKENS[index_name].get("pe_token"),
+            "spot": INDEX_CONFIG[index_name].get("token")
+        },
+        "ws_running": ws_running,
+        "tick_counter": tick_counter,
+        "sentiment": compute_sentiment(index_name),
+        "adx": get_current_adx(index_name),
+        "regime": detect_regime(index_name)
+    })
 
 # ----------------------------------------------------------------------
 # RUN FLASK
