@@ -2061,20 +2061,18 @@ def run_signal_engine_for_index(index_name):
         # FIX 4: Relaxed candle confirmation
         def confirm_signal_with_candles(index_name, side, spot):
     # If we have fewer than 10 candles, don't block (allow signal)
-    with _candle_histories_lock:
-        candles = list(candle_histories[index_name]["1min"])
-    if len(candles) < 10:
-        return True   # Not enough data – let it pass
-
-    closes = [c["close"] for c in candles[-10:]]
-    ema9 = calculate_ema(closes, 9)
-    if ema9 == 0:
+            with _candle_histories_lock:
+            candles = list(candle_histories[index_name]["1min"])
+      if len(candles) < 10:
+            return True   # Not enough data – let it pass
+      closes = [c["close"] for c in candles[-10:]]
+      ema9 = calculate_ema(closes, 9)
+      if ema9 == 0:
         return True   # Fallback – don't block
-    if side == "CE":
-        return closes[-1] > ema9
-    else:
-        return closes[-1] < ema9
-
+      if side == "CE":
+          return closes[-1] > ema9
+      else:
+          return closes[-1] < ema9
         # FIX 5: Relaxed volume filter (0.25 instead of 0.5) – skip for MCX
         if not is_commodity:
             vol = ce_vol if side == "CE" else pe_vol
