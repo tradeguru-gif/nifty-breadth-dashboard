@@ -2224,23 +2224,45 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity and is_expiry_day(index_name):
             sl_pct *= 0.7
             target_mult *= 0.8
-        sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
-        target = prem + atr * target_mult
+                # ---- Calculate Stop Loss and Target ----
+        if side == "CE":
+            sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
+            target = prem + atr * target_mult
+        else:  # PE
+            sl = min(prem * (1 + sl_pct), prem + atr * 1.5)
+            target = prem - atr * target_mult
 
-        stop_dist = prem - sl
-        if stop_dist <= 0:
-            # Fallback: set a minimum stop distance
-            if is_commodity:
-                sl = prem * 0.995   # 0.5% for commodities
+        # Fallback if ATR is zero (too few candles)
+        if atr <= 0:
+            atr = prem * 0.005 if is_commodity else prem * 0.01
+            logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
+            # Recalculate with fallback ATR
+            if side == "CE":
+                sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
+                target = prem + atr * target_mult
             else:
-                sl = prem * 0.99    # 1% for equity
-            stop_dist = prem - sl
-            if stop_dist <= 0:
-                # Extreme fallback: 0.1 point
-                sl = prem - 0.1
-                stop_dist = 0.1
-            logger.warning(f"Invalid stop distance fixed: prem={prem}, sl={sl}, stop_dist={stop_dist}")
+                sl = min(prem * (1 + sl_pct), prem + atr * 1.5)
+                target = prem - atr * target_mult
 
+        # Ensure target is at least a small distance from entry
+        min_target_distance = 0.05 if is_commodity else 0.5
+        if side == "CE" and target <= prem + min_target_distance:
+            target = prem + min_target_distance
+            logger.info(f"{index_name}: adjusted target up to {target:.2f}")
+        elif side == "PE" and target >= prem - min_target_distance:
+            target = prem - min_target_distance
+            logger.info(f"{index_name}: adjusted target down to {target:.2f}")
+
+        stop_dist = prem - sl if side == "CE" else sl - prem
+        if stop_dist <= 0:
+            # Fallback to a fixed minimum distance
+            if is_commodity:
+                stop_dist = 0.05
+                sl = prem - stop_dist if side == "CE" else prem + stop_dist
+            else:
+                stop_dist = 0.5
+                sl = prem - stop_dist if side == "CE" else prem + stop_dist
+            logger.warning(f"{index_name}: invalid stop distance, set to {stop_dist:.2f}")
         risk_amount = portfolio_state[index_name]["equity"] * (risk_pct / 100)
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
@@ -3170,7 +3192,13 @@ def debug_index(index_name):
         "adx": get_current_adx(index_name),
         "regime": detect_regime(index_name)
     })
-
+    
+    @app.route("/api/reset/<index_name>", methods=["POST"])
+    def reset_index(index_name):
+        if index_name not in INDEX_NAMES:
+            return jsonify({"error": "Invalid index"}), 400
+        reset_signal_state(index_name, time.time(), "MANUAL_RESET")
+        return jsonify({"status": "reset", "index": index_name})
 # ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
