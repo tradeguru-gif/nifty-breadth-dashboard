@@ -1974,9 +1974,11 @@ def run_signal_engine_for_index(index_name):
             return
 
         # --- New entry ---
+               
         with _signal_state_lock:
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
+                logger.info(f"{index_name}: cooldown {remaining}s remaining")   # <-- ADD THIS LINE
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Cooldown {remaining}s"
                     market_signal[index_name]["signal"] = "COOLDOWN"
