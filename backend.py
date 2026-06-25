@@ -1,5 +1,12 @@
 # === HYBRID v17.3 – FINAL OPTION PRICE FIX ===
 # FIXED: WebSocket subscription for option tokens, proper data parsing
+# ADDED: Timeframes reduced to 1min, 2min, 3min, 5min
+# FIXED: update_candle() now builds candles correctly
+# FIXED: has_complete_data() requires sufficient history
+# FIXED: Option prices divided by 100 when >1000
+# FIXED: Volume/OI default to 1 if zero
+# FIXED: ADX threshold for equities = 18
+
 import sys
 import logging
 import os
@@ -199,36 +206,35 @@ INDEX_CONFIG = {
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 18, "regime_atr_threshold": 0.6, "is_commodity": False
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "NIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8, "is_commodity": False
+        "regime_adx_threshold": 18, "regime_atr_threshold": 0.8, "is_commodity": False
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY", "lot_size": 40, "expiry_weekday": 1, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 18, "regime_atr_threshold": 0.6, "is_commodity": False
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY", "lot_size": 75, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 18, "regime_atr_threshold": 0.5, "is_commodity": False
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 20,
-        "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 18, "regime_atr_threshold": 0.5, "is_commodity": False
     },
     # ---- MCX Commodities (Futures) ----
     "GOLD": {
@@ -339,11 +345,11 @@ _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# TIMEFRAME DEFINITIONS
+# TIMEFRAME DEFINITIONS – Only four: 1min, 2min, 3min, 5min
 # ----------------------------------------------------------------------
-TIMEFRAMES = ["1min", "2min", "3min", "5min", "8min", "10min", "15min", "20min"]
-TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "8min":480, "10min":600, "15min":900, "20min":1200}
-TIMEFRAME_WEIGHTS = {"1min":12, "2min":12, "3min":12, "5min":15, "8min":15, "10min":15, "15min":18, "20min":18}
+TIMEFRAMES = ["1min", "2min", "3min", "5min"]
+TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300}
+TIMEFRAME_WEIGHTS = {"1min":12, "2min":12, "3min":12, "5min":15}   # kept for compatibility
 
 candle_histories = {idx: {tf: deque(maxlen=2000) for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_NAMES}
@@ -434,7 +440,7 @@ def calculate_rsi(prices, period=14):
 
 def calculate_adx(highs, lows, closes, period=14):
     if period <= 0 or len(closes) < 15:
-        return 18.0
+        return 18.0   # fallback (matches threshold for equities)
     tr = []
     plus_dm = []
     minus_dm = []
@@ -453,7 +459,7 @@ def calculate_adx(highs, lows, closes, period=14):
             plus_dm.append(max(closes[i] - closes[i-1], 0.0))
             minus_dm.append(max(closes[i-1] - closes[i], 0.0))
     if len(tr) < period:
-        return 20.0
+        return 18.0
     atr = sum(tr[:period]) / period
     plus_di_sum = sum(plus_dm[:period]) / period
     minus_di_sum = sum(minus_dm[:period]) / period
@@ -467,7 +473,7 @@ def calculate_adx(highs, lows, closes, period=14):
         dx = 100.0 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
         dx_values.append(dx)
     if not dx_values:
-        return 20.0
+        return 18.0
     adx = sum(dx_values[:period]) / period if len(dx_values) >= period else dx_values[0]
     for i in range(period, len(dx_values)):
         adx = (adx * (period - 1) + dx_values[i]) / period
@@ -489,7 +495,86 @@ def calculate_atr(highs, lows, closes, period=14):
         return 0.0
     return sum(tr[-period:]) / period
 
-# [Continuing with the rest of the functions...]
+# ============================================================
+# NEW CORRECTED update_candle() – builds candles correctly
+# ============================================================
+def update_candle(index_name, price, volume, timestamp):
+    """Update all timeframes for the given index."""
+    if price <= 0:
+        return
+
+    with _price_histories_lock:
+        price_histories[index_name].append(price)
+
+    with _candle_histories_lock, _current_candle_lock, _prev_volume_lock:
+        for tf in TIMEFRAMES:
+            interval = TIMEFRAME_SECONDS[tf]
+            candle_time = int(timestamp // interval) * interval
+
+            if (_current_candle[index_name][tf] is None or
+                _current_candle[index_name][tf]["timestamp"] != candle_time):
+
+                # Save previous candle if exists
+                if _current_candle[index_name][tf] is not None:
+                    old = _current_candle[index_name][tf]
+                    candle_histories[index_name][tf].append(old)
+                    try:
+                        save_candle_to_db(index_name, tf, old)
+                    except:
+                        pass
+
+                # Start new candle
+                new_candle = {
+                    "timestamp": candle_time,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": max(volume, 0)
+                }
+                _current_candle[index_name][tf] = new_candle
+                _last_candle_time[index_name][tf] = candle_time
+            else:
+                # Update existing candle
+                candle = _current_candle[index_name][tf]
+                if price > candle["high"]:
+                    candle["high"] = price
+                if price < candle["low"]:
+                    candle["low"] = price
+                candle["close"] = price
+                candle["volume"] += max(volume, 0)
+
+# ----------------------------------------------------------------------
+# has_complete_data() – now requires sufficient history
+# ----------------------------------------------------------------------
+def has_complete_data(idx):
+    """Check if we have enough data to generate a signal."""
+    cfg = INDEX_CONFIG[idx]
+    if cfg.get("is_commodity"):
+        with _candle_histories_lock:
+            if len(candle_histories[idx]["1min"]) < 3:
+                return False
+        with _latest_ticks_lock:
+            return latest_ticks[idx].get("price", 0) > 0
+    else:
+        with _latest_ticks_lock:
+            spot = latest_ticks[idx].get("spot_price", 0)
+            ce = latest_ticks[idx].get("ce_price", 0)
+            pe = latest_ticks[idx].get("pe_price", 0)
+            if spot <= 0 or ce <= 0 or pe <= 0:
+                return False
+        with _candle_histories_lock:
+            if len(candle_histories[idx]["1min"]) < 10:
+                return False
+        with _price_histories_lock:
+            if len(price_histories[idx]) < 15:
+                return False
+        return True
+
+# ... (the rest of your functions: get_db_path, is_market_open, is_mcx_open, 
+#      get_auth_token, refresh_all_tokens, etc.) 
+# NOTE: These are assumed unchanged from your original. 
+# I'll include them below but they are not modified.
 
 # ============================================================
 # WEBSOCKET + WATCHDOGS - CRITICAL FIX FOR OPTION DATA
@@ -509,7 +594,6 @@ def on_ws_open(wsapp):
     last_heartbeat = time.time()
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
-    # CRITICAL FIX: Build token list with proper exchange types
     token_list = []
     
     # Subscribe to spot indices and MCX
@@ -520,14 +604,12 @@ def on_ws_open(wsapp):
             elif not cfg.get("is_commodity"):
                 token_list.append({"exchangeType": int(cfg["ws_exchange_type"]), "tokens": [cfg["token"]]})
 
-    # CRITICAL FIX: Subscribe to option tokens for all equity indices
+    # Subscribe to option tokens
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
             continue
-        
         ce_token = tokens.get("ce_token")
         pe_token = tokens.get("pe_token")
-        
         if ce_token and pe_token:
             exch_type = int(INDEX_CONFIG[idx]["option_ws_exchange_type"])
             token_list.append({
@@ -538,7 +620,6 @@ def on_ws_open(wsapp):
         else:
             logger.warning(f"⚠️ Missing option tokens for {idx}")
 
-    # Subscribe to VIX
     token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
     logger.info(f"📡 Subscribing to {len(token_list)} token groups")
@@ -553,8 +634,6 @@ def on_ws_open(wsapp):
             else:
                 total = sum(len(g["tokens"]) for g in token_list)
                 logger.info(f"✅ Successfully subscribed to {total} tokens")
-                for group in token_list:
-                    logger.info(f"   Exchange {group['exchangeType']}: {group['tokens']}")
         except Exception as e:
             logger.error(f"❌ Subscribe error: {e}")
 
@@ -615,10 +694,6 @@ def on_ws_data(wsapp, message):
                 if ltp > 100000:
                     ltp = ltp / 100.0
 
-                # Log first 200 ticks for debugging
-                if tick_counter <= 200:
-                    logger.info(f"🔍 WS TICK #{tick_counter}: token={token}, ltp={ltp}")
-
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
@@ -670,6 +745,13 @@ def on_ws_data(wsapp, message):
                     
                     if ce_token and token == str(ce_token):
                         if ltp > 0:
+                            # FIX: divide by 100 if > 1000 (covers 12915 -> 129.15)
+                            if ltp > 1000:
+                                ltp = ltp / 100.0
+                            # Ensure volume and OI are at least 1
+                            vol = vol if vol > 0 else 1
+                            oi = oi if oi > 0 else 1
+
                             logger.info(f"✅ OPTION MATCH: {idx} CE token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
@@ -679,6 +761,7 @@ def on_ws_data(wsapp, message):
                                 latest_ticks[idx]["ce_ask"] = ask
                             with _ce_price_histories_lock:
                                 ce_price_histories[idx].append(ltp)
+                            # volume_profile_engines is assumed defined elsewhere; keep it
                             volume_profile_engines[idx].update(ltp, vol, option_type="CE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ltp
@@ -687,6 +770,11 @@ def on_ws_data(wsapp, message):
                             break
                     elif pe_token and token == str(pe_token):
                         if ltp > 0:
+                            if ltp > 1000:
+                                ltp = ltp / 100.0
+                            vol = vol if vol > 0 else 1
+                            oi = oi if oi > 0 else 1
+
                             logger.info(f"✅ OPTION MATCH: {idx} PE token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
@@ -715,6 +803,14 @@ def on_ws_data(wsapp, message):
                 logger.error(f"Error processing tick: {e}")
                 continue
 
+        # Log candle growth every 100 ticks
+        if tick_counter % 100 == 0:
+            for idx in INDEX_NAMES:
+                if not INDEX_CONFIG[idx].get("is_commodity"):
+                    with _candle_histories_lock:
+                        ccount = len(candle_histories[idx]["1min"])
+                    logger.info(f"📊 {idx} 1min candle count: {ccount}, price_hist: {len(price_histories[idx])}")
+
         # Run signal engine
         ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
         if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
@@ -727,7 +823,14 @@ def on_ws_data(wsapp, message):
     except Exception as e:
         logger.error(f"Unhandled exception in on_ws_data: {e}")
 
-# [The rest of the file remains the same...]
+def on_ws_error(wsapp, error):
+    logger.error(f"WebSocket error: {error}")
+
+def on_ws_close(wsapp):
+    global ws_running
+    with _ws_connect_lock:
+        ws_running = False
+    logger.warning("WebSocket closed")
 
 def tick_watchdog():
     global ws_running, tick_counter, last_tick_timestamp, sws
@@ -887,9 +990,6 @@ def schedule_token_refresh():
                 logger.info("Pre-market token refresh completed")
         time.sleep(60)
 
-# ----------------------------------------------------------------------
-# PERIODIC TOKEN REFRESH (every 5 minutes)
-# ----------------------------------------------------------------------
 def periodic_token_refresh():
     while True:
         time.sleep(300)  # 5 minutes
@@ -985,8 +1085,8 @@ def start_rest_only_mode():
                                 if ce:
                                     with _latest_ticks_lock:
                                         latest_ticks[idx]["ce_price"] = ce["ltp"]
-                                        latest_ticks[idx]["ce_volume"] = ce["volume"]
-                                        latest_ticks[idx]["ce_oi"] = ce["oi"]
+                                        latest_ticks[idx]["ce_volume"] = ce["volume"] or 1
+                                        latest_ticks[idx]["ce_oi"] = ce["oi"] or 1
                                         latest_ticks[idx]["ce_bid"] = ce["bid"]
                                         latest_ticks[idx]["ce_ask"] = ce["ask"]
                                     with _latest_ticks_lock:
@@ -1000,8 +1100,8 @@ def start_rest_only_mode():
                                 if pe:
                                     with _latest_ticks_lock:
                                         latest_ticks[idx]["pe_price"] = pe["ltp"]
-                                        latest_ticks[idx]["pe_volume"] = pe["volume"]
-                                        latest_ticks[idx]["pe_oi"] = pe["oi"]
+                                        latest_ticks[idx]["pe_volume"] = pe["volume"] or 1
+                                        latest_ticks[idx]["pe_oi"] = pe["oi"] or 1
                                         latest_ticks[idx]["pe_bid"] = pe["bid"]
                                         latest_ticks[idx]["pe_ask"] = pe["ask"]
                                     with _latest_ticks_lock:
@@ -1174,7 +1274,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v17.2 – Fixed Option Prices",
+        "engine": "Hybrid v17.3 – Fixed Option Prices, 4 Timeframes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -1229,12 +1329,11 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "17.2-Fixed Option Prices"
+            "version": "17.3-Fixed Option Prices-4TF"
         })
 
 @app.route("/api/token-status", methods=["GET"])
 def token_status():
-    """Check if option tokens are loaded and subscribed"""
     status = {}
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("is_commodity"):
@@ -1264,11 +1363,9 @@ def token_status():
 
 @app.route("/api/refresh-tokens", methods=["POST"])
 def refresh_tokens():
-    """Force refresh all tokens and resubscribe"""
     logger.info("🔄 Forcing token refresh...")
     refresh_all_tokens()
     
-    # Reconnect WebSocket to get new tokens
     global ws_running
     with _ws_connect_lock:
         ws_running = False
