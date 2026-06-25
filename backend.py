@@ -571,10 +571,20 @@ def has_complete_data(idx):
                 return False
         return True
 
-# ... (the rest of your functions: get_db_path, is_market_open, is_mcx_open, 
-#      get_auth_token, refresh_all_tokens, etc.) 
-# NOTE: These are assumed unchanged from your original. 
-# I'll include them below but they are not modified.
+# ============================================================
+# (THE REST OF YOUR ORIGINAL FUNCTIONS GO HERE – unchanged)
+# Including: get_db_path, is_market_open, is_mcx_open, get_auth_token,
+# refresh_all_tokens, get_current_atm_tokens, get_index_spot, get_option_quote,
+# get_vix_ltp, get_mcx_futures_tokens, load_portfolio_state, save_portfolio_state,
+# reset_signal_state, clear_candle_data, compute_sentiment, get_current_adx,
+# detect_regime, get_sentiment_label, compute_signal_quality, get_trend_for_timeframe,
+# get_signal_from_sentiment, run_signal_engine_for_index, run_all_signals,
+# volume_profile_engines, etc.
+# ============================================================
+
+# ----------------------------------------------------------------------
+# [INSERT ALL YOUR EXISTING FUNCTIONS HERE – EXACTLY AS THEY WERE]
+# ----------------------------------------------------------------------
 
 # ============================================================
 # WEBSOCKET + WATCHDOGS - CRITICAL FIX FOR OPTION DATA
@@ -761,7 +771,6 @@ def on_ws_data(wsapp, message):
                                 latest_ticks[idx]["ce_ask"] = ask
                             with _ce_price_histories_lock:
                                 ce_price_histories[idx].append(ltp)
-                            # volume_profile_engines is assumed defined elsewhere; keep it
                             volume_profile_engines[idx].update(ltp, vol, option_type="CE")
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ltp
