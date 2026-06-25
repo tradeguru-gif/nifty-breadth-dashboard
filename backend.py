@@ -1,7 +1,6 @@
-# === HYBRID v16.2 – FULL RELAXATION (EQUITY + MCX) ===
-# MODIFIED: Lowered thresholds for both equity and commodities, removed range block,
-#           relaxed volume, sentiment sensitivity, candle confirmation.
-# FEATURES: More signals across all instruments while maintaining quality.
+# === HYBRID v17.1 – FIXED OPTION PREMIUM ISSUE ===
+# FIXED: Option premium validation, proper separation of spot vs option prices,
+#        added debug logging for price data
 import sys
 import logging
 import os
@@ -80,6 +79,22 @@ def init_db():
         c.execute("CREATE TABLE IF NOT EXISTS performance_metrics (timestamp REAL, index_name TEXT, sharpe REAL, sortino REAL, calmar REAL, win_rate REAL, profit_factor REAL, max_drawdown REAL, avg_trade REAL, expectancy REAL)")
         c.execute("CREATE TABLE IF NOT EXISTS drawdown_events (timestamp REAL, index_name TEXT, drawdown_pct REAL, action_taken TEXT, equity_before REAL, equity_after REAL)")
         c.execute("CREATE TABLE IF NOT EXISTS signal_state (index_name TEXT PRIMARY KEY, action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL)")
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS candle_data (
+                index_name TEXT,
+                timeframe TEXT,
+                timestamp INTEGER,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (index_name, timeframe, timestamp)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_candle_time ON candle_data(index_name, timeframe, timestamp)")
+        
         try:
             c.execute("ALTER TABLE portfolio_equity ADD COLUMN last_trade_date TEXT")
         except Exception:
@@ -98,6 +113,20 @@ def init_db():
             c = conn.cursor()
             c.execute("CREATE TABLE IF NOT EXISTS portfolio_equity (index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL, active_action TEXT, entry_price REAL, stop_loss REAL, target REAL, lots INTEGER, entry_time REAL, highest REAL, last_trade_date TEXT, daily_trade_count INTEGER)")
             c.execute("CREATE TABLE IF NOT EXISTS trades (timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, vix REAL, exit_reason TEXT)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS candle_data (
+                    index_name TEXT,
+                    timeframe TEXT,
+                    timestamp INTEGER,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    PRIMARY KEY (index_name, timeframe, timestamp)
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_candle_time ON candle_data(index_name, timeframe, timestamp)")
             conn.commit()
         finally:
             conn.close()
@@ -308,23 +337,90 @@ _telegram_lock = threading.Lock()
 _historical_iv_ce = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 
-# Regime hysteresis
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# TIMEFRAME DEFINITIONS - ENHANCED WEIGHTS FOR BETTER SENTIMENT
+# TIMEFRAME DEFINITIONS
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min", "8min", "10min", "15min", "20min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "8min":480, "10min":600, "15min":900, "20min":1200}
 TIMEFRAME_WEIGHTS = {"1min":12, "2min":12, "3min":12, "5min":15, "8min":15, "10min":15, "15min":18, "20min":18}
 
-candle_histories = {idx: {tf: deque(maxlen=500) for tf in TIMEFRAMES} for idx in INDEX_NAMES}
+candle_histories = {idx: {tf: deque(maxlen=2000) for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
+# ============================================================
+# CANDLE PERSISTENCE FUNCTIONS
+# ============================================================
+def save_candle_to_db(index_name, timeframe, candle):
+    try:
+        conn = sqlite3.connect(get_db_path())
+        c = conn.cursor()
+        c.execute("""
+            INSERT OR REPLACE INTO candle_data 
+            (index_name, timeframe, timestamp, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            index_name, timeframe, 
+            int(candle["timestamp"]), 
+            candle["open"], candle["high"], 
+            candle["low"], candle["close"], 
+            candle["volume"]
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.debug(f"Failed to save candle: {e}")
+    finally:
+        conn.close()
+
+def load_historical_candles(index_name, timeframe, max_count=500):
+    try:
+        conn = sqlite3.connect(get_db_path())
+        c = conn.cursor()
+        rows = c.execute("""
+            SELECT timestamp, open, high, low, close, volume
+            FROM candle_data
+            WHERE index_name = ? AND timeframe = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (index_name, timeframe, max_count)).fetchall()
+        
+        candles = []
+        for row in reversed(rows):
+            candles.append({
+                "timestamp": row[0],
+                "open": row[1],
+                "high": row[2],
+                "low": row[3],
+                "close": row[4],
+                "volume": row[5]
+            })
+        return candles
+    except Exception as e:
+        logger.debug(f"Failed to load candles: {e}")
+        return []
+    finally:
+        conn.close()
+
+def clear_candle_data(index_name=None):
+    try:
+        conn = sqlite3.connect(get_db_path())
+        c = conn.cursor()
+        if index_name:
+            c.execute("DELETE FROM candle_data WHERE index_name = ?", (index_name,))
+        else:
+            c.execute("DELETE FROM candle_data")
+        conn.commit()
+        logger.info(f"Cleared candle data for {index_name if index_name else 'all'}")
+    except Exception as e:
+        logger.error(f"Failed to clear candle data: {e}")
+    finally:
+        conn.close()
+
 # ----------------------------------------------------------------------
-# INDICATORS
+# INDICATORS (unchanged)
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -390,7 +486,6 @@ def calculate_atr(highs, lows, closes, period=14):
     return sum(tr[-period:]) / period
 
 def calculate_adx(highs, lows, closes, period=14):
-    # Reduced minimum candles for faster activation
     if period <= 0 or len(closes) < 15:
         return 18.0
     tr = []
@@ -632,7 +727,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -735,7 +830,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
+# AUTHENTICATION & TOKEN MANAGEMENT
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -937,7 +1032,7 @@ def refresh_all_tokens():
     get_mcx_futures_tokens()
 
 # ----------------------------------------------------------------------
-# MARKET HOURS (unchanged)
+# MARKET HOURS
 # ----------------------------------------------------------------------
 def is_market_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
@@ -966,7 +1061,7 @@ def is_index_market_open(idx):
     return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (unchanged)
+# CANDLE UPDATE (with persistence)
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
     with _prev_volume_lock:
@@ -988,6 +1083,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
+                        save_candle_to_db(idx, tf, _current_candle[idx][tf])
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
@@ -1004,6 +1100,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if current_age > 90:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
+                        save_candle_to_db(idx, tf, _current_candle[idx][tf])
                     _current_candle[idx][tf] = {
                         "open": price, "high": price, "low": price, "close": price,
                         "volume": tick_vol, "timestamp": candle_start
@@ -1011,27 +1108,27 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _last_candle_time[idx][tf] = candle_start
 
 # ----------------------------------------------------------------------
-# SENTIMENT, REGIME, CONFIRMATION - ENHANCED
+# SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
-    if candle_count < 10:
+    if candle_count < 5:
         return 50.0
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
             candles = list(candle_histories[index_name][tf])
-        if len(candles) < 10:
+        if len(candles) < 5:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 10:
+        if len(closes) < 5:
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
         ema50 = calculate_ema(closes, 50) if len(closes) >= 50 else ema21
         price = closes[-1]
-        recent = closes[-30:]
+        recent = closes[-30:] if len(closes) >= 30 else closes
         price_range = (max(recent) - min(recent)) / sum(recent) * len(recent) if sum(recent) else 0
         if price_range < 0.005:
             score = 0
@@ -1064,7 +1161,7 @@ def compute_sentiment(index_name):
     if not sentiment_scores:
         return 50.0
     total = sum(sentiment_scores)
-    sentiment = 50.0 + (total / 2.2)  # More responsive
+    sentiment = 50.0 + (total / 2.2)
     return max(0.0, min(100.0, sentiment))
 
 def get_sentiment_label(sentiment):
@@ -1086,9 +1183,6 @@ def get_current_adx(index_name):
         return calculate_adx(highs, lows, closes, 14)
     return 18.0
 
-# ============================================================
-# ENHANCED SIGNAL GENERATION – NOW WITH MCX RELAXATION
-# ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
     if adx is None:
         adx = get_current_adx(index_name)
@@ -1102,10 +1196,8 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
     elif vix < 15:
         confidence_multiplier = 1.1
 
-    # ---- MCX (RELAXED) ----
     if is_commodity:
-        if regime == "TRENDING" and adx > 20:  # lowered from 25
-            # STRONG >=58, BUY >=48, LOW >=40
+        if regime == "TRENDING" and adx > 20:
             if sentiment >= 58:
                 return "STRONG_BUY_CE", int(85 * confidence_multiplier)
             elif sentiment >= 48:
@@ -1121,7 +1213,6 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
             else:
                 return "STRONG_BUY_PE", int(85 * confidence_multiplier)
         else:
-            # Non-trending: higher thresholds
             if sentiment >= 65:
                 return "STRONG_BUY_CE", int(80 * confidence_multiplier)
             elif sentiment >= 55:
@@ -1137,7 +1228,6 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
             else:
                 return "STRONG_BUY_PE", int(80 * confidence_multiplier)
 
-    # ---- EQUITY (RELAXED AS BEFORE) ----
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
             return "STRONG_BUY_CE", int(90 * confidence_multiplier)
@@ -1154,7 +1244,6 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
         else:
             return "STRONG_BUY_PE", int(90 * confidence_multiplier)
     elif regime == "RANGING":
-        # reduced confidence but not blocked
         if sentiment >= 68:
             return "STRONG_BUY_CE", int(75 * confidence_multiplier)
         elif sentiment >= 58:
@@ -1258,25 +1347,19 @@ def detect_regime(index_name):
         return counts.most_common(1)[0][0]
     return new_regime
 
-# ====================================================================
-# UPDATED CONFIRMATION FUNCTION (relaxed: allow when <10 candles)
-# ====================================================================
 def confirm_signal_with_candles(index_name, side, spot):
-    # If we have fewer than 10 candles, don't block (allow signal)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])
-    if len(candles) < 10:
-        return True   # Not enough data – let it pass
-    closes = [c["close"] for c in candles[-10:]]
+    if len(candles) < 5:
+        return True
+    closes = [c["close"] for c in candles[-5:]]
     ema9 = calculate_ema(closes, 9)
     if ema9 == 0:
-        return True   # Fallback – don't block
+        return True
     if side == "CE":
         return closes[-1] > ema9
     else:
         return closes[-1] < ema9
-
-# ====================================================================
 
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
@@ -1312,7 +1395,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY, DATA READINESS, PERSISTENCE (unchanged)
+# SIGNAL QUALITY, DATA READINESS, PERSISTENCE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1566,7 +1649,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – WITH RELAXED FILTERS FOR MCX
+# MAIN SIGNAL ENGINE – FIXED PREMIUM VALIDATION
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1594,7 +1677,7 @@ def run_signal_engine_for_index(index_name):
             tokens = INDEX_TOKENS.get(index_name, {})
             if not tokens.get("ce_token") or not tokens.get("pe_token"):
                 logger.info(f"{index_name}: option tokens missing, refreshing...")
-                get_current_atm_tokens(index_name)   # try to fetch now
+                get_current_atm_tokens(index_name)
                 tokens = INDEX_TOKENS.get(index_name, {})
                 if not tokens.get("ce_token") or not tokens.get("pe_token"):
                     with _market_signal_lock:
@@ -1606,13 +1689,13 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
 
         with _market_signal_lock:
-            if candle_len < 10:
-                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/10)"
+            if candle_len < 5:
+                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/5)"
                 market_signal[index_name]["signal"] = "WAITING"
             else:
                 market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
 
-        if candle_len < 10:
+        if candle_len < 5:
             return
 
         with _market_signal_lock:
@@ -1621,6 +1704,7 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
 
+        # Get latest price data
         with _latest_ticks_lock:
             if index_name not in latest_ticks:
                 latest_ticks[index_name] = {}
@@ -1653,39 +1737,32 @@ def run_signal_engine_for_index(index_name):
                 pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
                 pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
+        # DEBUG: Log all price data
+        logger.info(f"🔍 {index_name} PRICES - Spot: {spot}, CE: {ce_prem}, PE: {pe_prem}")
+        logger.info(f"🔍 {index_name} OPTION DATA - CE Bid: {ce_bid}, CE Ask: {ce_ask}, PE Bid: {pe_bid}, PE Ask: {pe_ask}")
+        logger.info(f"🔍 {index_name} VOLUME - CE: {ce_vol}, PE: {pe_vol}, OI - CE: {ce_oi}, PE: {pe_oi}")
+
         if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "No price data yet"
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
+        # For commodities, use spot as premium
         if is_commodity:
             prem = spot
             if prem <= 0.0:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
                     market_signal[index_name]["signal"] = "BLOCKED"
+                logger.warning(f"{index_name} commodity price invalid: {prem}")
                 return
-            ce_prem = spot
-            pe_prem = spot
-            ce_vol = latest_ticks[index_name]["volume"] or 0
-            pe_vol = ce_vol
-            ce_oi = 0
-            pe_oi = 0
-            ce_bid = latest_ticks[index_name]["bid"] or 0.0
-            ce_ask = latest_ticks[index_name]["ask"] or 0.0
-            pe_bid = ce_bid
-            pe_ask = ce_ask
+            # For commodities, we don't need premium validation
+            # since we're trading the futures contract directly
         else:
-            if ce_bid > 0 and ce_ask > 0:
-                ce_prem = (ce_bid + ce_ask) / 2
-            if pe_bid > 0 and pe_ask > 0:
-                pe_prem = (pe_bid + pe_ask) / 2
-            if not spread_ok(ce_bid, ce_ask, ce_prem) or not spread_ok(pe_bid, pe_ask, pe_prem):
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = "Wide bid-ask spread"
-                    market_signal[index_name]["signal"] = "BLOCKED"
-                return
+            # For equity options, validate the actual option premium
+            # We'll validate after determining the side
+            pass
 
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
@@ -1724,7 +1801,6 @@ def run_signal_engine_for_index(index_name):
             market_signal[index_name]["sentiment_score"] = sentiment
             market_signal[index_name]["confidence"] = confidence
 
-        # RANGING no longer blocks, just reduces confidence
         if regime == "RANGING":
             logger.info(f"{index_name}: RANGING regime, reducing confidence")
             confidence *= 0.8
@@ -1974,11 +2050,10 @@ def run_signal_engine_for_index(index_name):
             return
 
         # --- New entry ---
-               
         with _signal_state_lock:
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
-                logger.info(f"{index_name}: cooldown {remaining}s remaining")   # <-- ADD THIS LINE
+                logger.info(f"{index_name}: cooldown {remaining}s remaining")
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Cooldown {remaining}s"
                     market_signal[index_name]["signal"] = "COOLDOWN"
@@ -1995,11 +2070,10 @@ def run_signal_engine_for_index(index_name):
                     portfolio_state[index_name]["live_pnl"] = 0.0
                 save_portfolio_state(index_name)
 
-        # FIX 3: Don't block on RANGING - continue
         if regime == "TRENDING":
             max_trades = 25
         elif regime == "RANGING":
-            max_trades = 20  # Slightly lower but not blocked
+            max_trades = 20
         else:
             max_trades = 15
         with _signal_state_lock:
@@ -2025,26 +2099,52 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "NO_TRADE"
             return
 
+        # Get premium for the chosen side
         if is_commodity:
             prem = spot
         else:
             prem = ce_prem if side == "CE" else pe_prem
 
-        if is_commodity:
+        # ============================================================
+        # PREMIUM VALIDATION - ONLY FOR EQUITY OPTIONS
+        # ============================================================
+        if not is_commodity:
+            min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
+            max_prem = INDEX_CONFIG[index_name].get("max_premium", 8000)
+            
+            # Check if we have actual option premium data
+            if prem <= 0:
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"No premium data for {side}"
+                    market_signal[index_name]["signal"] = "WAITING"
+                logger.info(f"📢 NO PREMIUM for {index_name} {side}")
+                return
+                
+            # CRITICAL FIX: If premium is > 1000, it's likely the spot price, not option premium
+            # Wait for actual option price data from WebSocket
+            if prem > 1000:
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"Waiting for option price (current: {prem:.2f})"
+                    market_signal[index_name]["signal"] = "WAITING"
+                logger.info(f"📢 WAITING FOR OPTION PRICE for {index_name}: {prem:.2f} (spot price detected)")
+                return
+                
+            # Check if premium is within valid range
+            if prem < min_prem or prem > max_prem:
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"Premium outside range: {prem:.2f} (range: {min_prem}-{max_prem})"
+                    market_signal[index_name]["signal"] = "WAITING"
+                logger.info(f"📢 PREMIUM OUT OF RANGE for {index_name}: {prem:.2f}")
+                return
+                
+            logger.info(f"✅ Premium valid for {index_name} {side}: {prem:.2f}")
+        else:
+            # For commodities, premium is the spot price
             if prem <= 0.0:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
                     market_signal[index_name]["signal"] = "BLOCKED"
                 logger.warning(f"{index_name} commodity price invalid: {prem}")
-                return
-        else:
-            min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
-            max_prem = INDEX_CONFIG[index_name].get("max_premium", 8000)
-            if prem <= 0 or prem < min_prem or prem > max_prem:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Premium invalid: {prem:.2f}"
-                    market_signal[index_name]["signal"] = "WAITING"
-                logger.info(f"📢 SET PREMIUM INVALID for {index_name}: {prem}")
                 return
 
         if not is_commodity:
@@ -2065,7 +2165,6 @@ def run_signal_engine_for_index(index_name):
                             market_signal[index_name]["signal"] = "BLOCKED"
                         return
 
-        # FIX 4: Relaxed candle confirmation – skip for MCX
         if not is_commodity and not confirm_signal_with_candles(index_name, side, spot):
             logger.info(f"{index_name} BLOCKED BY CANDLE")
             with _market_signal_lock:
@@ -2073,7 +2172,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
             return
 
-        # FIX 5: Relaxed volume filter (0.25 instead of 0.5) – skip for MCX
         if not is_commodity:
             vol = ce_vol if side == "CE" else pe_vol
             if vol > 0:
@@ -2092,7 +2190,6 @@ def run_signal_engine_for_index(index_name):
             else:
                 pe_volume_histories[index_name].append(vol)
 
-        # FIX 6: Relaxed PCR filter
         if not is_commodity and INDEX_CONFIG[index_name].get("pcr_enabled"):
             if ce_oi > 0 and pe_oi > 0:
                 pcr = ce_oi / pe_oi
@@ -2195,7 +2292,6 @@ def run_signal_engine_for_index(index_name):
             risk_pct *= 0.5
         if regime == "VOLATILE":
             risk_pct *= 0.7
-        # RANGING regime risk reduction (not block)
         if regime == "RANGING":
             risk_pct *= 0.8
         risk_pct = max(0.5, min(3.0, risk_pct))
@@ -2226,19 +2322,17 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity and is_expiry_day(index_name):
             sl_pct *= 0.7
             target_mult *= 0.8
-                # ---- Calculate Stop Loss and Target ----
+
         if side == "CE":
             sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
             target = prem + atr * target_mult
-        else:  # PE
+        else:
             sl = min(prem * (1 + sl_pct), prem + atr * 1.5)
             target = prem - atr * target_mult
 
-        # Fallback if ATR is zero (too few candles)
         if atr <= 0:
             atr = prem * 0.005 if is_commodity else prem * 0.01
             logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
-            # Recalculate with fallback ATR
             if side == "CE":
                 sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
                 target = prem + atr * target_mult
@@ -2246,7 +2340,6 @@ def run_signal_engine_for_index(index_name):
                 sl = min(prem * (1 + sl_pct), prem + atr * 1.5)
                 target = prem - atr * target_mult
 
-        # Ensure target is at least a small distance from entry
         min_target_distance = 0.05 if is_commodity else 0.5
         if side == "CE" and target <= prem + min_target_distance:
             target = prem + min_target_distance
@@ -2257,7 +2350,6 @@ def run_signal_engine_for_index(index_name):
 
         stop_dist = prem - sl if side == "CE" else sl - prem
         if stop_dist <= 0:
-            # Fallback to a fixed minimum distance
             if is_commodity:
                 stop_dist = 0.05
                 sl = prem - stop_dist if side == "CE" else prem + stop_dist
@@ -2940,10 +3032,28 @@ class ConnectionManager:
 _init_completed = False
 _init_lock = threading.Lock()
 
+def _load_candle_histories_from_db():
+    """Load historical candles from database on startup"""
+    logger.info("Loading historical candles from database...")
+    total_loaded = 0
+    for idx in INDEX_NAMES:
+        for tf in TIMEFRAMES:
+            candles = load_historical_candles(idx, tf, 500)
+            if candles:
+                with _candle_histories_lock:
+                    for candle in candles:
+                        candle_histories[idx][tf].append(candle)
+                total_loaded += len(candles)
+                logger.debug(f"Loaded {len(candles)} {tf} candles for {idx}")
+    logger.info(f"✅ Loaded {total_loaded} historical candles from database")
+
 def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
+            # Load historical candles from database first
+            _load_candle_histories_from_db()
+            
             logger.info("Pre-fetching option tokens...")
             max_retries = 5
             for attempt in range(max_retries):
@@ -3010,7 +3120,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v16.2 – Full Relaxation (Equity + MCX)",
+        "engine": "Hybrid v17.0 – Persistent Candles + Faster Signals",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -3042,7 +3152,8 @@ def live_signals():
             if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
                 with _candle_histories_lock:
                     candle_len = len(candle_histories[idx]["1min"])
-                if candle_len >= 10:
+                # Reduced from 10 to 5
+                if candle_len >= 5:
                     run_signal_engine_for_index(idx)
 
     with _market_signal_lock, _portfolio_state_lock:
@@ -3065,7 +3176,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.2-Full Relaxation"
+            "version": "17.0-Persistent Candles"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3194,13 +3305,42 @@ def debug_index(index_name):
         "adx": get_current_adx(index_name),
         "regime": detect_regime(index_name)
     })
-    
-    @app.route("/api/reset/<index_name>", methods=["POST"])
-    def reset_index(index_name):
-        if index_name not in INDEX_NAMES:
-            return jsonify({"error": "Invalid index"}), 400
-        reset_signal_state(index_name, time.time(), "MANUAL_RESET")
-        return jsonify({"status": "reset", "index": index_name})
+
+@app.route("/api/reset/<index_name>", methods=["POST"])
+def reset_index(index_name):
+    if index_name not in INDEX_NAMES:
+        return jsonify({"error": "Invalid index"}), 400
+    reset_signal_state(index_name, time.time(), "MANUAL_RESET")
+    return jsonify({"status": "reset", "index": index_name})
+
+@app.route("/api/clear-candles/<index_name>", methods=["POST"])
+def clear_candles(index_name):
+    if index_name not in INDEX_NAMES:
+        return jsonify({"error": "Invalid index"}), 400
+    clear_candle_data(index_name)
+    with _candle_histories_lock:
+        for tf in TIMEFRAMES:
+            candle_histories[index_name][tf].clear()
+    return jsonify({"status": "cleared", "index": index_name})
+
+@app.route("/api/reload-candles/<index_name>", methods=["POST"])
+def reload_candles(index_name):
+    if index_name not in INDEX_NAMES:
+        return jsonify({"error": "Invalid index"}), 400
+    with _candle_histories_lock:
+        for tf in TIMEFRAMES:
+            candle_histories[index_name][tf].clear()
+        for tf in TIMEFRAMES:
+            candles = load_historical_candles(index_name, tf, 500)
+            if candles:
+                for candle in candles:
+                    candle_histories[index_name][tf].append(candle)
+    return jsonify({
+        "status": "reloaded",
+        "index": index_name,
+        "candle_count": len(candle_histories[index_name]["1min"])
+    })
+
 # ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
@@ -3209,6 +3349,8 @@ if __name__ == "__main__":
     load_portfolio_state()
     get_mcx_futures_tokens()
     refresh_all_tokens()
+    # Load candles before starting
+    _load_candle_histories_from_db()
     _start_background_threads()
     logger.info("Background workers initiated. Starting Flask API Server...")
     app.run(host="0.0.0.0", port=5000, debug=False)
