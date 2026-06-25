@@ -1,6 +1,6 @@
-# === HYBRID v17.1 – FIXED OPTION PREMIUM ISSUE ===
-# FIXED: Option premium validation, proper separation of spot vs option prices,
-#        added debug logging for price data
+# === HYBRID v17.2 – FIXED OPTION PRICES + COMPLETE REVISION ===
+# FIXED: Option token subscription, premium validation, WebSocket data flow
+# ADDED: Token status endpoint, refresh tokens endpoint, debug logging
 import sys
 import logging
 import os
@@ -420,7 +420,7 @@ def clear_candle_data(index_name=None):
         conn.close()
 
 # ----------------------------------------------------------------------
-# INDICATORS (unchanged)
+# INDICATORS
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -537,7 +537,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS (unchanged)
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -1748,22 +1748,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
-        # For commodities, use spot as premium
-        if is_commodity:
-            prem = spot
-            if prem <= 0.0:
-                with _market_signal_lock:
-                    market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
-                    market_signal[index_name]["signal"] = "BLOCKED"
-                logger.warning(f"{index_name} commodity price invalid: {prem}")
-                return
-            # For commodities, we don't need premium validation
-            # since we're trading the futures contract directly
-        else:
-            # For equity options, validate the actual option premium
-            # We'll validate after determining the side
-            pass
-
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -2421,7 +2405,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS
+# WEBSOCKET + WATCHDOGS - FIXED SUBSCRIPTION
 # ============================================================
 ws_running = False
 sws = None
@@ -2439,6 +2423,8 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
+    
+    # Subscribe to spot indices
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
             exch_type = int(cfg["ws_exchange_type"])
@@ -2447,32 +2433,47 @@ def on_ws_open(wsapp):
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
 
+    # CRITICAL FIX: Subscribe to option tokens for all equity indices
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
             continue
-        if tokens.get("ce_token") and tokens.get("pe_token"):
+        
+        # Get both CE and PE tokens
+        ce_token = tokens.get("ce_token")
+        pe_token = tokens.get("pe_token")
+        
+        if ce_token and pe_token:
             exch_type = int(INDEX_CONFIG[idx]["option_ws_exchange_type"])
+            # IMPORTANT: Subscribe to both CE and PE tokens together
             token_list.append({
                 "exchangeType": exch_type,
-                "tokens": [tokens["ce_token"], tokens["pe_token"]]
+                "tokens": [ce_token, pe_token]
             })
+            logger.info(f"✅ Subscribing to {idx} options: CE={ce_token}, PE={pe_token}")
+        else:
+            logger.warning(f"⚠️ Missing option tokens for {idx}: CE={ce_token}, PE={pe_token}")
 
+    # Subscribe to VIX
     token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
-    logger.info(f"Subscribing to token_list: {token_list}")
+    logger.info(f"📡 Subscribing to {len(token_list)} token groups")
     if token_list and sws:
         try:
             correlation_id = "hybrid_bot"
-            mode = 1
+            mode = 1  # LTP mode
             response = sws.subscribe(correlation_id, mode, token_list)
-            logger.info(f"Subscription response: {response}")
+            logger.info(f"✅ Subscription response: {response}")
             if response and isinstance(response, dict) and not response.get("status", True):
-                logger.error(f"Subscription failed: {response}")
+                logger.error(f"❌ Subscription failed: {response}")
             else:
                 total = sum(len(g["tokens"]) for g in token_list)
-                logger.info(f"Successfully subscribed to {total} tokens")
+                logger.info(f"✅ Successfully subscribed to {total} tokens")
+                
+                # Log which tokens are subscribed
+                for group in token_list:
+                    logger.info(f"   Exchange {group['exchangeType']}: {group['tokens']}")
         except Exception as e:
-            logger.error(f"Subscribe error: {e}")
+            logger.error(f"❌ Subscribe error: {e}")
 
 def on_ws_error(wsapp, error):
     global ws_running
@@ -2548,7 +2549,9 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                logger.info(f"🔍 WS TICK: token={token}, ltp={ltp}")
+                # DEBUG: Log first 100 ticks
+                if tick_counter < 100:
+                    logger.info(f"🔍 WS TICK #{tick_counter}: token={token}, ltp={ltp}")
 
                 if ltp > 10000 and token in INDEX_TOKEN_SET:
                     ltp = ltp / 100.0
@@ -2561,9 +2564,6 @@ def on_ws_data(wsapp, message):
                 if is_comm and ltp > 10000:
                     ltp = ltp / 100.0
 
-                if tick_counter % 100 == 0:
-                    logger.debug(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
-
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
@@ -2572,9 +2572,7 @@ def on_ws_data(wsapp, message):
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
                     cfg_token = cfg.get("token")
-                    if cfg_token is not None:
-                        logger.debug(f"   Comparing token {token} with {cfg_token} (idx={idx})")
-                    if cfg.get("token") == token:
+                    if cfg_token is not None and cfg_token == token:
                         if ltp > 0:
                             logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             if cfg.get("is_commodity"):
@@ -2616,6 +2614,7 @@ def on_ws_data(wsapp, message):
                         continue
                     if token == tokens.get("ce_token"):
                         if ltp > 0:
+                            logger.info(f"✅ OPTION MATCH: {idx} CE token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
                                 latest_ticks[idx]["ce_volume"] = vol
@@ -2632,6 +2631,7 @@ def on_ws_data(wsapp, message):
                             break
                     elif token == tokens.get("pe_token"):
                         if ltp > 0:
+                            logger.info(f"✅ OPTION MATCH: {idx} PE token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
                                 latest_ticks[idx]["pe_volume"] = vol
@@ -3016,11 +3016,9 @@ class ConnectionManager:
         self._rest_thread.start()
         logger.info("REST fallback thread started (will take over if WS disconnects).")
         
-        # Pre-market token refresh (runs at 9:10 AM)
         self._refresh_thread = threading.Thread(target=schedule_token_refresh, daemon=True)
         self._refresh_thread.start()
         
-        # Periodic token refresh (every 5 minutes)
         self._periodic_thread = threading.Thread(target=periodic_token_refresh, daemon=True)
         self._periodic_thread.start()
         
@@ -3033,7 +3031,6 @@ _init_completed = False
 _init_lock = threading.Lock()
 
 def _load_candle_histories_from_db():
-    """Load historical candles from database on startup"""
     logger.info("Loading historical candles from database...")
     total_loaded = 0
     for idx in INDEX_NAMES:
@@ -3051,7 +3048,6 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            # Load historical candles from database first
             _load_candle_histories_from_db()
             
             logger.info("Pre-fetching option tokens...")
@@ -3120,7 +3116,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v17.0 – Persistent Candles + Faster Signals",
+        "engine": "Hybrid v17.2 – Fixed Option Prices",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -3152,7 +3148,6 @@ def live_signals():
             if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
                 with _candle_histories_lock:
                     candle_len = len(candle_histories[idx]["1min"])
-                # Reduced from 10 to 5
                 if candle_len >= 5:
                     run_signal_engine_for_index(idx)
 
@@ -3176,8 +3171,63 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "17.0-Persistent Candles"
+            "version": "17.2-Fixed Option Prices"
         })
+
+@app.route("/api/token-status", methods=["GET"])
+def token_status():
+    """Check if option tokens are loaded and subscribed"""
+    status = {}
+    for idx in INDEX_NAMES:
+        if INDEX_CONFIG[idx].get("is_commodity"):
+            status[idx] = {
+                "type": "commodity",
+                "token": INDEX_CONFIG[idx].get("token"),
+                "has_data": latest_ticks.get(idx, {}).get("price", 0) > 0,
+                "price": latest_ticks.get(idx, {}).get("price", 0)
+            }
+        else:
+            tokens = INDEX_TOKENS.get(idx, {})
+            status[idx] = {
+                "type": "equity",
+                "ce_token": tokens.get("ce_token"),
+                "pe_token": tokens.get("pe_token"),
+                "atm_strike": tokens.get("atm_strike"),
+                "expiry": tokens.get("expiry"),
+                "ce_price": latest_ticks.get(idx, {}).get("ce_price", 0),
+                "pe_price": latest_ticks.get(idx, {}).get("pe_price", 0),
+                "spot_price": latest_ticks.get(idx, {}).get("spot_price", 0),
+                "has_option_data": latest_ticks.get(idx, {}).get("ce_price", 0) > 0 or 
+                                   latest_ticks.get(idx, {}).get("pe_price", 0) > 0,
+                "ce_volume": latest_ticks.get(idx, {}).get("ce_volume", 0),
+                "pe_volume": latest_ticks.get(idx, {}).get("pe_volume", 0)
+            }
+    return jsonify(status)
+
+@app.route("/api/refresh-tokens", methods=["POST"])
+def refresh_tokens():
+    """Force refresh all tokens and resubscribe"""
+    logger.info("🔄 Forcing token refresh...")
+    refresh_all_tokens()
+    
+    # Reconnect WebSocket to get new tokens
+    global ws_running
+    with _ws_connect_lock:
+        ws_running = False
+    if sws:
+        try:
+            sws.close_connection()
+        except:
+            pass
+    
+    return jsonify({
+        "status": "refreshed",
+        "tokens": {idx: {
+            "ce": INDEX_TOKENS[idx].get("ce_token"),
+            "pe": INDEX_TOKENS[idx].get("pe_token"),
+            "spot": INDEX_CONFIG[idx].get("token")
+        } for idx in INDEX_NAMES}
+    })
 
 @app.route("/api/signal-audio", methods=["GET"])
 def signal_audio():
@@ -3277,9 +3327,6 @@ def backtest_signal(index_name):
         })
     return jsonify({"signals": signals, "count": len(signals)})
 
-# ----------------------------------------------------------------------
-# DEBUG ENDPOINT
-# ----------------------------------------------------------------------
 @app.route("/api/debug/<index_name>", methods=["GET"])
 def debug_index(index_name):
     if index_name not in INDEX_NAMES:
@@ -3349,7 +3396,6 @@ if __name__ == "__main__":
     load_portfolio_state()
     get_mcx_futures_tokens()
     refresh_all_tokens()
-    # Load candles before starting
     _load_candle_histories_from_db()
     _start_background_threads()
     logger.info("Background workers initiated. Starting Flask API Server...")
