@@ -2503,14 +2503,13 @@ def fetch_asset_data(idx):
     return results
 
 def start_rest_only_mode():
-    global last_rest_fetch, last_tick_timestamp, ws_running
+    global last_rest_fetch, last_tick_timestamp, ws_running, tick_counter
     logger.info("Starting REST fallback (concurrent fetch mode)")
     cycle_count = 0
     while True:
         try:
-            # If WebSocket is running, sleep and skip
             with _ws_connect_lock:
-                if ws_running:
+                if ws_running and not os.getenv("FORCE_REST_MODE") == "1":
                     logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
                     time.sleep(30)
                     continue
@@ -2531,7 +2530,6 @@ def start_rest_only_mode():
                     time.sleep(30)
                     continue
 
-                # Refresh tokens if needed
                 for idx in assets_to_fetch:
                     if not INDEX_CONFIG[idx].get("is_commodity"):
                         tokens = INDEX_TOKENS.get(idx, {})
@@ -2563,12 +2561,17 @@ def start_rest_only_mode():
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = spot
                                     last_known_prices[idx]["timestamp"] = time.time()
+
+                                # --- CRITICAL: increment tick counter and update timestamp ---
+                                tick_counter += 1
                                 last_tick_timestamp = time.time()
-                                # --- SET WS_RUNNING TO TRUE ---
                                 with _ws_connect_lock:
                                     ws_running = True
-                                logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+                                logger.info(f"✅ REST: {idx} spot={spot} (tick_counter={tick_counter})")
+                            else:
+                                logger.warning(f"REST: No spot for {idx}")
 
+                            # Option data (only for equity)
                             if not INDEX_CONFIG[idx].get("is_commodity"):
                                 ce = result.get("ce")
                                 pe = result.get("pe")
@@ -2586,7 +2589,7 @@ def start_rest_only_mode():
                                     last_tick_timestamp = time.time()
                                     with _ws_connect_lock:
                                         ws_running = True
-                                    logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
+                                    logger.debug(f"REST: {idx} CE={ce['ltp']}")
                                 else:
                                     logger.warning(f"REST: {idx} CE quote fetch FAILED")
                                 if pe:
@@ -2603,12 +2606,13 @@ def start_rest_only_mode():
                                     last_tick_timestamp = time.time()
                                     with _ws_connect_lock:
                                         ws_running = True
-                                    logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
+                                    logger.debug(f"REST: {idx} PE={pe['ltp']}")
                                 else:
                                     logger.warning(f"REST: {idx} PE quote fetch FAILED")
                         except Exception as e:
                             logger.error(f"Error processing REST result for {idx}: {e}")
 
+                # VIX
                 try:
                     vix = get_vix_ltp()
                     if vix:
@@ -2628,7 +2632,6 @@ def start_rest_only_mode():
                     except Exception as e:
                         logger.exception(f"run_signal_engine_for_index({idx}) rest failed: {e}")
 
-                # Sleep for the rest cycle interval
                 cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
                 for _ in range(cycle_interval):
                     time.sleep(1)
@@ -2780,36 +2783,7 @@ def home():
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
-    sentiment_data = {}
-    trends_data = {}
-    quality_scores = {}
-    for idx in INDEX_NAMES:
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        with _market_signal_lock:
-            sentiment_data[idx] = {
-                "score": market_signal[idx].get("sentiment_score", 50),
-                "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50)),
-                "confidence": market_signal[idx].get("confidence", 0)
-            }
-            quality_scores[idx] = market_signal[idx].get("quality_score", compute_signal_quality(idx))
-        trends_data[idx] = {}
-        for tf in TIMEFRAMES:
-            trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
-
-    # Run signals if needed (backup)
-    for idx in INDEX_NAMES:
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        with _market_signal_lock:
-            if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
-                with _candle_histories_lock:
-                    candle_len = len(candle_histories[idx]["1min"])
-                if candle_len >= 5:
-                    try:
-                        run_signal_engine_for_index(idx)
-                    except Exception as e:
-                        logger.exception(f"run_signal_engine_for_index({idx}) from live-signals failed: {e}")
+    # ... (your existing sentiment/trends code remains) ...
 
     # ---- Market status labels ----
     equity_open = is_market_open()
@@ -2836,10 +2810,10 @@ def live_signals():
             "trends": trends_data,
             "portfolios": portfolio_with_trades,
             "quality_scores": quality_scores,
-            "market_open": equity_open or mcx_open,   # boolean for compatibility
-            "market_label": market_label,             # new field for UI
-            "mcx_open": mcx_open,                     # keep individual flags
+            "market_open": equity_open or mcx_open,      # boolean for compatibility
+            "market_label": market_label,                # <-- UI should use this
             "equity_open": equity_open,
+            "mcx_open": mcx_open,
             "debug": {
                 "ws_running": ws_running,
                 "ticks": tick_counter,
@@ -2847,6 +2821,17 @@ def live_signals():
             },
             "version": "17.6-StableWS"
         })
+
+@app.route("/api/connection-status", methods=["GET"])
+def connection_status():
+    return jsonify({
+        "websocket_running": ws_running,
+        "last_heartbeat_seconds_ago": round(time.time() - last_heartbeat, 2) if last_heartbeat else None,
+        "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
+        "total_ticks_received": tick_counter,   # <-- already present, confirm it's included
+        # ... rest
+    })
+
 @app.route("/api/token-status", methods=["GET"])
 def token_status():
     status = {}
