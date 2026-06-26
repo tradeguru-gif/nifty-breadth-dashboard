@@ -2079,8 +2079,10 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
     logger.warning(f"WebSocket closed: status={close_status_code}, msg={close_msg}")
 
 def on_ws_data(wsapp, message):
-    global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
+    global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run, ws_running
 
+    # Force ws_running to True whenever we receive data
+    ws_running = True
     last_heartbeat = time.time()
 
     if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
@@ -2832,6 +2834,12 @@ def signal_audio():
     return jsonify({"action": latest_action, "audio_file": audio_file, "timestamp": datetime.now().isoformat()})
 
 @app.route("/api/health", methods=["GET"])
+def health():
+    # ...
+    ws_active = ws_running and (time.time() - last_tick_timestamp < 30)
+    # If ws_running is False but ticks are recent, we can still say it's OK
+    if not ws_running and (time.time() - last_tick_timestamp < 15):
+        ws_active = True
 def health():
     if not is_market_open() and not is_mcx_open():
         return jsonify({
