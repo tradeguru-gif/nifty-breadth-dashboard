@@ -2817,6 +2817,11 @@ def live_signals():
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
 
+        # ---- FIX: Combined market status ----
+        equity_open = is_market_open()
+        mcx_open = is_mcx_open()
+        combined_open = equity_open or mcx_open
+
         return jsonify({
             "timestamp": datetime.now().isoformat(),
             "signals": market_signal,
@@ -2824,16 +2829,16 @@ def live_signals():
             "trends": trends_data,
             "portfolios": portfolio_with_trades,
             "quality_scores": quality_scores,
-            "market_open": is_market_open(),
-            "mcx_open": is_mcx_open(),
+            "market_open": combined_open,        # <-- changed to combined
+            "mcx_open": mcx_open,                # keep separate if needed
+            "market_status": "Equity + MCX" if (equity_open and mcx_open) else "MCX" if mcx_open else "Equity" if equity_open else "CLOSED",
             "debug": {
                 "ws_running": ws_running,
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "17.6-StableWS"
+            "version": "17.6-Stable-WS"
         })
-
 @app.route("/api/token-status", methods=["GET"])
 def token_status():
     status = {}
