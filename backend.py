@@ -4,6 +4,7 @@
 # - VIX REST fetch implemented (get_vix_ltp)
 # - _signal_state_lock added in load_portfolio_state
 # - Unused _prev_volume_lock removed
+# - Fixed execute_entry() alert message (removed undefined 'adx')
 # - All previous: WebSocket, REST, candles, indicators, market hours, etc.
 
 import sys
@@ -1981,8 +1982,8 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     kelly_frac, win_rate, avg_win, avg_loss = kelly_tracker.get_recommended_risk_pct()
     
     # Base risk per trade
-    base_risk_pct = 0.02  # 2% base risk
-    risk_pct = base_risk_pct * kelly_frac * 4  # Scale up with kelly
+    base_risk_pct = 0.02
+    risk_pct = base_risk_pct * kelly_frac * 4
     
     # Adjust for confidence and quality
     risk_pct *= (confidence / 100) * (quality / 100)
@@ -1998,7 +1999,6 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     
     # Calculate stop loss and target
     if is_commodity:
-        # ATR-based for commodities
         sl_points = atr * 2.0 if atr > 0 else spot * 0.01
         target_points = atr * 3.0 if atr > 0 else spot * 0.015
         entry = spot
@@ -2006,30 +2006,25 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
         target = entry + target_points if side == "CE" else entry - target_points
         lots = max(1, int((equity * risk_pct) / (sl_points * cfg["lot_size"])))
     else:
-        # Options: premium-based SL
-        sl_pct = 0.40 if is_expiry_day(index_name) else 0.50  # 40-50% of premium
-        target_pct = 1.0  # 100% of premium
+        sl_pct = 0.40 if is_expiry_day(index_name) else 0.50
+        target_pct = 1.0
         
-        # Greeks adjustment
         if greeks_data:
             iv_rank = greeks_data.get("iv_rank", 50)
-            if iv_rank > 70:  # High IV = wider SL
+            if iv_rank > 70:
                 sl_pct *= 1.2
-            elif iv_rank < 30:  # Low IV = tighter SL
+            elif iv_rank < 30:
                 sl_pct *= 0.8
         
         entry = prem
-        sl = entry * (1 - sl_pct)  # Both CE/PE lose when premium drops
+        sl = entry * (1 - sl_pct)
         target = entry * (1 + target_pct)
         
-        # Risk amount
         risk_amount = equity * risk_pct
-        # Max loss per lot = entry * sl_pct * lot_size
         max_loss_per_lot = entry * sl_pct * cfg["lot_size"]
         lots = max(1, int(risk_amount / max_loss_per_lot)) if max_loss_per_lot > 0 else 1
         
-        # Cap lots
-        max_lots = int(equity / (entry * cfg["lot_size"] * 0.2))  # Max 20% in one trade
+        max_lots = int(equity / (entry * cfg["lot_size"] * 0.2))
         lots = min(lots, max(1, max_lots))
     
     # Grade assignment
@@ -2070,13 +2065,13 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     # Save state
     save_portfolio_state(index_name)
     
-    # Build alert
+    # Build alert — FIX: removed undefined 'adx' reference
     msg = (
         f"🟢 ENTRY {index_name} {action}\n"
         f"Entry: {entry:.2f} | SL: {sl:.2f} | Target: {target:.2f}\n"
         f"Lots: {lots} | Grade: {grade} | Conf: {confidence}%\n"
-        f"Sentiment: {sentiment:.1f} | RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
-        f"Regime: {regime} | VIX: {vix:.1f}"
+        f"Sentiment: {sentiment:.1f} | RSI: {rsi:.1f} | Regime: {regime}\n"
+        f"VIX: {vix:.1f}"
     )
     if not is_commodity:
         msg += f"\nSpot: {spot:.2f} | Premium: {prem:.2f}"
@@ -2141,7 +2136,7 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
         else:
             pnl = (entry - current) * lots * INDEX_CONFIG[index_name]["lot_size"]
     else:
-        # Options P&L
+        # Options P&L: Both CE and PE are bought (long), profit when premium increases
         pnl = (current - entry) * lots * INDEX_CONFIG[index_name]["lot_size"]
     
     pnl_pct = (pnl / (entry * lots * INDEX_CONFIG[index_name]["lot_size"])) * 100 if entry > 0 else 0
