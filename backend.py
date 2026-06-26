@@ -2822,7 +2822,6 @@ def live_signals():
             "version": "17.6-StableWS"
         })
 
-@app.route("/api/connection-status", methods=["GET"])
 def connection_status():
     return jsonify({
         "websocket_running": ws_running,
