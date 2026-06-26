@@ -1218,36 +1218,12 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
         confidence_multiplier = 1.1
 
     if is_commodity:
-        if regime == "TRENDING" and adx > 20:
-            if sentiment >= 58:
-                return "STRONG_BUY_CE", int(85 * confidence_multiplier)
-            elif sentiment >= 48:
-                return "BUY_CE", int(75 * confidence_multiplier)
-            elif sentiment >= 40:
-                return "LOW_BUY_CE", int(65 * confidence_multiplier)
-            elif sentiment >= 35:
-                return "NO_TRADE", 50
-            elif sentiment >= 25:
-                return "LOW_BUY_PE", int(65 * confidence_multiplier)
-            elif sentiment >= 15:
-                return "BUY_PE", int(75 * confidence_multiplier)
-            else:
-                return "STRONG_BUY_PE", int(85 * confidence_multiplier)
-        else:
-            if sentiment >= 65:
-                return "STRONG_BUY_CE", int(80 * confidence_multiplier)
-            elif sentiment >= 55:
-                return "BUY_CE", int(70 * confidence_multiplier)
-            elif sentiment >= 45:
-                return "LOW_BUY_CE", int(60 * confidence_multiplier)
-            elif sentiment >= 35:
-                return "NO_TRADE", 50
-            elif sentiment >= 25:
-                return "LOW_BUY_PE", int(60 * confidence_multiplier)
-            elif sentiment >= 15:
-                return "BUY_PE", int(70 * confidence_multiplier)
-            else:
-                return "STRONG_BUY_PE", int(80 * confidence_multiplier)
+    if sentiment >= 55:
+        return "BUY", int(70 * confidence_multiplier)
+    elif sentiment >= 45:
+        return "HOLD", 50
+    else:
+        return "SELL", int(70 * confidence_multiplier)
 
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
