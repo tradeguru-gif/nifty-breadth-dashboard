@@ -2060,7 +2060,6 @@ def on_ws_open(wsapp):
         last_heartbeat = time.time()
         logger.info("WebSocket connected successfully, subscribing to tokens...")
 
-        # Build token_list
         token_list = []
         for idx, cfg in INDEX_CONFIG.items():
             if cfg.get("active") and not cfg.get("is_commodity"):
@@ -2083,29 +2082,34 @@ def on_ws_open(wsapp):
         token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
         logger.info(f"Subscribing to token_list: {token_list}")
-
-        # Small delay to ensure socket is ready
         time.sleep(0.5)
 
         try:
             response = sws.subscribe("hybrid_bot", 1, token_list)
             logger.info(f"Subscription response: {response}")
-            if response and isinstance(response, dict) and not response.get("status", True):
+
+            if response is None:
+                logger.error("Subscription returned None – assuming failure")
+                with _ws_connect_lock:
+                    ws_running = False
+                return
+            elif isinstance(response, dict) and response.get("status") == False:
                 logger.error(f"Subscription failed: {response}")
                 with _ws_connect_lock:
                     ws_running = False
+                return
             else:
                 total = sum(len(g["tokens"]) for g in token_list)
                 logger.info(f"Successfully subscribed to {total} tokens")
         except Exception as e:
-            logger.error(f"Subscribe error: {e}")
+            logger.exception(f"Subscribe error: {e}")
             with _ws_connect_lock:
                 ws_running = False
+
     except Exception as e:
         logger.exception("on_ws_open crashed")
         with _ws_connect_lock:
             ws_running = False
-
 def on_ws_error(wsapp, error):
     global ws_running
     logger.error(f"WebSocket error: {error}")
@@ -2121,11 +2125,15 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run, ws_running
     try:
+        # --- DIAGNOSTIC: log every message ---
+        logger.info(f"📨 Raw message received: type={type(message)}, len={len(message) if message else 0}")
+
         # Keep ws_running True whenever data arrives
         ws_running = True
         last_heartbeat = time.time()
 
         if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
+            logger.debug("Received ping or empty message, ignoring")
             return
 
         ticks = []
@@ -2147,33 +2155,39 @@ def on_ws_data(wsapp, message):
                     if parsed and parsed.get('token'):
                         ticks = [parsed]
                     else:
+                        logger.debug("Binary parse returned empty or no token")
                         return
                 else:
+                    logger.debug("No parser available")
                     return
             except Exception as e:
                 logger.error(f"Binary parse error: {e}")
                 return
         else:
+            logger.warning(f"Unhandled message type: {type(message)}")
             return
 
         if not ticks:
+            logger.debug("No ticks extracted from message")
             return
+
+        logger.info(f"📊 Processing {len(ticks)} tick(s)")
 
         for tick in ticks:
             try:
                 tick_counter += 1
-
                 token = str(tick.get("token") or tick.get("tk") or "")
                 ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
-
                 if isinstance(ltp, str):
                     try:
                         ltp = float(ltp)
                     except:
                         ltp = 0
-
                 if ltp > 100000:
                     ltp = ltp / 100.0
+
+                # --- Log every tick token and price ---
+                logger.info(f"🔹 TICK: token={token}, ltp={ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
@@ -2186,7 +2200,7 @@ def on_ws_data(wsapp, message):
                     cfg_token = cfg.get("token")
                     if cfg_token and str(cfg_token) == token:
                         if ltp > 0:
-                            logger.debug(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
+                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             try:
                                 if cfg.get("is_commodity"):
                                     with _latest_ticks_lock:
@@ -2227,7 +2241,7 @@ def on_ws_data(wsapp, message):
                                 ltp = ltp / 100.0
                             vol = vol if vol > 0 else 1
                             oi = oi if oi > 0 else 1
-                            logger.debug(f"✅ CE MATCH: {idx} token={token} ltp={ltp}")
+                            logger.info(f"✅ CE MATCH: {idx} token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
                                 latest_ticks[idx]["ce_volume"] = vol
@@ -2248,7 +2262,7 @@ def on_ws_data(wsapp, message):
                                 ltp = ltp / 100.0
                             vol = vol if vol > 0 else 1
                             oi = oi if oi > 0 else 1
-                            logger.debug(f"✅ PE MATCH: {idx} token={token} ltp={ltp}")
+                            logger.info(f"✅ PE MATCH: {idx} token={token} ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
                                 latest_ticks[idx]["pe_volume"] = vol
@@ -2271,6 +2285,7 @@ def on_ws_data(wsapp, message):
                     with _latest_ticks_lock:
                         latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
+                    logger.info(f"✅ VIX MATCH: ltp={ltp}")
 
             except Exception as e:
                 logger.error(f"Error processing tick: {e}")
@@ -2288,7 +2303,6 @@ def on_ws_data(wsapp, message):
             for idx in INDEX_NAMES:
                 if _new_candle_flag[idx]:
                     _new_candle_flag[idx] = False
-                    # Run signal engine for this index
                     if INDEX_CONFIG[idx].get("active") and has_complete_data(idx):
                         try:
                             run_signal_engine_for_index(idx)
@@ -2303,9 +2317,10 @@ def tick_watchdog():
     last_count = 0
     while True:
         time.sleep(10)
+        now = time.time()
         if ws_running:
-            if time.time() - last_tick_timestamp > 60:
-                logger.warning("No ticks for 60s - forcing reconnect")
+            if now - last_tick_timestamp > 60:
+                logger.warning(f"No ticks for 60s (last tick {now - last_tick_timestamp:.1f}s ago) - forcing reconnect")
                 with _ws_connect_lock:
                     ws_running = False
                 if sws:
@@ -2313,7 +2328,7 @@ def tick_watchdog():
                         sws.close_connection()
                     except:
                         pass
-            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
+            elif tick_counter == last_count and tick_counter > 0 and now - last_tick_timestamp > 45:
                 logger.warning("Tick counter stalled - forcing reconnect")
                 with _ws_connect_lock:
                     ws_running = False
@@ -2324,6 +2339,8 @@ def tick_watchdog():
                         pass
             else:
                 last_count = tick_counter
+        else:
+            logger.debug("WS not running, watchdog idle")
 
 def ws_watchdog():
     global ws_running, last_heartbeat, last_tick_timestamp, sws
