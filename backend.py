@@ -1386,7 +1386,9 @@ def confirm_signal_with_candles(index_name, side, spot):
     ema9 = calculate_ema(closes, 9)
     if ema9 == 0:
         return True
-    if side == "CE":
+    # For commodities: BUY=long (price above EMA), SELL=short (price below EMA)
+    # For options: CE=bullish, PE=bearish
+    if side in ("CE", "BUY"):
         return closes[-1] > ema9
     else:
         return closes[-1] < ema9
@@ -1931,14 +1933,35 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
         return False
     
     # Signal buffer (reduce churn)
-    side = "CE" if "CE" in action else "PE"
+        # Signal buffer (reduce churn)
     buffer = signal_buffer[index_name]
-    if side == "CE":
-        buffer["ce_count"] += 1
-        buffer["pe_count"] = max(0, buffer["pe_count"] - 1)
-        if buffer["ce_count"] < 2:
-            logger.debug(f"{index_name}: CE buffer {buffer['ce_count']}/2")
-            return False
+    if is_commodity:
+        if action == "BUY":
+            buffer["ce_count"] += 1
+            buffer["pe_count"] = max(0, buffer["pe_count"] - 1)
+            if buffer["ce_count"] < 2:
+                logger.debug(f"{index_name}: BUY buffer {buffer['ce_count']}/2")
+                return False
+        else:  # SELL
+            buffer["pe_count"] += 1
+            buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
+            if buffer["pe_count"] < 2:
+                logger.debug(f"{index_name}: SELL buffer {buffer['pe_count']}/2")
+                return False
+    else:
+        side = "CE" if "CE" in action else "PE"
+        if side == "CE":
+            buffer["ce_count"] += 1
+            buffer["pe_count"] = max(0, buffer["pe_count"] - 1)
+            if buffer["ce_count"] < 2:
+                logger.debug(f"{index_name}: CE buffer {buffer['ce_count']}/2")
+                return False
+        else:
+            buffer["pe_count"] += 1
+            buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
+            if buffer["pe_count"] < 2:
+                logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
+                return False
     else:
         buffer["pe_count"] += 1
         buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
@@ -1970,8 +1993,13 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     now = time.time()
     
     # Determine side and premium
-    side = "CE" if "CE" in action else "PE"
-    prem = ce_prem if side == "CE" else pe_prem
+        # Determine side and premium
+    if is_commodity:
+        side = "CE" if action == "BUY" else "PE"
+        prem = spot  # For commodities, "premium" is just the spot price
+    else:
+        side = "CE" if "CE" in action else "PE"
+        prem = ce_prem if side == "CE" else pe_prem
     
     # Position sizing
     with _portfolio_state_lock:
@@ -2111,8 +2139,11 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
     highest = state["highest"]
     now = time.time()
     
-    is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
-    side = "CE" if "CE" in action else "PE"
+        is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
+    if is_commodity:
+        side = "CE" if action == "BUY" else "PE"
+    else:
+        side = "CE" if "CE" in action else "PE"
     
     # Current value
     if is_commodity:
