@@ -1144,11 +1144,34 @@ def update_candle(idx, price, volume, timestamp):
 # ----------------------------------------------------------------------
 # SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#-----------------------------------------------------------------------
+#REPLACED-------------------------------------------------------------
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
-    if candle_count < 5:
+    min_candles = 2 if INDEX_CONFIG[index_name].get("is_commodity") else 3
+    if candle_count < min_candles:
+        # Use price history as fallback
+        with _price_histories_lock:
+            prices = list(price_histories[index_name])
+        if len(prices) >= 5:
+            # Compute a simple trend using EMA of price history
+            ema9 = calculate_ema(prices, 9)
+            ema21 = calculate_ema(prices, 21)
+            price = prices[-1]
+            if ema9 > ema21 and price > ema9:
+                return 65.0
+            elif ema9 < ema21 and price < ema9:
+                return 35.0
+            else:
+                return 50.0
         return 50.0
+
+    # ... rest of existing sentiment logic ...
+# ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#-----------------------------------------------------------------------
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1433,15 +1456,20 @@ def compute_signal_quality(index_name):
 # ----------------------------------------------------------------------
 # has_complete_data() – requires sufficient history
 # ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#---------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
+        # Commodities: only 1 candle needed
         with _candle_histories_lock:
-            if len(candle_histories[index_name]["1min"]) < 3:
+            if len(candle_histories[index_name]["1min"]) < 1:
                 return False
         with _latest_ticks_lock:
             return latest_ticks[index_name].get("price", 0) > 0
     else:
+        # Equities: require 3 candles (instead of 10)
         with _latest_ticks_lock:
             spot = latest_ticks[index_name].get("spot_price", 0)
             ce = latest_ticks[index_name].get("ce_price", 0)
@@ -1449,13 +1477,16 @@ def has_complete_data(index_name):
             if spot <= 0 or ce <= 0 or pe <= 0:
                 return False
         with _candle_histories_lock:
-            if len(candle_histories[index_name]["1min"]) < 10:
+            if len(candle_histories[index_name]["1min"]) < 3:
                 return False
         with _price_histories_lock:
             if len(price_histories[index_name]) < 15:
                 return False
         return True
-
+# ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#---------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
 
@@ -2610,6 +2641,23 @@ class ConnectionManager:
         self._periodic_thread.start()
         
         logger.info("Pre-market and periodic token refresh schedulers started.")
+#--------------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
+    # Periodic signal timer (runs every 5 seconds)
+    def signal_timer():
+        while True:
+            time.sleep(5)
+            try:
+                run_all_signals()
+            except Exception as e:
+                logger.exception("Periodic signal timer crashed")
+
+    threading.Thread(target=signal_timer, daemon=True).start()
+    logger.info("Periodic signal timer started (every 5s)")
+#--------------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
 # BACKGROUND THREADS
