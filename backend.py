@@ -2053,7 +2053,7 @@ def on_ws_open(wsapp):
     last_heartbeat = time.time()
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
-    # Build token_list
+    # Build token_list (same as before)
     token_list = []
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
@@ -2077,282 +2077,58 @@ def on_ws_open(wsapp):
 
     logger.info(f"Subscribing to token_list: {token_list}")
 
-    # Check socket state before subscribing
-    if sws and sws.ws and sws.ws.sock and not sws.ws.sock.closed:
-        try:
-            response = sws.subscribe("hybrid_bot", 1, token_list)
-            logger.info(f"Subscription response: {response}")
-            if response and isinstance(response, dict) and not response.get("status", True):
-                logger.error(f"Subscription failed: {response}")
-            else:
-                total = sum(len(g["tokens"]) for g in token_list)
-                logger.info(f"Successfully subscribed to {total} tokens")
-        except Exception as e:
-            logger.error(f"Subscribe error: {e}")
+    # Small delay to ensure socket is ready
+    time.sleep(0.5)
+
+    # Subscribe without any socket-state check – the callback only fires when open
+    try:
+        response = sws.subscribe("hybrid_bot", 1, token_list)
+        logger.info(f"Subscription response: {response}")
+        if response and isinstance(response, dict) and not response.get("status", True):
+            logger.error(f"Subscription failed: {response}")
             with _ws_connect_lock:
                 ws_running = False
-    else:
-        logger.warning("Socket not open – skipping subscription")
+        else:
+            total = sum(len(g["tokens"]) for g in token_list)
+            logger.info(f"Successfully subscribed to {total} tokens")
+    except Exception as e:
+        logger.error(f"Subscribe error: {e}")
         with _ws_connect_lock:
             ws_running = False
 
-def on_ws_error(wsapp, error):
-    global ws_running
-    logger.error(f"WebSocket error: {error}")
-    with _ws_connect_lock:
-        ws_running = False
-
-def on_ws_close(wsapp, close_status_code=None, close_msg=None):
-    global ws_running
-    with _ws_connect_lock:
-        ws_running = False
-    logger.warning(f"WebSocket closed: status={close_status_code}, msg={close_msg}")
-
-def on_ws_data(wsapp, message):
-    global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run, ws_running
-
-    # Keep ws_running True whenever data arrives
-    ws_running = True
-    last_heartbeat = time.time()
-
-    if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
-        return
-
-    try:
-        ticks = []
-        if isinstance(message, dict):
-            ticks = [message]
-        elif isinstance(message, str):
-            try:
-                data = json.loads(message)
-                ticks = data if isinstance(data, list) else [data]
-            except Exception as e:
-                logger.error(f"JSON parse error: {e}")
-                return
-        elif isinstance(message, bytes):
-            with _ws_connect_lock:
-                local_sws = sws
-            try:
-                if local_sws and hasattr(local_sws, "_parse_binary_data"):
-                    parsed = local_sws._parse_binary_data(message)
-                    if parsed and parsed.get('token'):
-                        ticks = [parsed]
-                    else:
-                        return
-                else:
-                    return
-            except Exception as e:
-                logger.error(f"Binary parse error: {e}")
-                return
-        else:
-            return
-
-        if not ticks:
-            return
-
-        for tick in ticks:
-            try:
-                tick_counter += 1
-
-                token = str(tick.get("token") or tick.get("tk") or "")
-                ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
-
-                if isinstance(ltp, str):
-                    try:
-                        ltp = float(ltp)
-                    except:
-                        ltp = 0
-
-                if ltp > 100000:
-                    ltp = ltp / 100.0
-
-                vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
-                oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
-                bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
-                ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
-
-                # ---- SPOT PRICE MATCH ----
-                spot_matched = False
-                for idx, cfg in INDEX_CONFIG.items():
-                    cfg_token = cfg.get("token")
-                    if cfg_token and str(cfg_token) == token:
-                        if ltp > 0:
-                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
-                            if cfg.get("is_commodity"):
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["price"] = ltp
-                                    latest_ticks[idx]["volume"] = vol
-                                    latest_ticks[idx]["bid"] = bid
-                                    latest_ticks[idx]["ask"] = ask
-                                update_candle(idx, ltp, vol, time.time())
-                                last_tick_timestamp = time.time()
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["spot"] = ltp
-                                    last_known_prices[idx]["timestamp"] = time.time()
-                            else:
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["spot_price"] = ltp
-                                update_candle(idx, ltp, vol, time.time())
-                                last_tick_timestamp = time.time()
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["spot"] = ltp
-                                    last_known_prices[idx]["timestamp"] = time.time()
-                            spot_matched = True
-                            break
-                if spot_matched:
-                    continue
-
-                # ---- OPTION PRICE MATCH ----
-                option_matched = False
-                for idx, tokens in INDEX_TOKENS.items():
-                    if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
-                        continue
-                    ce_token = tokens.get("ce_token")
-                    pe_token = tokens.get("pe_token")
-                    if ce_token and token == str(ce_token):
-                        if ltp > 0:
-                            if ltp > 1000:
-                                ltp = ltp / 100.0
-                            vol = vol if vol > 0 else 1
-                            oi = oi if oi > 0 else 1
-                            logger.info(f"✅ CE MATCH: {idx} token={token} ltp={ltp}")
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["ce_price"] = ltp
-                                latest_ticks[idx]["ce_volume"] = vol
-                                latest_ticks[idx]["ce_oi"] = oi
-                                latest_ticks[idx]["ce_bid"] = bid
-                                latest_ticks[idx]["ce_ask"] = ask
-                            with _ce_price_histories_lock:
-                                ce_price_histories[idx].append(ltp)
-                            volume_profile_engines[idx].update(ltp, vol, option_type="CE")
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["ce"] = ltp
-                                last_known_prices[idx]["timestamp"] = time.time()
-                            option_matched = True
-                            break
-                    elif pe_token and token == str(pe_token):
-                        if ltp > 0:
-                            if ltp > 1000:
-                                ltp = ltp / 100.0
-                            vol = vol if vol > 0 else 1
-                            oi = oi if oi > 0 else 1
-                            logger.info(f"✅ PE MATCH: {idx} token={token} ltp={ltp}")
-                            with _latest_ticks_lock:
-                                latest_ticks[idx]["pe_price"] = ltp
-                                latest_ticks[idx]["pe_volume"] = vol
-                                latest_ticks[idx]["pe_oi"] = oi
-                                latest_ticks[idx]["pe_bid"] = bid
-                                latest_ticks[idx]["pe_ask"] = ask
-                            with _pe_price_histories_lock:
-                                pe_price_histories[idx].append(ltp)
-                            volume_profile_engines[idx].update(ltp, vol, option_type="PE")
-                            with _latest_ticks_lock:
-                                last_known_prices[idx]["pe"] = ltp
-                                last_known_prices[idx]["timestamp"] = time.time()
-                            option_matched = True
-                            break
-                if option_matched:
-                    continue
-
-                # ---- VIX MATCH ----
-                if str(token) == "99919017" and ltp > 0:
-                    with _latest_ticks_lock:
-                        latest_ticks["VIX"]["vix"] = ltp
-                    vix_history.append(ltp)
-
-            except Exception as e:
-                logger.error(f"Error processing tick: {e}")
-                continue
-
-        # Log candle growth every 100 ticks
-        if tick_counter % 100 == 0:
-            for idx in INDEX_NAMES:
-                if not INDEX_CONFIG[idx].get("is_commodity"):
-                    with _candle_histories_lock:
-                        ccount = len(candle_histories[idx]["1min"])
-                    logger.info(f"📊 {idx} 1min candle count: {ccount}, price_hist: {len(price_histories[idx])}")
-
-        # Run signal engine
-        ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
-        if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
-            with _signal_run_lock:
-                now = time.time()
-                if now - _last_signal_run >= 1.0:
-                    _last_signal_run = now
-                    threading.Thread(target=run_all_signals, daemon=True).start()
-
-    except Exception as e:
-        logger.error(f"Unhandled exception in on_ws_data: {e}")
-
-def tick_watchdog():
-    global ws_running, tick_counter, last_tick_timestamp, sws
-    last_count = 0
-    while True:
-        time.sleep(10)
-        if ws_running:
-            if time.time() - last_tick_timestamp > 60:
-                logger.warning("No ticks for 60s - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except:
-                        pass
-            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
-                logger.warning("Tick counter stalled - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except:
-                        pass
-            else:
-                last_count = tick_counter
-
-def ws_watchdog():
-    global ws_running, last_heartbeat, last_tick_timestamp, sws
-    while True:
-        time.sleep(10)
-        now = time.time()
-        with _ws_connect_lock:
-            is_running = ws_running
-        if is_running:
-            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
-                logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
-                with _ws_connect_lock:
-                    ws_running = False
-                if sws:
-                    try:
-                        sws.close_connection()
-                    except Exception:
-                        pass
 
 def start_angel_websocket_improved():
     global sws, ws_running, last_heartbeat
-    retry_delay = 10   # start with 10 seconds
-    max_delay = 120
+    retry_delay = 30   # start with 30 seconds (avoid 429)
+    max_delay = 300    # max 5 minutes
 
     while True:
         try:
+            # Ensure we don't already have a connection attempt running
             with _ws_connect_lock:
-                ws_running = False
+                if ws_running:
+                    logger.info("WS already running, skipping new connection attempt")
+                    time.sleep(10)
+                    continue
+                ws_running = False   # ensure it's false
 
+            # Wait if market closed
             if not is_market_open() and not is_mcx_open():
+                logger.info("Markets closed, sleeping 60s")
                 time.sleep(60)
                 continue
 
             auth_token, feed_token, _ = get_auth_token()
             if not feed_token:
-                logger.error("Failed to get feed token, retrying in 10s...")
-                time.sleep(10)
+                logger.error("Failed to get feed token, retrying in 30s...")
+                time.sleep(30)
                 continue
 
-            # Close any existing connection
+            # Close any existing connection (cleanup)
             if sws:
                 try:
                     sws.close_connection()
+                    time.sleep(2)
                 except:
                     pass
                 sws = None
@@ -2378,10 +2154,10 @@ def start_angel_websocket_improved():
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
 
-            # Allow connection to establish
+            # Give the connection time to establish
             time.sleep(5)
 
-            # Inner loop: monitor connection
+            # Inner monitoring loop
             while True:
                 time.sleep(5)
                 with _ws_connect_lock:
@@ -2390,18 +2166,18 @@ def start_angel_websocket_improved():
                     logger.warning("WebSocket disconnected detected")
                     break
 
-                # Optional heartbeat (if needed)
+                # Optional: send heartbeat if library supports it
                 # ...
 
             # Disconnected – backoff and retry
             logger.warning(f"Reconnecting in {retry_delay}s...")
             time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 1.5, max_delay)
+            retry_delay = min(retry_delay * 2, max_delay)
 
         except Exception as e:
             logger.error(f"WebSocket thread error: {e}")
             time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 1.5, max_delay)
+            retry_delay = min(retry_delay * 2, max_delay)
 
 # ----------------------------------------------------------------------
 # PRE-MARKET TOKEN REFRESH SCHEDULER
