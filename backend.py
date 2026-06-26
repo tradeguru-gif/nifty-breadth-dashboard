@@ -2797,7 +2797,7 @@ def live_signals():
         for tf in TIMEFRAMES:
             trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
 
-    # Run signals for any index that hasn't been triggered by a new candle (backup)
+    # Run signals if needed (backup)
     for idx in INDEX_NAMES:
         if not INDEX_CONFIG[idx].get("active"):
             continue
@@ -2811,16 +2811,23 @@ def live_signals():
                     except Exception as e:
                         logger.exception(f"run_signal_engine_for_index({idx}) from live-signals failed: {e}")
 
+    # ---- Market status labels ----
+    equity_open = is_market_open()
+    mcx_open = is_mcx_open()
+    if equity_open and mcx_open:
+        market_label = "EQUITY + MCX OPEN"
+    elif equity_open:
+        market_label = "EQUITY OPEN"
+    elif mcx_open:
+        market_label = "MCX OPEN"
+    else:
+        market_label = "CLOSED"
+
     with _market_signal_lock, _portfolio_state_lock:
         portfolio_with_trades = {}
         for idx, port in portfolio_state.items():
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
-
-        # ---- FIX: Combined market status ----
-        equity_open = is_market_open()
-        mcx_open = is_mcx_open()
-        combined_open = equity_open or mcx_open
 
         return jsonify({
             "timestamp": datetime.now().isoformat(),
@@ -2829,15 +2836,16 @@ def live_signals():
             "trends": trends_data,
             "portfolios": portfolio_with_trades,
             "quality_scores": quality_scores,
-            "market_open": combined_open,        # <-- changed to combined
-            "mcx_open": mcx_open,                # keep separate if needed
-            "market_status": "Equity + MCX" if (equity_open and mcx_open) else "MCX" if mcx_open else "Equity" if equity_open else "CLOSED",
+            "market_open": equity_open or mcx_open,   # boolean for compatibility
+            "market_label": market_label,             # new field for UI
+            "mcx_open": mcx_open,                     # keep individual flags
+            "equity_open": equity_open,
             "debug": {
                 "ws_running": ws_running,
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "17.6-Stable-WS"
+            "version": "17.6-StableWS"
         })
 @app.route("/api/token-status", methods=["GET"])
 def token_status():
