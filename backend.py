@@ -2503,11 +2503,12 @@ def fetch_asset_data(idx):
     return results
 
 def start_rest_only_mode():
-    global last_rest_fetch, last_tick_timestamp
+    global last_rest_fetch, last_tick_timestamp, ws_running
     logger.info("Starting REST fallback (concurrent fetch mode)")
     cycle_count = 0
     while True:
         try:
+            # If WebSocket is running, sleep and skip
             with _ws_connect_lock:
                 if ws_running:
                     logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
@@ -2521,14 +2522,16 @@ def start_rest_only_mode():
                     cfg = INDEX_CONFIG[idx]
                     if not cfg.get("active"):
                         continue
-    # Always fetch all active indices, even if market is closed (for REST mode)
-                assets_to_fetch.append(idx)
+                    is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
+                    if is_open:
+                        assets_to_fetch.append(idx)
 
                 if not assets_to_fetch:
                     logger.debug("REST: No markets open, sleeping 30s")
                     time.sleep(30)
                     continue
 
+                # Refresh tokens if needed
                 for idx in assets_to_fetch:
                     if not INDEX_CONFIG[idx].get("is_commodity"):
                         tokens = INDEX_TOKENS.get(idx, {})
@@ -2561,6 +2564,9 @@ def start_rest_only_mode():
                                     last_known_prices[idx]["spot"] = spot
                                     last_known_prices[idx]["timestamp"] = time.time()
                                 last_tick_timestamp = time.time()
+                                # --- SET WS_RUNNING TO TRUE ---
+                                with _ws_connect_lock:
+                                    ws_running = True
                                 logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
                             if not INDEX_CONFIG[idx].get("is_commodity"):
@@ -2578,6 +2584,8 @@ def start_rest_only_mode():
                                     with _ce_price_histories_lock:
                                         ce_price_histories[idx].append(ce["ltp"])
                                     last_tick_timestamp = time.time()
+                                    with _ws_connect_lock:
+                                        ws_running = True
                                     logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
                                 else:
                                     logger.warning(f"REST: {idx} CE quote fetch FAILED")
@@ -2593,6 +2601,8 @@ def start_rest_only_mode():
                                     with _pe_price_histories_lock:
                                         pe_price_histories[idx].append(pe["ltp"])
                                     last_tick_timestamp = time.time()
+                                    with _ws_connect_lock:
+                                        ws_running = True
                                     logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
                                 else:
                                     logger.warning(f"REST: {idx} PE quote fetch FAILED")
@@ -2610,8 +2620,7 @@ def start_rest_only_mode():
 
                 last_rest_fetch = time.time()
 
-                # Run signals on REST mode only when candles are updated (we don't have new candle flag here)
-                # We'll run once per cycle
+                # Run signals for all ready indices
                 ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
                 for idx in ready_indices:
                     try:
@@ -2619,11 +2628,12 @@ def start_rest_only_mode():
                     except Exception as e:
                         logger.exception(f"run_signal_engine_for_index({idx}) rest failed: {e}")
 
+                # Sleep for the rest cycle interval
                 cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
                 for _ in range(cycle_interval):
                     time.sleep(1)
                     with _ws_connect_lock:
-                        if ws_running:
+                        if ws_running and not os.getenv("FORCE_REST_MODE") == "1":
                             logger.debug("REST cycle interrupted: WS reconnected")
                             break
 
@@ -2637,7 +2647,6 @@ def start_rest_only_mode():
         except Exception as e:
             logger.error(f"REST fallback outer error: {e}\n{traceback.format_exc()}")
             time.sleep(10)
-
 # ----------------------------------------------------------------------
 # CONNECTION MANAGER
 # ----------------------------------------------------------------------
