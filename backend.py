@@ -1218,12 +1218,12 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
         confidence_multiplier = 1.1
 
     if is_commodity:
-    if sentiment >= 55:
-        return "BUY", int(70 * confidence_multiplier)
-    elif sentiment >= 45:
-        return "HOLD", 50
-    else:
-        return "SELL", int(70 * confidence_multiplier)
+        if sentiment >= 55:
+            return "BUY", int(70 * confidence_multiplier)
+        elif sentiment >= 45:
+            return "HOLD", 50
+        else:
+            return "SELL", int(70 * confidence_multiplier)
 
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
