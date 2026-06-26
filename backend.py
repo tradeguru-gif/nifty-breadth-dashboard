@@ -890,14 +890,20 @@ def get_index_spot(index_name):
         return None
     _, _, obj = get_auth_token()
     if not obj:
+        logger.warning(f"No auth object for {index_name}")
         return None
     try:
+        logger.info(f"🔍 ltpData request: exchange={config['exchange']}, symbol={config['symbol']}, token={config['token']}")
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
+        logger.info(f"🔍 ltpData response: {resp}")
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
                 ltp /= 100
+            logger.info(f"✅ Parsed LTP for {index_name}: {ltp}")
             return ltp
+        else:
+            logger.warning(f"Invalid LTP for {index_name}: {ltp}")
     except Exception as e:
         logger.error(f"get_index_spot: {index_name} exception: {e}")
     return None
@@ -2479,9 +2485,13 @@ def periodic_token_refresh():
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
     try:
-        spot = get_index_spot(idx)
+        # --- Log the attempt ---
+        logger.info(f"🔍 Fetching spot for {idx}")
+
+        spot = get_index_spot(idx)   # this already logs internally if we add logs there
         if spot:
             results["spot"] = spot
+            logger.info(f"✅ Spot for {idx}: {spot}")
             if not INDEX_CONFIG[idx].get("is_commodity"):
                 tokens = INDEX_TOKENS.get(idx, {})
                 if tokens.get("ce_token"):
