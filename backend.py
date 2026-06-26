@@ -2645,16 +2645,17 @@ class ConnectionManager:
 #-------------------------------------------------------------------------------------
 #--------------------------------------------------------------------------------------
     # Periodic signal timer (runs every 5 seconds)
-    def signal_timer():
-        while True:
-            time.sleep(5)
-            try:
-                run_all_signals()
-            except Exception as e:
-                logger.exception("Periodic signal timer crashed")
+    # Inside ConnectionManager.start()
+def signal_timer():
+    while True:
+        time.sleep(10)  # ← change to 10 or 15 to reduce CPU
+        try:
+            run_all_signals()
+        except Exception as e:
+            logger.exception("Periodic signal timer crashed: %s", e)
 
-    threading.Thread(target=signal_timer, daemon=True).start()
-    logger.info("Periodic signal timer started (every 5s)")
+threading.Thread(target=signal_timer, daemon=True).start()
+logger.info("Periodic signal timer started")
 #--------------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------------
 #--------------------------------------------------------------------------------------
@@ -2759,71 +2760,75 @@ def home():
 
 @app.route("/api/live-signals", methods=["GET"])
 def live_signals():
-    sentiment_data = {}
-    trends_data = {}
-    quality_scores = {}
-    for idx in INDEX_NAMES:
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        with _market_signal_lock:
-            sentiment_data[idx] = {
-                "score": market_signal[idx].get("sentiment_score", 50),
-                "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50)),
-                "confidence": market_signal[idx].get("confidence", 0)
-            }
-            quality_scores[idx] = market_signal[idx].get("quality_score", compute_signal_quality(idx))
-        trends_data[idx] = {}
-        for tf in TIMEFRAMES:
-            trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
+    try:
+        sentiment_data = {}
+        trends_data = {}
+        quality_scores = {}
+        for idx in INDEX_NAMES:
+            if not INDEX_CONFIG[idx].get("active"):
+                continue
+            with _market_signal_lock:
+                sentiment_data[idx] = {
+                    "score": market_signal[idx].get("sentiment_score", 50),
+                    "label": get_sentiment_label(market_signal[idx].get("sentiment_score", 50)),
+                    "confidence": market_signal[idx].get("confidence", 0)
+                }
+                quality_scores[idx] = market_signal[idx].get("quality_score", compute_signal_quality(idx))
+            trends_data[idx] = {}
+            for tf in TIMEFRAMES:
+                trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
 
-    for idx in INDEX_NAMES:
-        if not INDEX_CONFIG[idx].get("active"):
-            continue
-        with _market_signal_lock:
-            if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
-                with _candle_histories_lock:
-                    candle_len = len(candle_histories[idx]["1min"])
-                if candle_len >= 5:
-                    try:
-                        run_signal_engine_for_index(idx)
-                    except Exception as e:
-                        logger.exception(f"run_signal_engine_for_index({idx}) from live-signals failed: {e}")
+        for idx in INDEX_NAMES:
+            if not INDEX_CONFIG[idx].get("active"):
+                continue
+            with _market_signal_lock:
+                if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
+                    with _candle_histories_lock:
+                        candle_len = len(candle_histories[idx]["1min"])
+                    if candle_len >= 5:
+                        try:
+                            run_signal_engine_for_index(idx)
+                        except Exception as e:
+                            logger.exception(f"run_signal_engine_for_index({idx}) from live-signals failed: {e}")
 
-    equity_open = is_market_open()
-    mcx_open = is_mcx_open()
-    if equity_open and mcx_open:
-        market_label = "EQUITY + MCX OPEN"
-    elif equity_open:
-        market_label = "EQUITY OPEN"
-    elif mcx_open:
-        market_label = "MCX OPEN"
-    else:
-        market_label = "CLOSED"
+        equity_open = is_market_open()
+        mcx_open = is_mcx_open()
+        if equity_open and mcx_open:
+            market_label = "EQUITY + MCX OPEN"
+        elif equity_open:
+            market_label = "EQUITY OPEN"
+        elif mcx_open:
+            market_label = "MCX OPEN"
+        else:
+            market_label = "CLOSED"
 
-    with _market_signal_lock, _portfolio_state_lock:
-        portfolio_with_trades = {}
-        for idx, port in portfolio_state.items():
-            portfolio_with_trades[idx] = port.copy()
-            portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
+        with _market_signal_lock, _portfolio_state_lock:
+            portfolio_with_trades = {}
+            for idx, port in portfolio_state.items():
+                portfolio_with_trades[idx] = port.copy()
+                portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
 
-        return jsonify({
-            "timestamp": datetime.now().isoformat(),
-            "signals": market_signal,
-            "sentiment": sentiment_data,
-            "trends": trends_data,
-            "portfolios": portfolio_with_trades,
-            "quality_scores": quality_scores,
-            "market_open": equity_open or mcx_open,
-            "market_label": market_label,
-            "equity_open": equity_open,
-            "mcx_open": mcx_open,
-            "debug": {
-                "ws_running": ws_running,
-                "ticks": tick_counter,
-                "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
-            },
-            "version": "17.6-StableWS"
-        })
+            return jsonify({
+                "timestamp": datetime.now().isoformat(),
+                "signals": market_signal,
+                "sentiment": sentiment_data,
+                "trends": trends_data,
+                "portfolios": portfolio_with_trades,
+                "quality_scores": quality_scores,
+                "market_open": equity_open or mcx_open,
+                "market_label": market_label,
+                "equity_open": equity_open,
+                "mcx_open": mcx_open,
+                "debug": {
+                    "ws_running": ws_running,
+                    "ticks": tick_counter,
+                    "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
+                },
+                "version": "17.6-StableWS"
+            })
+    except Exception as e:
+        logger.exception("live_signals crashed")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/token-status", methods=["GET"])
 def token_status():
