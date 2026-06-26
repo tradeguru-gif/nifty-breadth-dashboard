@@ -2521,9 +2521,8 @@ def start_rest_only_mode():
                     cfg = INDEX_CONFIG[idx]
                     if not cfg.get("active"):
                         continue
-                    is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
-                    if is_open:
-                        assets_to_fetch.append(idx)
+    # Always fetch all active indices, even if market is closed (for REST mode)
+                assets_to_fetch.append(idx)
 
                 if not assets_to_fetch:
                     logger.debug("REST: No markets open, sleeping 30s")
