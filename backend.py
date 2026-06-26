@@ -3047,8 +3047,6 @@ def auto_start_background():
             _background_started = True
             logger.info("Auto-start: Background threads initialized for production")
 
-auto_start_background()
-
 # ----------------------------------------------------------------------
 # FLASK ROUTES
 # ----------------------------------------------------------------------
@@ -3361,11 +3359,24 @@ def reload_candles(index_name):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    init_db()
-    load_portfolio_state()
-    get_mcx_futures_tokens()
-    refresh_all_tokens()
-    _load_candle_histories_from_db()
-    _start_background_threads()
-    logger.info(f"Background workers initiated. Starting Flask API Server on port {port}...")
+    
+    # CRITICAL: Start Flask immediately so Render detects the port
+    # Background threads start after in a separate thread
+    
+    def start_background_after_bind():
+        time.sleep(3)  # Let Flask start
+        try:
+            init_db()
+            load_portfolio_state()
+            get_mcx_futures_tokens()
+            refresh_all_tokens()
+            _load_candle_histories_from_db()
+            _start_background_threads()
+            logger.info("✅ Background initialization complete")
+        except Exception as e:
+            logger.exception("Background init failed")
+    
+    threading.Thread(target=start_background_after_bind, daemon=True).start()
+    
+    logger.info(f"🚀 Starting Flask on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False)
