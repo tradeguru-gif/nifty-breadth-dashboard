@@ -9,6 +9,8 @@
 # - Corrected: get_db_path() moved to top, kelly_trackers defined,
 #   _estimate_greeks_fallback repaired, deque mutation protected,
 #   watchdog starvation threshold adaptive for MCX late hours.
+# - Fixed duplicate function definitions, indentation errors, and restored
+#   original is_mcx_open() and compute_signal_quality().
 
 import sys
 import logging
@@ -664,10 +666,7 @@ def _estimate_greeks_fallback(index_name):
     return greeks_data
 
 # ----------------------------------------------------------------------
-# GREEKS FETCHING & FALLBACK ENGINE
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# GREEKS FETCHING & FALLBACK ENGINE
+# GREEKS FETCHING & FALLBACK ENGINE (single definition)
 # ----------------------------------------------------------------------
 def get_option_greeks(index_name):
     """Fetches ready-made option greeks directly from Angel One API."""
@@ -731,43 +730,7 @@ def get_option_greeks(index_name):
     fallback_data = _estimate_greeks_fallback(index_name)
     _greeks_cache[index_name] = {"data": fallback_data, "timestamp": now}
     return fallback_data
-# ----------------------------------------------------------------------
-# ENTRY EVALUATION ENGINE
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ENTRY EVALUATION ENGINE
-# ----------------------------------------------------------------------
-def should_enter_trade(index_name, signal_type):
-    """Calculates trade entry quality scoring out of 100."""
-    scores = []
-    
-    # 1. Base Strategy Allocation
-    scores.append(40) # Baseline points for the technical trigger
-    
-    # 2. Option Greeks Safety Evaluation
-    greeks = get_option_greeks(index_name)
-    if greeks is not None:
-        scores.append(20)
-        ce_iv = greeks.get("ce_iv", 0.2)
-        iv_rank = greeks.get("iv_rank", 50)
-    else:
-        # Fallback or pass for Commodities / failed API calls
-        scores.append(0)
-        ce_iv = 0.0
-        iv_rank = 0.0
 
-    # 3. Liquidity / Bid-Ask Spread Safety Check
-    with _latest_ticks_lock:
-        bid = latest_ticks[index_name].get("ce_bid", 0)
-        ask = latest_ticks[index_name].get("ce_ask", 0)
-        
-    if bid > 0 and ask > 0:
-        spread_pct = (ask - bid) / ((ask + bid) / 2) * 100
-        scores.append(max(0, 20 - spread_pct * 4))
-    else:
-        scores.append(10)
-        
-    return min(100, sum(scores))
 # ----------------------------------------------------------------------
 # KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
@@ -1103,16 +1066,20 @@ def is_market_open():
     return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_mcx_open():
-    """Returns True if current time falls within MCX operating hours (9:00 AM to 11:30 PM IST)."""
-    # Create a simple timezone-aware or naive check matching your script's timestamp framework
-    now_dt = datetime.now()
-    market_start = now_dt.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now_dt.replace(hour=23, minute=30, second=0, microsecond=0)
-    
-    # Check weekday (0 = Monday, 4 = Friday)
-    if now_dt.weekday() > 4:
+    if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
+        return True
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    current = now_ist.time()
+    if now_ist.weekday() >= 5:
         return False
-    return market_start <= now_dt <= market_end
+    open_time = dt_time(10, 0)
+    close_time = dt_time(23, 30)
+    return open_time <= current <= close_time
+
+def is_index_market_open(idx):
+    cfg = INDEX_CONFIG.get(idx, {})
+    return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ============================================================
 # CORRECTED update_candle() – with debug logs and new candle flag
@@ -1386,7 +1353,6 @@ def detect_regime(index_name):
         vix_sma = sum(list(vix_history)[-20:]) / 20
     else:
         vix_sma = vix
-    # ... inside your market regime calculation function ...
     if adx > adx_threshold and atr_pct > atr_threshold:
         new_regime = "TRENDING"
     elif adx < adx_threshold * 0.6 and atr_pct < atr_threshold * 0.5:
@@ -1466,33 +1432,18 @@ def compute_signal_quality(index_name):
         count = len(candle_histories[index_name]["1min"])
     scores.append(min(30, count))
     if not INDEX_CONFIG[index_name].get("is_commodity"):
-        # ... previous code inside the function ...
-
-    greeks = get_option_greeks(index_name)
-    
-    # 1. Safely handle scoring based on whether greeks exist
-    if greeks is not None:
-        scores.append(20)
-        # If you need to extract specific values for options calculation logic:
-        ce_iv = greeks.get("ce_iv", 0.2)
-        iv_rank = greeks.get("iv_rank", 50)
+        greeks = get_option_greeks(index_name)
+        scores.append(20 if greeks else 0)
     else:
-        # Fallback or pass for Commodities / failed API calls
-        scores.append(0)
-        ce_iv = 0.0
-        iv_rank = 0.0
-
-    # 2. Keep your spread and bid/ask logic exactly as it was
+        scores.append(20)
     with _latest_ticks_lock:
         bid = latest_ticks[index_name].get("ce_bid", 0)
         ask = latest_ticks[index_name].get("ce_ask", 0)
-        
     if bid > 0 and ask > 0:
         spread_pct = (ask - bid) / ((ask + bid) / 2) * 100
         scores.append(max(0, 20 - spread_pct * 4))
     else:
         scores.append(10)
-        
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
@@ -3380,46 +3331,7 @@ def reload_candles(index_name):
         "index": index_name,
         "candle_count": len(candle_histories[index_name]["1min"])
     })
-# ----------------------------------------------------------------------
-# ENTRY EVALUATION ENGINE
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ENTRY EVALUATION ENGINE
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ENTRY EVALUATION ENGINE
-# ----------------------------------------------------------------------
-def should_enter_trade(index_name, signal_type):
-    """Calculates trade entry quality scoring out of 100."""
-    scores = []
-    
-    # 1. Base Strategy Allocation
-    scores.append(40) # Baseline points for the technical trigger
-    
-    # 2. Option Greeks Safety Evaluation
-    greeks = get_option_greeks(index_name)
-    if greeks is not None:
-        scores.append(20)
-        ce_iv = greeks.get("ce_iv", 0.2)
-        iv_rank = greeks.get("iv_rank", 50)
-    else:
-        # Fallback or pass for Commodities / failed API calls
-        scores.append(0)
-        ce_iv = 0.0
-        iv_rank = 0.0
 
-    # 3. Liquidity / Bid-Ask Spread Safety Check
-    with _latest_ticks_lock:
-        bid = latest_ticks[index_name].get("ce_bid", 0)
-        ask = latest_ticks[index_name].get("ce_ask", 0)
-        
-    if bid > 0 and ask > 0:
-        spread_pct = (ask - bid) / ((ask + bid) / 2) * 100
-        scores.append(max(0, 20 - spread_pct * 4))
-    else:
-        scores.append(10)
-        
-    return min(100, sum(scores))
 # ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
