@@ -728,8 +728,6 @@ def get_option_greeks(index_name):
     except Exception as e:
         logger.debug(f"Greeks API error {index_name}: {e}")
         
-        for g in greeks_list:
-        
     fallback_data = _estimate_greeks_fallback(index_name)
     _greeks_cache[index_name] = {"data": fallback_data, "timestamp": now}
     return fallback_data
