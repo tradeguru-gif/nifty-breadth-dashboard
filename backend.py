@@ -3380,6 +3380,9 @@ def reload_candles(index_name):
 # ----------------------------------------------------------------------
 # ENTRY EVALUATION ENGINE
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# ENTRY EVALUATION ENGINE
+# ----------------------------------------------------------------------
 def should_enter_trade(index_name, signal_type):
     """Calculates trade entry quality scoring out of 100."""
     scores = []
@@ -3411,7 +3414,6 @@ def should_enter_trade(index_name, signal_type):
         scores.append(10)
         
     return min(100, sum(scores))
-
 # ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
