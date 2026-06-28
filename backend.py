@@ -734,21 +734,24 @@ def get_option_greeks(index_name):
 # ----------------------------------------------------------------------
 # ENTRY EVALUATION ENGINE
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# ENTRY EVALUATION ENGINE
+# ----------------------------------------------------------------------
 def should_enter_trade(index_name, signal_type):
     """Calculates trade entry quality scoring out of 100."""
     scores = []
     
     # 1. Base Strategy Allocation
-    scores.append(40)  # Baseline points for technical validation
+    scores.append(40) # Baseline points for the technical trigger
     
     # 2. Option Greeks Safety Evaluation
     greeks = get_option_greeks(index_name)
     if greeks is not None:
         scores.append(20)
         ce_iv = greeks.get("ce_iv", 0.2)
-        iv_rank = greeks.get("iv_rank", 50.0)
+        iv_rank = greeks.get("iv_rank", 50)
     else:
-        # Pass safely for Commodities or missing API responses
+        # Fallback or pass for Commodities / failed API calls
         scores.append(0)
         ce_iv = 0.0
         iv_rank = 0.0
@@ -3377,6 +3380,9 @@ def reload_candles(index_name):
         "index": index_name,
         "candle_count": len(candle_histories[index_name]["1min"])
     })
+# ----------------------------------------------------------------------
+# ENTRY EVALUATION ENGINE
+# ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 # ENTRY EVALUATION ENGINE
 # ----------------------------------------------------------------------
