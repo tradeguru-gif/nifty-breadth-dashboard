@@ -1,5 +1,6 @@
 # === HYBRID v17.8 – FIXED SIGNAL ENGINE ORDER ===
 # - Fixed: run_all_signals defined before on_ws_data callback
+# - Fixed: Syntax error in bsm_iv_delta function (line 589)
 # - Restored signal engine (run_all_signals, run_signal_engine_for_index, etc.)
 # - MCX tokens fetched before refresh_all_tokens()
 # - VIX REST fetch implemented (get_vix_ltp)
@@ -586,7 +587,8 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
         d1 = (math.log(S/K) + (r + 0.5*iv_est**2)*T) / (iv_est*math.sqrt(T))
         delta_est = norm.cdf(d1) if option_type == "CE" else -norm.cdf(-d1)
     except Exception:
-        delta_est = 0.5 if option_type == "CE" else -0.5    return iv_est, delta_est
+        delta_est = 0.5 if option_type == "CE" else -0.5
+    return iv_est, delta_est
 
 greeks_cache_fallback_store = {}
 for idx in INDEX_NAMES:
@@ -1700,7 +1702,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – FULL IMPLEMENTATION (MOVED HERE)
+# MAIN SIGNAL ENGINE – FULL IMPLEMENTATION
 # ============================================================
 
 def run_all_signals():
