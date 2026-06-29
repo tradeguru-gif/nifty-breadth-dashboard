@@ -1,15 +1,4 @@
-# === HYBRID v15.4 – FINAL PRODUCTION READY ===
-# Changes:
-# 1. Reduced logging noise (RAW WS DATA now DEBUG level)
-# 2. Added market status label in all responses
-# 3. Fixed equity market hours (9:15 AM - 3:30 PM)
-# 4. Fixed MCX market hours (10:00 AM - 11:30 PM)
-# 5. Added proper signal handling for both equity and MCX
-# 6. Optimized WebSocket logging
-# 7. Removed duplicate code in on_ws_data
-# 8. Fixed version consistency
-# 9. Fixed syntax error in compute_ml_score
-
+# === HYBRID v15.5 – FIXED MARKET HOURS & LOWERED COMMODITY THRESHOLDS ===
 import sys
 import logging
 import os
@@ -30,6 +19,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pyotp
+import pytz  # added for reliable timezone
 
 # ---------- DEBUG MODE ----------
 DEBUG_MODE = os.getenv("DEBUG_MODE", "0") == "1"
@@ -335,9 +325,9 @@ _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
-# ----------------------------------------------------------------------
+# ============================================================
 # INDICATORS
-# ----------------------------------------------------------------------
+# ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
         return 0.0
@@ -975,27 +965,26 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
     get_mcx_futures_tokens()
 
-# ----------------------------------------------------------------------
-# MARKET HOURS FUNCTIONS
-# ----------------------------------------------------------------------
+# ============================================================
+# FIXED MARKET HOURS using pytz
+# ============================================================
+IST = pytz.timezone('Asia/Kolkata')
+
 def is_market_open():
     """Check if equity market is open (Monday-Friday, 9:15 AM - 3:30 PM IST)."""
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
         return True
-    now_utc = datetime.now(timezone.utc)
-    now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    now_ist = datetime.now(IST)
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 30)
-    is_weekday = now_ist.weekday() < 5
-    return is_weekday and open_time <= current <= close_time
+    return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_mcx_open():
     """Check if MCX market is open (Monday-Friday, 10:00 AM - 11:30 PM IST)."""
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
         return True
-    now_utc = datetime.now(timezone.utc)
-    now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    now_ist = datetime.now(IST)
     current = now_ist.time()
     if now_ist.weekday() >= 5:
         return False
@@ -1020,52 +1009,9 @@ def is_index_market_open(idx):
     cfg = INDEX_CONFIG.get(idx, {})
     return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
-# ----------------------------------------------------------------------
-# CANDLE UPDATE
-# ----------------------------------------------------------------------
-def update_candle(idx, price, cumulative_volume, timestamp):
-    logger.debug(f"🕒 update_candle called for {idx} at {timestamp}, price={price}")
-    with _prev_volume_lock:
-        prev = _prev_volume.get(idx, 0)
-        if cumulative_volume > 0:
-            if prev > 0:
-                tick_vol = max(0, cumulative_volume - prev)
-            else:
-                tick_vol = max(1, cumulative_volume)
-            _prev_volume[idx] = cumulative_volume
-        else:
-            tick_vol = 1
-
-        if tick_vol > 1000000:
-            tick_vol = 0
-
-    for tf, interval in TIMEFRAME_SECONDS.items():
-        candle_start = int(timestamp / interval) * interval
-        with _current_candle_lock:
-            if _last_candle_time[idx][tf] != candle_start:
-                if _current_candle[idx][tf] is not None:
-                    with _candle_histories_lock:
-                        candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        if tf == "1min":
-                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
-
-                _current_candle[idx][tf] = {
-                    "open": price, "high": price, "low": price, "close": price,
-                    "volume": tick_vol, "timestamp": candle_start
-                }
-                _last_candle_time[idx][tf] = candle_start
-                logger.debug(f"🕒 NEW CANDLE {idx} {tf} start={candle_start}, price={price}")
-            else:
-                if _current_candle[idx][tf] is not None:
-                    _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
-                    _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
-                    _current_candle[idx][tf]["close"] = price
-                    _current_candle[idx][tf]["volume"] += tick_vol
-                    logger.debug(f"🔄 Updating candle {idx} {tf} close={price}")
-
-# ----------------------------------------------------------------------
-# SENTIMENT, REGIME, CONFIRMATION
-# ----------------------------------------------------------------------
+# ============================================================
+# SENTIMENT, REGIME, CONFIRMATION (with modified thresholds)
+# ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
@@ -1134,14 +1080,104 @@ def get_sentiment_label(sentiment):
     elif sentiment >= 15: return "BEARISH"
     else: return "STRONG BEARISH"
 
-def get_signal_from_sentiment(sentiment):
-    if sentiment >= 85: return "STRONG_BUY_CE"
-    elif sentiment >= 70: return "BUY_CE"
-    elif sentiment >= 55: return "LOW_BUY_CE"
-    elif sentiment >= 45: return "NO_TRADE"
-    elif sentiment >= 30: return "LOW_BUY_PE"
-    elif sentiment >= 15: return "BUY_PE"
-    else: return "STRONG_BUY_PE"
+def get_current_adx(index_name):
+    with _candle_histories_lock:
+        candles = list(candle_histories[index_name]["5min"])
+    if len(candles) >= 15:
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+        closes = [c["close"] for c in candles]
+        return calculate_adx(highs, lows, closes, 14)
+    return 18.0
+
+# ============================================================
+# MODIFIED get_signal_from_sentiment – lower commodity thresholds
+# ============================================================
+def get_signal_from_sentiment(index_name, sentiment, adx=None):
+    """Return action and confidence based on sentiment and regime."""
+    if adx is None:
+        adx = get_current_adx(index_name)
+    regime = detect_regime(index_name)
+    is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
+    with _latest_ticks_lock:
+        vix = latest_ticks["VIX"]["vix"]
+    confidence_multiplier = 1.0
+    if vix > 25:
+        confidence_multiplier = 0.7
+    elif vix < 15:
+        confidence_multiplier = 1.1
+
+    # ----- MODIFIED COMMODITY BRANCH (more signals) -----
+    if is_commodity:
+        if sentiment >= 50:                     # lowered from 55
+            return "BUY", int(70 * confidence_multiplier)
+        elif sentiment >= 40:                   # HOLD range: 40-49
+            return "HOLD", 50
+        else:                                   # sentiment < 40
+            return "SELL", int(70 * confidence_multiplier)
+
+    # ----- EQUITY INDICES (option side) -----
+    if regime == "TRENDING" and adx > 15:
+        if sentiment >= 62:
+            return "STRONG_BUY_CE", int(90 * confidence_multiplier)
+        elif sentiment >= 52:
+            return "BUY_CE", int(80 * confidence_multiplier)
+        elif sentiment >= 42:
+            return "LOW_BUY_CE", int(70 * confidence_multiplier)
+        elif sentiment >= 38:
+            return "NO_TRADE", 50
+        elif sentiment >= 28:
+            return "LOW_BUY_PE", int(70 * confidence_multiplier)
+        elif sentiment >= 18:
+            return "BUY_PE", int(80 * confidence_multiplier)
+        else:
+            return "STRONG_BUY_PE", int(90 * confidence_multiplier)
+    elif regime == "RANGING":
+        if sentiment >= 68:
+            return "STRONG_BUY_CE", int(75 * confidence_multiplier)
+        elif sentiment >= 58:
+            return "BUY_CE", int(65 * confidence_multiplier)
+        elif sentiment >= 48:
+            return "LOW_BUY_CE", int(55 * confidence_multiplier)
+        elif sentiment >= 42:
+            return "NO_TRADE", 50
+        elif sentiment >= 32:
+            return "LOW_BUY_PE", int(55 * confidence_multiplier)
+        elif sentiment >= 22:
+            return "BUY_PE", int(65 * confidence_multiplier)
+        else:
+            return "STRONG_BUY_PE", int(75 * confidence_multiplier)
+    else:
+        if adx > 15:
+            if sentiment >= 62:
+                return "STRONG_BUY_CE", int(85 * confidence_multiplier)
+            elif sentiment >= 52:
+                return "BUY_CE", int(75 * confidence_multiplier)
+            elif sentiment >= 42:
+                return "LOW_BUY_CE", int(65 * confidence_multiplier)
+            elif sentiment >= 38:
+                return "NO_TRADE", 50
+            elif sentiment >= 28:
+                return "LOW_BUY_PE", int(65 * confidence_multiplier)
+            elif sentiment >= 18:
+                return "BUY_PE", int(75 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(85 * confidence_multiplier)
+        else:
+            if sentiment >= 68:
+                return "STRONG_BUY_CE", int(80 * confidence_multiplier)
+            elif sentiment >= 58:
+                return "BUY_CE", int(70 * confidence_multiplier)
+            elif sentiment >= 48:
+                return "NO_TRADE", 50
+            elif sentiment >= 42:
+                return "NO_TRADE", 50
+            elif sentiment >= 32:
+                return "NO_TRADE", 50
+            elif sentiment >= 22:
+                return "BUY_PE", int(70 * confidence_multiplier)
+            else:
+                return "STRONG_BUY_PE", int(80 * confidence_multiplier)
 
 def get_trend_for_timeframe(index_name, tf):
     with _candle_histories_lock:
@@ -1674,7 +1710,8 @@ def run_signal_engine_for_index(index_name):
             greeks_data = get_option_greeks(index_name)
 
         sentiment = compute_sentiment(index_name)
-        action = get_signal_from_sentiment(sentiment)
+        adx = get_current_adx(index_name)
+        action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)  # UPDATED call
         sentiment_label = get_sentiment_label(sentiment)
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
@@ -1687,6 +1724,7 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
+        # ---- Drawdown & lock protected ----
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1929,6 +1967,7 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "ACTIVE"
             return
 
+        # --- New entry ---
         with _signal_state_lock:
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
@@ -2895,12 +2934,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.4 – Production Ready (Equity + MCX)",
+        "engine": "Hybrid v15.5 – Production Ready (Equity + MCX)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.4-Production"
+        "version": "15.5-Production"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -2952,7 +2991,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.4-Production"
+            "version": "15.5-Production"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3043,7 +3082,8 @@ def backtest_signal(index_name):
     for i in range(20, len(candles)):
         closes = [c["close"] for c in candles[:i]]
         sentiment = compute_sentiment(index_name)
-        action = get_signal_from_sentiment(sentiment)
+        adx = get_current_adx(index_name)
+        action, _ = get_signal_from_sentiment(index_name, sentiment, adx)
         signals.append({
             "timestamp": candles[i]["timestamp"],
             "sentiment": sentiment,
