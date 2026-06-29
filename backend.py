@@ -1643,8 +1643,20 @@ def run_signal_engine_for_index(index_name):
             else:
                 market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
 
-        if candle_len < 10:
+                if candle_len < 10:
             return
+
+        # ----- ADD THIS BLOCK -----
+        # Get VIX for all indices (default to 15 if not available)
+        with _latest_ticks_lock:
+            vix = latest_ticks["VIX"].get("vix", 15.0)
+            if vix <= 0:
+                vix = 15.0
+        # --------------------------
+
+        # Get latest prices
+        with _latest_ticks_lock:
+           
 
         with _market_signal_lock:
             if market_signal[index_name]["signal"] == "EXIT":
