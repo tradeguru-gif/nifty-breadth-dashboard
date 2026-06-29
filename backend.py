@@ -1,4 +1,5 @@
-# === HYBRID v17.7 – FULL SIGNAL ENGINE + ALL FIXES ===
+# === HYBRID v17.8 – FIXED SIGNAL ENGINE ORDER ===
+# - Fixed: run_all_signals defined before on_ws_data callback
 # - Restored signal engine (run_all_signals, run_signal_engine_for_index, etc.)
 # - MCX tokens fetched before refresh_all_tokens()
 # - VIX REST fetch implemented (get_vix_ltp)
@@ -295,7 +296,6 @@ _price_histories_lock = threading.Lock()
 _ce_price_histories_lock = threading.Lock()
 _pe_price_histories_lock = threading.Lock()
 _current_candle_lock = threading.Lock()
-# _prev_volume_lock removed (unused)
 
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_NAMES}
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_NAMES}
@@ -345,7 +345,6 @@ _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
-# ---- NEW CANDLE FLAG FOR SIGNAL TRIGGER ----
 _new_candle_flag = {idx: False for idx in INDEX_NAMES}
 _new_candle_flag_lock = threading.Lock()
 
@@ -587,8 +586,7 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
         d1 = (math.log(S/K) + (r + 0.5*iv_est**2)*T) / (iv_est*math.sqrt(T))
         delta_est = norm.cdf(d1) if option_type == "CE" else -norm.cdf(-d1)
     except Exception:
-        delta_est = 0.5 if option_type == "CE" else -0.5
-    return iv_est, delta_est
+        delta_est = 0.5 if option_type == "CE" else -0.5    return iv_est, delta_est
 
 greeks_cache_fallback_store = {}
 for idx in INDEX_NAMES:
@@ -1149,11 +1147,9 @@ def compute_sentiment(index_name):
         candle_count = len(candle_histories[index_name]["1min"])
     min_candles = 2 if INDEX_CONFIG[index_name].get("is_commodity") else 3
     if candle_count < min_candles:
-        # Use price history as fallback
         with _price_histories_lock:
             prices = list(price_histories[index_name])
         if len(prices) >= 5:
-            # Compute a simple trend using EMA of price history
             ema9 = calculate_ema(prices, 9)
             ema21 = calculate_ema(prices, 21)
             price = prices[-1]
@@ -1165,7 +1161,6 @@ def compute_sentiment(index_name):
                 return 50.0
         return 50.0
 
-    # Rest of sentiment logic (now correctly indented)
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1242,7 +1237,6 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
     elif vix < 15:
         confidence_multiplier = 1.1
 
-    # ----- COMMODITY BRANCH (directional) -----
     if is_commodity:
         if sentiment >= 55:
             return "BUY", int(70 * confidence_multiplier)
@@ -1251,7 +1245,6 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
         else:
             return "SELL", int(70 * confidence_multiplier)
 
-    # ----- EQUITY INDICES (option side) -----
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
             return "STRONG_BUY_CE", int(90 * confidence_multiplier)
@@ -1380,8 +1373,6 @@ def confirm_signal_with_candles(index_name, side, spot):
     ema9 = calculate_ema(closes, 9)
     if ema9 == 0:
         return True
-    # For commodities: BUY=long (price above EMA), SELL=short (price below EMA)
-    # For options: CE=bullish, PE=bearish
     if side in ("CE", "BUY"):
         return closes[-1] > ema9
     else:
@@ -1455,14 +1446,12 @@ def compute_signal_quality(index_name):
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
-        # Commodities: only 1 candle needed
         with _candle_histories_lock:
             if len(candle_histories[index_name]["1min"]) < 1:
                 return False
         with _latest_ticks_lock:
             return latest_ticks[index_name].get("price", 0) > 0
     else:
-        # Equities: require 3 candles (instead of 10)
         with _latest_ticks_lock:
             spot = latest_ticks[index_name].get("spot_price", 0)
             ce = latest_ticks[index_name].get("ce_price", 0)
@@ -1651,7 +1640,6 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
 # REST HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def get_vix_ltp():
-    """Fetch VIX (India VIX) LTP via REST."""
     _, _, obj = get_auth_token()
     if not obj:
         return None
@@ -1712,7 +1700,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – FULL IMPLEMENTATION
+# MAIN SIGNAL ENGINE – FULL IMPLEMENTATION (MOVED HERE)
 # ============================================================
 
 def run_all_signals():
@@ -1740,7 +1728,6 @@ def run_signal_engine_for_index(index_name):
     is_commodity = cfg.get("is_commodity", False)
     now = time.time()
     
-    # --- Check cooldown / circuit breaker ---
     with _signal_state_lock:
         state = signal_state[index_name]
         if state["cooldown"] > now:
@@ -1752,7 +1739,6 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
     
-    # --- Get current prices ---
     with _latest_ticks_lock:
         if is_commodity:
             spot = latest_ticks[index_name].get("price", 0.0) or 0.0
@@ -1766,27 +1752,22 @@ def run_signal_engine_for_index(index_name):
         logger.debug(f"{index_name}: No spot price, skipping signal")
         return
     
-    # --- Compute indicators ---
     sentiment = compute_sentiment(index_name)
     adx = get_current_adx(index_name)
     regime = detect_regime(index_name)
     action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
     
-    # --- Get greeks (options only) ---
     greeks_data = None
     if not is_commodity and cfg.get("greeks_enabled"):
         greeks_data = get_option_greeks(index_name)
     
-    # --- Get VIX ---
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     
-    # --- Compute RSI from price history ---
     with _price_histories_lock:
         prices = list(price_histories[index_name])
     rsi = calculate_rsi(prices, 14) if len(prices) >= 15 else 50.0
     
-    # --- ATR for sizing ---
     with _candle_histories_lock:
         candles_5m = list(candle_histories[index_name]["5min"])
     atr = 0.0
@@ -1796,17 +1777,14 @@ def run_signal_engine_for_index(index_name):
         closes = [c["close"] for c in candles_5m]
         atr = calculate_atr(highs, lows, closes, 14)
     
-    # --- ML Score ---
     ml_score = 0.5
     if not is_commodity and ce_prem > 0 and pe_prem > 0:
         side = "CE" if "CE" in action else ("PE" if "PE" in action else "CE")
         prem = ce_prem if side == "CE" else pe_prem
         ml_score = compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment)
     
-    # --- Signal Quality ---
     quality = compute_signal_quality(index_name)
     
-    # --- Update market signal display ---
     with _market_signal_lock:
         market_signal[index_name].update({
             "sentiment_score": round(sentiment, 1),
@@ -1822,7 +1800,6 @@ def run_signal_engine_for_index(index_name):
             "timestamp": now
         })
     
-    # --- Manage existing position ---
     with _signal_state_lock:
         current_action = signal_state[index_name]["action"]
     
@@ -1830,36 +1807,29 @@ def run_signal_engine_for_index(index_name):
         manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greeks_data, prices)
         return
     
-    # --- Entry logic (only if no position) ---
     if action in ("NO_TRADE", "WAITING"):
         with _market_signal_lock:
             market_signal[index_name]["alert_message"] = f"{action} | Sentiment: {sentiment:.1f} | Regime: {regime}"
         return
     
-    # Check if we should enter
     if not should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, quality, regime, adx, vix):
         return
     
-    # Execute entry
     execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_data, confidence, quality, sentiment, rsi, regime)
 
 
 def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, quality, regime, adx, vix):
-    """Validate entry conditions before taking a trade."""
     cfg = INDEX_CONFIG.get(index_name, {})
     is_commodity = cfg.get("is_commodity", False)
     
-    # Minimum confidence
     if confidence < 55:
         logger.debug(f"{index_name}: Confidence {confidence} < 55, skipping")
         return False
     
-    # Minimum quality
     if quality < 40:
         logger.debug(f"{index_name}: Quality {quality} < 40, skipping")
         return False
     
-    # Daily trade limit
     today = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
     if last_trade_date.get(index_name) != today:
         daily_trade_count[index_name] = 0
@@ -1870,7 +1840,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
         logger.debug(f"{index_name}: Daily trade limit reached ({daily_trade_count[index_name]})")
         return False
     
-    # Drawdown check
     with _portfolio_state_lock:
         equity = portfolio_state[index_name]["equity"]
     peak = daily_drawdown[index_name]["peak_equity"]
@@ -1889,7 +1858,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             daily_drawdown[index_name]["dd_warning_sent"] = True
         return False
     
-    # Option-specific checks
     if not is_commodity:
         prem = ce_prem if "CE" in action else pe_prem
         if prem <= 0:
@@ -1902,7 +1870,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             logger.debug(f"{index_name}: Premium {prem} above max")
             return False
         
-        # Spread check
         with _latest_ticks_lock:
             bid = latest_ticks[index_name].get("ce_bid" if "CE" in action else "pe_bid", 0)
             ask = latest_ticks[index_name].get("ce_ask" if "CE" in action else "pe_ask", 0)
@@ -1910,17 +1877,14 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             logger.debug(f"{index_name}: Spread too wide")
             return False
         
-        # Expiry day caution
         if is_expiry_day(index_name) and confidence < 70:
             logger.debug(f"{index_name}: Expiry day, requiring higher confidence")
             return False
     
-    # VIX check
     if vix > 30 and confidence < 75:
         logger.debug(f"{index_name}: High VIX {vix}, requiring higher confidence")
         return False
     
-    # Signal buffer (reduce churn)
     buffer = signal_buffer[index_name]
     if is_commodity:
         if action == "BUY":
@@ -1929,7 +1893,7 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             if buffer["ce_count"] < 2:
                 logger.debug(f"{index_name}: BUY buffer {buffer['ce_count']}/2")
                 return False
-        else:  # SELL
+        else:
             buffer["pe_count"] += 1
             buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
             if buffer["pe_count"] < 2:
@@ -1950,7 +1914,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
                 logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
                 return False
     
-    # Correlation filter (NIFTY/BANKNIFTY only)
     pair = cfg.get("correlation_pair")
     if pair and pair in INDEX_NAMES:
         corr = correlation_filter.analyze(index_name, action)
@@ -1958,7 +1921,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             logger.debug(f"{index_name}: Blocked by correlation filter: {corr['block_reason']}")
             return False
     
-    # Candle confirmation
     opt_side = "CE" if "CE" in action else "PE"
     if not confirm_signal_with_candles(index_name, opt_side, spot):
         logger.debug(f"{index_name}: Candle confirmation failed")
@@ -1968,44 +1930,35 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
 
 
 def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_data, confidence, quality, sentiment, rsi, regime):
-    """Execute a new trade entry."""
     cfg = INDEX_CONFIG.get(index_name, {})
     is_commodity = cfg.get("is_commodity", False)
     now = time.time()
     
-    # Determine side and premium
     if is_commodity:
         side = "CE" if action == "BUY" else "PE"
-        prem = spot  # For commodities, "premium" is just the spot price
+        prem = spot
     else:
         side = "CE" if "CE" in action else "PE"
         prem = ce_prem if side == "CE" else pe_prem
     
-    # Position sizing
     with _portfolio_state_lock:
         equity = portfolio_state[index_name]["equity"]
     
-    # Kelly criterion sizing
     kelly_tracker = kelly_trackers[index_name]
     kelly_frac, win_rate, avg_win, avg_loss = kelly_tracker.get_recommended_risk_pct()
     
-    # Base risk per trade
     base_risk_pct = 0.02
     risk_pct = base_risk_pct * kelly_frac * 4
     
-    # Adjust for confidence and quality
     risk_pct *= (confidence / 100) * (quality / 100)
     
-    # Adjust for VIX
     if vix > 25:
         risk_pct *= 0.7
     elif vix < 15:
         risk_pct *= 1.1
     
-    # Cap risk
     risk_pct = max(0.005, min(0.05, risk_pct))
     
-    # Calculate stop loss and target
     if is_commodity:
         sl_points = atr * 2.0 if atr > 0 else spot * 0.01
         target_points = atr * 3.0 if atr > 0 else spot * 0.015
@@ -2035,7 +1988,6 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
         max_lots = int(equity / (entry * cfg["lot_size"] * 0.2))
         lots = min(lots, max(1, max_lots))
     
-    # Grade assignment
     if confidence >= 85 and quality >= 80:
         grade = "A+"
     elif confidence >= 75 and quality >= 70:
@@ -2045,7 +1997,6 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     else:
         grade = "C"
     
-    # Update signal state
     with _signal_state_lock:
         signal_state[index_name].update({
             "action": action,
@@ -2063,17 +2014,14 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     with _portfolio_state_lock:
         portfolio_state[index_name]["open_positions"] = 1
     
-    # Update daily count
     today = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
     if last_trade_date.get(index_name) != today:
         daily_trade_count[index_name] = 0
         last_trade_date[index_name] = today
     daily_trade_count[index_name] += 1
     
-    # Save state
     save_portfolio_state(index_name)
     
-    # Build alert — fixed: removed undefined 'adx' reference
     msg = (
         f"🟢 ENTRY {index_name} {action}\n"
         f"Entry: {entry:.2f} | SL: {sl:.2f} | Target: {target:.2f}\n"
@@ -2101,12 +2049,10 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     send_telegram_alert(msg)
     logger.info(f"ENTRY: {index_name} {action} @ {entry:.2f} x {lots} lots")
     
-    # Log to DB
     log_trade(index_name, action, entry, 0, 0, risk_pct * 100, "OPEN", grade, atr, vix, "")
 
 
 def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greeks_data, prices):
-    """Check and manage an existing open position."""
     with _signal_state_lock:
         state = signal_state[index_name].copy()
     
@@ -2125,7 +2071,6 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
     else:
         side = "CE" if "CE" in action else "PE"
     
-    # Current value
     if is_commodity:
         current = spot
     else:
@@ -2135,43 +2080,35 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
         logger.debug(f"{index_name}: No current price for position management")
         return
     
-    # Update trailing highest
     if current > highest:
         with _signal_state_lock:
             signal_state[index_name]["highest"] = current
     
-    # Calculate P&L
     if is_commodity:
         if side == "CE":
             pnl = (current - entry) * lots * INDEX_CONFIG[index_name]["lot_size"]
         else:
             pnl = (entry - current) * lots * INDEX_CONFIG[index_name]["lot_size"]
     else:
-        # Options P&L: Both CE and PE are bought (long), profit when premium increases
         pnl = (current - entry) * lots * INDEX_CONFIG[index_name]["lot_size"]
     
     pnl_pct = (pnl / (entry * lots * INDEX_CONFIG[index_name]["lot_size"])) * 100 if entry > 0 else 0
     
-    # Update live P&L
     with _portfolio_state_lock:
         portfolio_state[index_name]["live_pnl"] = pnl
     
-    # --- Exit checks ---
     exit_reason = None
     exit_price = current
     
-    # 1. Stop Loss hit
     if is_commodity:
         if side == "CE" and current <= sl:
             exit_reason = f"SL hit @ {sl:.2f}"
         elif side == "PE" and current >= sl:
             exit_reason = f"SL hit @ {sl:.2f}"
     else:
-        # For options, SL is when premium drops to SL level
         if current <= sl:
             exit_reason = f"SL hit @ {sl:.2f} (from {entry:.2f})"
     
-    # 2. Target hit
     if not exit_reason:
         if is_commodity:
             if side == "CE" and current >= target:
@@ -2182,37 +2119,30 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
             if current >= target:
                 exit_reason = f"Target hit @ {target:.2f} (from {entry:.2f})"
     
-    # 3. Trailing stop (lock in profits)
-    if not exit_reason and highest > entry * 1.2:  # 20% profit
-        trail_sl = highest * 0.85  # Trail at 85% of highest
+    if not exit_reason and highest > entry * 1.2:
+        trail_sl = highest * 0.85
         if current <= trail_sl:
             exit_reason = f"Trailing SL @ {trail_sl:.2f} (peak: {highest:.2f})"
     
-    # 4. Time-based exit
     if not exit_reason and not is_commodity:
         time_exit = get_dynamic_time_exit_minutes(index_name, side, entry, greeks_data)
         if (now - entry_time) > (time_exit * 60):
-            # Only exit if not profitable
             if pnl < 0:
                 exit_reason = f"Time exit after {time_exit}min"
     
-    # 5. Market analysis exit (trend reversal)
     if not exit_reason:
         should_exit, analysis_reason = should_exit_market_analysis(index_name, action, prices, ce_prem, pe_prem, greeks_data)
         if should_exit:
             exit_reason = analysis_reason
     
-    # 6. Max loss per trade (hard stop)
     if not exit_reason:
-        max_loss = entry * lots * INDEX_CONFIG[index_name]["lot_size"] * 0.6  # 60% of premium
+        max_loss = entry * lots * INDEX_CONFIG[index_name]["lot_size"] * 0.6
         if pnl < -max_loss:
             exit_reason = f"Max loss reached: {pnl:.0f}"
     
-    # Execute exit if needed
     if exit_reason:
         execute_exit(index_name, action, entry, exit_price, pnl, lots, atr, vix, exit_reason)
     else:
-        # Update alert with live P&L
         with _market_signal_lock:
             market_signal[index_name].update({
                 "alert_message": f"📊 {index_name} {action} | Live P&L: {pnl:+.0f} ({pnl_pct:+.1f}%) | Current: {current:.2f}",
@@ -2221,13 +2151,10 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
 
 
 def execute_exit(index_name, action, entry, exit_price, pnl, lots, atr, vix, exit_reason):
-    """Execute position exit and update records."""
     now = time.time()
     
-    # Apply transaction costs
     pnl = apply_transaction_cost(pnl, lots, INDEX_CONFIG[index_name]["lot_size"])
     
-    # Update equity
     with _portfolio_state_lock:
         old_equity = portfolio_state[index_name]["equity"]
         new_equity = old_equity + pnl
@@ -2237,27 +2164,23 @@ def execute_exit(index_name, action, entry, exit_price, pnl, lots, atr, vix, exi
         portfolio_state[index_name]["live_pnl"] = 0
         portfolio_state[index_name]["open_positions"] = 0
     
-    # Kelly update
     pnl_pct = pnl / old_equity if old_equity > 0 else 0
     kelly_trackers[index_name].update(pnl_pct)
     
-    # Safety state (consecutive SL tracking)
     if pnl < 0:
         safety_state[index_name]["consecutive_sl"] += 1
         if safety_state[index_name]["consecutive_sl"] >= 3:
             safety_state[index_name]["circuit_breaker"] = True
-            safety_state[index_name]["circuit_breaker_until"] = now + 1800  # 30 min break
+            safety_state[index_name]["circuit_breaker_until"] = now + 1800
             send_telegram_alert(f"🔒 {index_name}: Circuit breaker activated (3 consecutive SLs). Pausing 30min.")
     else:
         safety_state[index_name]["consecutive_sl"] = 0
     
-    # Drawdown tracking
     peak = daily_drawdown[index_name]["peak_equity"]
     if new_equity < peak:
         dd_pct = (peak - new_equity) / peak * 100 if peak > 0 else 0
         if dd_pct > daily_drawdown[index_name]["current_drawdown"]:
             daily_drawdown[index_name]["current_drawdown"] = dd_pct
-            # Log drawdown event
             try:
                 conn = sqlite3.connect(get_db_path(), timeout=SQLITE_TIMEOUT)
                 c = conn.cursor()
@@ -2270,15 +2193,12 @@ def execute_exit(index_name, action, entry, exit_price, pnl, lots, atr, vix, exi
             except Exception as e:
                 logger.debug(f"DD log error: {e}")
     
-    # Log trade
     status = "WIN" if pnl > 0 else "LOSS"
     grade = signal_state[index_name].get("confidence", 0)
     log_trade(index_name, action, entry, exit_price, pnl, 0, status, str(grade), atr, vix, exit_reason)
     
-    # Reset signal state
     reset_signal_state(index_name, now, exit_reason)
     
-    # Alert
     emoji = "🟢" if pnl > 0 else "🔴"
     msg = (
         f"{emoji} EXIT {index_name} {action}\n"
@@ -2290,7 +2210,6 @@ def execute_exit(index_name, action, entry, exit_price, pnl, lots, atr, vix, exi
     send_telegram_alert(msg)
     logger.info(f"EXIT: {index_name} {action} @ {exit_price:.2f} P&L={pnl:+.0f} Reason={exit_reason}")
     
-    # Save portfolio state
     save_portfolio_state(index_name)
 
 # ============================================================
@@ -2378,10 +2297,8 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run, ws_running
     try:
-        # --- DIAGNOSTIC: log every message ---
         logger.info(f"📨 Raw message received: type={type(message)}, len={len(message) if message else 0}")
 
-        # Keep ws_running True whenever data arrives
         ws_running = True
         last_heartbeat = time.time()
 
@@ -2439,7 +2356,6 @@ def on_ws_data(wsapp, message):
                 if ltp > 100000:
                     ltp = ltp / 100.0
 
-                # --- Log every tick token and price ---
                 logger.info(f"🔹 TICK: token={token}, ltp={ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
@@ -2447,7 +2363,6 @@ def on_ws_data(wsapp, message):
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-                # ---- SPOT PRICE MATCH ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
                     cfg_token = cfg.get("token")
@@ -2481,7 +2396,6 @@ def on_ws_data(wsapp, message):
                 if spot_matched:
                     continue
 
-                # ---- OPTION PRICE MATCH ----
                 option_matched = False
                 for idx, tokens in INDEX_TOKENS.items():
                     if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
@@ -2533,7 +2447,6 @@ def on_ws_data(wsapp, message):
                 if option_matched:
                     continue
 
-                # ---- VIX MATCH ----
                 if str(token) == "99919017" and ltp > 0:
                     with _latest_ticks_lock:
                         latest_ticks["VIX"]["vix"] = ltp
@@ -2543,7 +2456,6 @@ def on_ws_data(wsapp, message):
             except Exception as e:
                 logger.error(f"Error processing tick: {e}")
 
-        # Log candle growth every 100 ticks (debug)
         if tick_counter % 100 == 0:
             for idx in INDEX_NAMES:
                 if not INDEX_CONFIG[idx].get("is_commodity"):
@@ -2551,7 +2463,6 @@ def on_ws_data(wsapp, message):
                         ccount = len(candle_histories[idx]["1min"])
                     logger.debug(f"📊 {idx} 1min candle count: {ccount}, price_hist: {len(price_histories[idx])}")
 
-        # ---- Run signals only on new 1-min candle close ----
         with _new_candle_flag_lock:
             for idx in INDEX_NAMES:
                 if _new_candle_flag[idx]:
@@ -2615,20 +2526,18 @@ def ws_watchdog():
 
 def start_angel_websocket_improved():
     global sws, ws_running, last_heartbeat
-    retry_delay = 30   # start with 30 seconds (avoid 429)
-    max_delay = 300    # max 5 minutes
+    retry_delay = 30
+    max_delay = 300
 
     while True:
         try:
-            # Ensure we don't already have a connection attempt running
             with _ws_connect_lock:
                 if ws_running:
                     logger.info("WS already running, skipping new connection attempt")
                     time.sleep(10)
                     continue
-                ws_running = False   # ensure it's false
+                ws_running = False
 
-            # Wait if market closed
             if not is_market_open() and not is_mcx_open():
                 logger.info("Markets closed, sleeping 60s")
                 time.sleep(60)
@@ -2640,7 +2549,6 @@ def start_angel_websocket_improved():
                 time.sleep(30)
                 continue
 
-            # Close any existing connection (cleanup)
             if sws:
                 try:
                     sws.close_connection()
@@ -2649,7 +2557,6 @@ def start_angel_websocket_improved():
                     pass
                 sws = None
 
-            # Create new instance with internal retries disabled
             new_sws = SmartWebSocketV2(
                 auth_token,
                 ANGEL_API_KEY,
@@ -2670,10 +2577,8 @@ def start_angel_websocket_improved():
             ws_thread = threading.Thread(target=sws.connect, daemon=True)
             ws_thread.start()
 
-            # Give the connection time to establish
             time.sleep(5)
 
-            # Inner monitoring loop
             while True:
                 time.sleep(5)
                 with _ws_connect_lock:
@@ -2682,10 +2587,6 @@ def start_angel_websocket_improved():
                     logger.warning("WebSocket disconnected detected")
                     break
 
-                # Optional: send heartbeat if library supports it
-                # ...
-
-            # Disconnected – backoff and retry
             logger.warning(f"Reconnecting in {retry_delay}s...")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_delay)
@@ -2719,7 +2620,7 @@ def schedule_token_refresh():
 # ----------------------------------------------------------------------
 def periodic_token_refresh():
     while True:
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
         try:
             refresh_all_tokens()
             logger.info("Periodic token refresh completed")
@@ -2732,10 +2633,9 @@ def periodic_token_refresh():
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
     try:
-        # --- Log the attempt ---
         logger.info(f"🔍 Fetching spot for {idx}")
 
-        spot = get_index_spot(idx)   # this already logs internally if we add logs there
+        spot = get_index_spot(idx)
         if spot:
             results["spot"] = spot
             logger.info(f"✅ Spot for {idx}: {spot}")
@@ -2809,7 +2709,6 @@ def start_rest_only_mode():
                                     last_known_prices[idx]["spot"] = spot
                                     last_known_prices[idx]["timestamp"] = time.time()
 
-                                # --- CRITICAL: increment tick counter and update timestamp ---
                                 tick_counter += 1
                                 last_tick_timestamp = time.time()
                                 with _ws_connect_lock:
@@ -2818,7 +2717,6 @@ def start_rest_only_mode():
                             else:
                                 logger.warning(f"REST: No spot for {idx}")
 
-                            # Option data (only for equity)
                             if not INDEX_CONFIG[idx].get("is_commodity"):
                                 ce = result.get("ce")
                                 pe = result.get("pe")
@@ -2859,7 +2757,6 @@ def start_rest_only_mode():
                         except Exception as e:
                             logger.error(f"Error processing REST result for {idx}: {e}")
 
-                # VIX
                 try:
                     vix = get_vix_ltp()
                     if vix:
@@ -2871,7 +2768,6 @@ def start_rest_only_mode():
 
                 last_rest_fetch = time.time()
 
-                # Run signals for all ready indices
                 ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
                 for idx in ready_indices:
                     try:
@@ -2931,7 +2827,6 @@ class ConnectionManager:
         
         logger.info("Pre-market and periodic token refresh schedulers started.")
 
-        # Periodic signal timer (runs every 10 seconds)
         def signal_timer():
             while True:
                 time.sleep(10)
@@ -2971,7 +2866,6 @@ def _start_background_threads():
             
             logger.info("Pre-fetching option tokens...")
             
-            # CRITICAL FIX: Fetch MCX tokens FIRST
             try:
                 get_mcx_futures_tokens()
                 logger.info("MCX futures tokens fetched")
@@ -3041,7 +2935,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v17.7 – Full Signal Engine + All Fixes",
+        "engine": "Hybrid v17.8 – Fixed Signal Engine Order",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -3113,7 +3007,7 @@ def live_signals():
                     "ticks": tick_counter,
                     "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
                 },
-                "version": "17.7-FullEngine"
+                "version": "17.8-FixedEngineOrder"
             })
     except Exception as e:
         logger.exception("live_signals crashed")
@@ -3340,11 +3234,8 @@ def reload_candles(index_name):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
-    # CRITICAL: Start Flask immediately so Render detects the port
-    # Background threads start after in a separate thread
-    
     def start_background_after_bind():
-        time.sleep(3)  # Let Flask start
+        time.sleep(3)
         try:
             init_db()
             load_portfolio_state()
