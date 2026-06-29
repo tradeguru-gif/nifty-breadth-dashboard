@@ -6,11 +6,6 @@
 # - Unused _prev_volume_lock removed
 # - Fixed execute_entry() alert message (removed undefined 'adx')
 # - All previous: WebSocket, REST, candles, indicators, market hours, etc.
-# - Corrected: get_db_path() moved to top, kelly_trackers defined,
-#   _estimate_greeks_fallback repaired, deque mutation protected,
-#   watchdog starvation threshold adaptive for MCX late hours.
-# - Fixed duplicate function definitions, indentation errors, and restored
-#   original is_mcx_open() and compute_signal_quality().
 
 import sys
 import logging
@@ -71,10 +66,6 @@ if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
 DB_PATH = "trading_data.db"
 PAPER_DB_PATH = "paper_trading_data.db" if PAPER_MODE else DB_PATH
 SQLITE_TIMEOUT = 30
-
-def get_db_path():
-    """Returns the correct database filepath based on the operational mode."""
-    return PAPER_DB_PATH if PAPER_MODE else DB_PATH
 
 # ----------------------------------------------------------------------
 # DATABASE
@@ -611,25 +602,18 @@ for idx in INDEX_NAMES:
 _greeks_cache = {idx: {"data": None, "timestamp": 0} for idx in INDEX_NAMES}
 _GREEKS_CACHE_TTL = 60
 
-# CORRECTED _estimate_greeks_fallback
 def _estimate_greeks_fallback(index_name):
     if INDEX_CONFIG[index_name].get("is_commodity"):
         return None
-        
     tokens = INDEX_TOKENS.get(index_name, {})
     with _latest_ticks_lock:
         ce_price = latest_ticks[index_name].get("ce_price", 0.0) or 0.0
         pe_price = latest_ticks[index_name].get("pe_price", 0.0) or 0.0
         spot = latest_ticks[index_name].get("spot_price", 0.0) or 0.0
-        
     if spot <= 0:
-        fallback_data = greeks_cache_fallback_store.get(index_name)
-        if fallback_data is None:
-            fallback_data = {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":0.5, "pe_delta":-0.5,
-                             "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1,
-                             "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50}
-        return fallback_data
-        
+        return greeks_cache_fallback_store.get(index_name, {"ce_iv":0.2, "pe_iv":0.2, "ce_delta":0.5, "pe_delta":-0.5,
+                                                             "ce_gamma":0.02, "pe_gamma":0.02, "ce_theta":-0.1, "pe_theta":-0.1,
+                                                             "ce_vega":0.15, "pe_vega":0.15, "iv_rank":50, "iv_percentile":50})
     strike = tokens.get("atm_strike", spot)
     expiry_date = tokens.get("expiry_date")
     if expiry_date:
@@ -638,98 +622,119 @@ def _estimate_greeks_fallback(index_name):
             T = 0.01
     else:
         T = 0.1
-        
     r = 0.05
-    iv_ce, delta_ce = bsm_iv_delta(spot, strike, T, r, ce_price, "CE") if ce_price > 0 else (0.2, 0.5)
-    iv_pe, delta_pe = bsm_iv_delta(spot, strike, T, r, pe_price, "PE") if pe_price > 0 else (0.2, -0.5)
-    
+    if ce_price > 0:
+        iv_ce, delta_ce = bsm_iv_delta(spot, strike, T, r, ce_price, "CE")
+    else:
+        iv_ce, delta_ce = 0.2, 0.5
+    if pe_price > 0:
+        iv_pe, delta_pe = bsm_iv_delta(spot, strike, T, r, pe_price, "PE")
+    else:
+        iv_pe, delta_pe = 0.2, -0.5
     if iv_ce > 0:
         _historical_iv_ce[index_name].append(iv_ce)
     if iv_pe > 0:
         _historical_iv_pe[index_name].append(iv_pe)
-        
     def get_rank(hist, current):
         if len(hist) < 20:
             return 50.0
-        return (sum(1 for x in hist if x < current) / len(hist)) * 100.0
-        
+        rank = sum(1 for x in hist if x < current) / len(hist) * 100.0
+        return rank
     iv_rank_ce = get_rank(list(_historical_iv_ce[index_name]), iv_ce)
     iv_rank_pe = get_rank(list(_historical_iv_pe[index_name]), iv_pe)
-    avg_rank = (iv_rank_ce + iv_rank_pe) / 2.0
-    
     greeks_data = {
-        "ce_iv": iv_ce, "pe_iv": iv_pe, "ce_delta": delta_ce, "pe_delta": delta_pe,
-        "ce_gamma": 0.02, "pe_gamma": 0.02, "ce_theta": -0.1, "pe_theta": -0.1,
-        "ce_vega": 0.15, "pe_vega": 0.15, "iv_rank": avg_rank, "iv_percentile": avg_rank
+        "ce_iv": iv_ce, "pe_iv": iv_pe,
+        "ce_delta": delta_ce, "pe_delta": delta_pe,
+        "ce_gamma": 0.02, "pe_gamma": 0.02,
+        "ce_theta": -0.1, "pe_theta": -0.1,
+        "ce_vega": 0.15, "pe_vega": 0.15,
+        "iv_rank": (iv_rank_ce + iv_rank_pe) / 2.0,
+        "iv_percentile": (iv_rank_ce + iv_rank_pe) / 2.0
     }
     greeks_cache_fallback_store[index_name] = greeks_data
     return greeks_data
 
-# ----------------------------------------------------------------------
-# GREEKS FETCHING & FALLBACK ENGINE (single definition)
-# ----------------------------------------------------------------------
 def get_option_greeks(index_name):
-    """Fetches ready-made option greeks directly from Angel One API."""
     if INDEX_CONFIG[index_name].get("is_commodity"):
         return None
-        
     now = time.time()
-    cache = _greeks_cache.get(index_name, {"data": None, "timestamp": 0})
-    if cache["data"] and (now - cache["timestamp"] < _GREEKS_CACHE_TTL):
-        return cache["data"]
-
-    config = INDEX_CONFIG[index_name]
-    tokens = INDEX_TOKENS.get(index_name, {})
-    
-    try:
-        expiry_str = tokens.get("expiry", "")
-        if expiry_str:
-            greeks_payload = {"name": config["symbol"], "expirydate": expiry_str}
-            url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
-            try:
-                local_ip = socket.gethostbyname(socket.gethostname())
-            except Exception:
-                local_ip = "127.0.0.1"
-            
-            auth_token, _, _ = get_auth_token()
-            headers = {
-                "Authorization": f"Bearer {auth_token}",
-                "Content-Type": "application/json",
-                "X-PrivateKey": API_KEY,
-                "X-UserType": "USER",
-                "X-SourceID": "WEB",
-                "X-ClientLocalIP": local_ip,
-                "X-ClientPublicIP": "106.200.200.200",
-                "X-MACAddress": "02:00:00:00:00:00"
-            }
-            
-            res = requests.post(url, json=greeks_payload, headers=headers, timeout=5)
-            if res.status_code == 200:
-                json_data = res.json()
-                if json_data.get("status") and json_data.get("data"):
-                    api_data = json_data["data"]
-                    greeks_data = {
-                        "ce_iv": float(api_data.get("ce_iv", 0.2)),
-                        "pe_iv": float(api_data.get("pe_iv", 0.2)),
-                        "ce_delta": float(api_data.get("ce_delta", 0.5)),
-                        "pe_delta": float(api_data.get("pe_delta", -0.5)),
-                        "ce_gamma": float(api_data.get("ce_gamma", 0.02)),
-                        "pe_gamma": float(api_data.get("pe_gamma", 0.02)),
-                        "ce_theta": float(api_data.get("ce_theta", -0.1)),
-                        "pe_theta": float(api_data.get("pe_theta", -0.1)),
-                        "ce_vega": float(api_data.get("ce_vega", 0.15)),
-                        "pe_vega": float(api_data.get("pe_vega", 0.15)),
-                        "iv_rank": float(api_data.get("iv_rank", 50.0)),
-                        "iv_percentile": float(api_data.get("iv_percentile", 50.0))
-                    }
-                    _greeks_cache[index_name] = {"data": greeks_data, "timestamp": now}
-                    return greeks_data
-    except Exception as e:
-        logger.debug(f"Greeks API error {index_name}: {e}")
-        
-    fallback_data = _estimate_greeks_fallback(index_name)
-    _greeks_cache[index_name] = {"data": fallback_data, "timestamp": now}
-    return fallback_data
+    cached = _greeks_cache.get(index_name, {})
+    if cached.get("data") and (now - cached.get("timestamp", 0) < _GREEKS_CACHE_TTL):
+        return cached["data"]
+    config = INDEX_CONFIG.get(index_name)
+    if not config or not config.get("greeks_enabled"):
+        return None
+    tokens = INDEX_TOKENS.get(index_name)
+    if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
+        return _estimate_greeks_fallback(index_name)
+    _, _, obj = get_auth_token()
+    if obj:
+        try:
+            expiry_str = tokens.get("expiry", "")
+            if expiry_str:
+                greeks_payload = {"name": config["symbol"], "expirydate": expiry_str}
+                url = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/marketData/v1/optionGreek"
+                try:
+                    local_ip = socket.gethostbyname(socket.gethostname())
+                except Exception:
+                    local_ip = "127.0.0.1"
+                auth_token, _, _ = get_auth_token()
+                headers = {
+                    "Authorization": f"Bearer {auth_token}", "Content-Type": "application/json",
+                    "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
+                    "X-ClientLocalIP": local_ip, "X-ClientPublicIP": local_ip, "X-MACAddress": "00:00:00:00:00:00",
+                    "X-PrivateKey": ANGEL_API_KEY
+                }
+                resp = requests.post(url, json=greeks_payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("status") and data.get("data"):
+                        greeks_list = data["data"]
+                        atm_strike = tokens.get("atm_strike", 0)
+                        ce_greeks = pe_greeks = None
+                        for g in greeks_list:
+                            strike = float(g.get("strikePrice", 0))
+                            opt_type = g.get("optionType", "")
+                            if abs(strike - atm_strike) < config.get("atm_strike_multiple", 50)*0.5:
+                                if opt_type == "CE":
+                                    ce_greeks = g
+                                elif opt_type == "PE":
+                                    pe_greeks = g
+                        if ce_greeks and pe_greeks:
+                            ce_iv = float(ce_greeks.get("impliedVolatility", 0))
+                            pe_iv = float(pe_greeks.get("impliedVolatility", 0))
+                            if ce_iv > 1: ce_iv /= 100
+                            if pe_iv > 1: pe_iv /= 100
+                            if ce_iv > 0: _historical_iv_ce[index_name].append(ce_iv)
+                            if pe_iv > 0: _historical_iv_pe[index_name].append(pe_iv)
+                            def get_rank(hist, current):
+                                if len(hist) < 20:
+                                    return 50.0
+                                rank = sum(1 for x in hist if x < current) / len(hist) * 100.0
+                                return rank
+                            iv_rank_ce = get_rank(list(_historical_iv_ce[index_name]), ce_iv)
+                            iv_rank_pe = get_rank(list(_historical_iv_pe[index_name]), pe_iv)
+                            greeks_data = {
+                                "ce_iv": ce_iv, "pe_iv": pe_iv,
+                                "ce_delta": float(ce_greeks.get("delta", 0)),
+                                "pe_delta": float(pe_greeks.get("delta", 0)),
+                                "ce_gamma": float(ce_greeks.get("gamma", 0)),
+                                "pe_gamma": float(pe_greeks.get("gamma", 0)),
+                                "ce_theta": float(ce_greeks.get("theta", 0)),
+                                "pe_theta": float(pe_greeks.get("theta", 0)),
+                                "ce_vega": float(ce_greeks.get("vega", 0)),
+                                "pe_vega": float(pe_greeks.get("vega", 0)),
+                                "iv_rank": (iv_rank_ce + iv_rank_pe) / 2.0,
+                                "iv_percentile": (iv_rank_ce + iv_rank_pe) / 2.0
+                            }
+                            greeks_cache_fallback_store[index_name] = greeks_data
+                            _greeks_cache[index_name] = {"data": greeks_data, "timestamp": now}
+                            return greeks_data
+        except Exception as e:
+            logger.debug(f"Greeks API error {index_name}: {e}")
+    data = _estimate_greeks_fallback(index_name)
+    _greeks_cache[index_name] = {"data": data, "timestamp": now}
+    return data
 
 # ----------------------------------------------------------------------
 # KELLY, CORRELATION, VOLUME PROFILE
@@ -766,7 +771,6 @@ class KellyCriterion:
         kelly_full = max(0, min(kelly_full, 0.5))
         return kelly_full * self.kelly_fraction, p, self.avg_win, self.avg_loss
 
-# Initialize Kelly trackers (moved to global section)
 kelly_trackers = {idx: KellyCriterion(idx) for idx in INDEX_NAMES}
 
 class CorrelationFilter:
@@ -1140,6 +1144,9 @@ def update_candle(idx, price, volume, timestamp):
 # ----------------------------------------------------------------------
 # SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#-----------------------------------------------------------------------
+#REPLACED-------------------------------------------------------------
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
@@ -1161,7 +1168,10 @@ def compute_sentiment(index_name):
                 return 50.0
         return 50.0
 
-    # Rest of sentiment logic (now correctly indented)
+    # ... rest of existing sentiment logic ...
+# ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#-----------------------------------------------------------------------
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1361,7 +1371,6 @@ def detect_regime(index_name):
         new_regime = "VOLATILE"
     else:
         new_regime = "NORMAL"
-        
     _regime_history[index_name].append(new_regime)
     if len(_regime_history[index_name]) >= 3:
         counts = Counter(_regime_history[index_name])
@@ -1449,6 +1458,9 @@ def compute_signal_quality(index_name):
 # ----------------------------------------------------------------------
 # has_complete_data() – requires sufficient history
 # ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#---------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
@@ -1473,6 +1485,12 @@ def has_complete_data(index_name):
             if len(price_histories[index_name]) < 15:
                 return False
         return True
+# ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#---------------------------------------------------------------------
+def get_db_path():
+    return PAPER_DB_PATH if PAPER_MODE else DB_PATH
 
 def load_portfolio_state():
     global portfolio_state, signal_state, daily_trade_count, last_trade_date
@@ -1492,7 +1510,7 @@ def load_portfolio_state():
                     
                     action = row[1]
                     if action and action != "HOLD":
-                        with _signal_state_lock:
+                        with _signal_state_lock:  # ADDED LOCK
                             signal_state[idx].update({
                                 "action": action,
                                 "entry_price": float(row[2]) if row[2] is not None else 0.0,
@@ -1623,10 +1641,8 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bullish divergence"
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
-        # Safely duplicate the global queue snapshot using the tick context lock
-        vix_snapshot = list(vix_history)
-    if len(vix_snapshot) >= 10:
-        vix_sma = sum(vix_snapshot[-10:]) / 10
+    if len(vix_history) >= 10:
+        vix_sma = sum(list(vix_history)[-10:])/10
         if vix > vix_sma * 1.25:
             return True, f"VIX spike {vix:.1f} vs SMA {vix_sma:.1f}"
     return False, ""
@@ -1917,6 +1933,7 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
         return False
     
     # Signal buffer (reduce churn)
+        # Signal buffer (reduce churn)
     buffer = signal_buffer[index_name]
     if is_commodity:
         if action == "BUY":
@@ -1945,6 +1962,12 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             if buffer["pe_count"] < 2:
                 logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
                 return False
+    else:
+        buffer["pe_count"] += 1
+        buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
+        if buffer["pe_count"] < 2:
+            logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
+            return False
     
     # Correlation filter (NIFTY/BANKNIFTY only)
     pair = cfg.get("correlation_pair")
@@ -1970,6 +1993,7 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     now = time.time()
     
     # Determine side and premium
+        # Determine side and premium
     if is_commodity:
         side = "CE" if action == "BUY" else "PE"
         prem = spot  # For commodities, "premium" is just the spot price
@@ -2069,7 +2093,7 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     # Save state
     save_portfolio_state(index_name)
     
-    # Build alert — fixed: removed undefined 'adx' reference
+    # Build alert — FIX: removed undefined 'adx' reference
     msg = (
         f"🟢 ENTRY {index_name} {action}\n"
         f"Entry: {entry:.2f} | SL: {sl:.2f} | Target: {target:.2f}\n"
@@ -2115,7 +2139,7 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
     highest = state["highest"]
     now = time.time()
     
-    is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
+        is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
     if is_commodity:
         side = "CE" if action == "BUY" else "PE"
     else:
@@ -2599,9 +2623,7 @@ def ws_watchdog():
         with _ws_connect_lock:
             is_running = ws_running
         if is_running:
-            # Allow a wider 300-second window if MCX commodity hours are running to stop false disconnection cycles
-            starvation_limit = 300 if is_mcx_open() else 60
-            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > starvation_limit):
+            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
                 logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
                 with _ws_connect_lock:
                     ws_running = False
