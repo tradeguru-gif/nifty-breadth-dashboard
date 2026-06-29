@@ -1,10 +1,10 @@
-# === HYBRID v17.9 – FULLY CORRECTED (Subscription Fix + VIX Removed) ===
+# === HYBRID v17.10 – FULLY CORRECTED (Fixed Token Subscription) ===
 # Fixes applied:
-# 1. Fixed subscription handling - None means success for SmartWebSocketV2
-# 2. Removed VIX subscription (token mapping issue)
-# 3. Fixed ws_running - only set True after valid ticks
-# 4. Added better logging for subscription and data flow
-# 5. Fixed all lock issues from previous versions
+# 1. Fixed token_list construction with validation
+# 2. ws_running only set after successful subscription
+# 3. Added detailed logging for token subscription
+# 4. Proper error handling for missing tokens
+# 5. Fixed all lock issues
 # 6. Enhanced WebSocket reconnection logic
 
 import sys
@@ -2203,54 +2203,85 @@ def on_ws_open(wsapp):
 
     try:
         last_heartbeat = time.time()
-        logger.info("WebSocket connected successfully, subscribing to tokens...")
+        logger.info("WebSocket connected successfully, building subscription list...")
 
-# build token_list ...
-
-response = sws.subscribe(...)
-
-with _ws_connect_lock:
-    ws_running = True
-
+        # Build token_list with validation
         token_list = []
+        token_count = 0
+        
+        # 1. Add spot tokens for all active indices
         for idx, cfg in INDEX_CONFIG.items():
-            if cfg.get("active") and not cfg.get("is_commodity"):
-                exch_type = int(cfg["ws_exchange_type"])
-                token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
-            if cfg.get("active") and cfg.get("is_commodity") and cfg.get("token"):
-                exch_type = int(cfg["ws_exchange_type"])
-                token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+            if not cfg.get("active"):
+                continue
+            if cfg.get("is_commodity"):
+                # MCX commodities
+                if cfg.get("token"):
+                    exch_type = int(cfg.get("ws_exchange_type", 5))
+                    token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+                    token_count += 1
+                    logger.info(f"Added MCX spot: {idx} token={cfg['token']} exch={exch_type}")
+            else:
+                # Equity indices
+                if cfg.get("token"):
+                    exch_type = int(cfg.get("ws_exchange_type", 1))
+                    token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+                    token_count += 1
+                    logger.info(f"Added equity spot: {idx} token={cfg['token']} exch={exch_type}")
 
+        # 2. Add option tokens for equity indices
         for idx, tokens in INDEX_TOKENS.items():
             if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
                 continue
-            if tokens.get("ce_token") and tokens.get("pe_token"):
-                exch_type = int(INDEX_CONFIG[idx]["option_ws_exchange_type"])
-                token_list.append({
-                    "exchangeType": exch_type,
-                    "tokens": [tokens["ce_token"], tokens["pe_token"]]
-                })
+            
+            ce_token = tokens.get("ce_token")
+            pe_token = tokens.get("pe_token")
+            
+            if ce_token and pe_token:
+                exch_type = int(INDEX_CONFIG[idx].get("option_ws_exchange_type", 2))
+                opt_tokens = [str(ce_token), str(pe_token)]
+                token_list.append({"exchangeType": exch_type, "tokens": opt_tokens})
+                token_count += 2
+                logger.info(f"Added options for {idx}: CE={ce_token} PE={pe_token} exch={exch_type}")
+            else:
+                logger.warning(f"Skipping {idx}: missing option tokens (ce={ce_token}, pe={pe_token})")
 
-        # VIX temporarily removed due to token mapping issues
-        # token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
+        # 3. Validate we have tokens to subscribe
+        if not token_list:
+            logger.error("No tokens to subscribe! Check token fetch.")
+            with _ws_connect_lock:
+                ws_running = False
+            return
 
-        logger.info(f"Subscribing to {len(token_list)} exchange groups")
+        # Log the full subscription list
+        logger.info(f"=== SUBSCRIPTION SUMMARY ===")
+        total_tokens = sum(len(g["tokens"]) for g in token_list)
+        logger.info(f"Total tokens: {total_tokens} across {len(token_list)} exchange groups")
+        for group in token_list:
+            logger.info(f"  ExchangeType {group['exchangeType']}: {len(group['tokens'])} tokens")
+            if len(group['tokens']) <= 5:
+                logger.info(f"    Tokens: {group['tokens']}")
+            else:
+                logger.info(f"    First 5: {group['tokens'][:5]}...")
+
         time.sleep(0.5)
 
-        # FIXED: Subscribe handling - None means success for SmartWebSocketV2
+        # 4. Send subscription
         try:
             response = sws.subscribe("hybrid_bot", 1, token_list)
-            logger.info(f"Subscription initiated. SDK returned: {response}")
+            logger.info(f"Subscription SDK response: {response}")
 
-            # Only treat as failure if response is a dict with status=False
+            # Check for explicit failure
             if isinstance(response, dict) and response.get("status") is False:
                 logger.error(f"Subscription failed: {response}")
                 with _ws_connect_lock:
                     ws_running = False
                 return
 
-            total = sum(len(g["tokens"]) for g in token_list)
-            logger.info(f"✅ Subscription request sent for {total} tokens.")
+            # Success! Mark ws_running = True ONLY after successful subscription
+            with _ws_connect_lock:
+                ws_running = True
+            
+            logger.info(f"✅ Successfully subscribed to {total_tokens} tokens")
 
         except Exception as e:
             logger.exception(f"Subscribe error: {e}")
@@ -2258,7 +2289,7 @@ with _ws_connect_lock:
                 ws_running = False
 
     except Exception as e:
-        logger.exception("on_ws_open crashed")
+        logger.exception(f"on_ws_open crashed: {e}")
         with _ws_connect_lock:
             ws_running = False
 
@@ -2900,7 +2931,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v17.9 – Equity + MCX Fully Working (Fixed Subscription)",
+        "engine": "Hybrid v17.10 – Fixed Token Subscription",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open(),
         "mcx_open": is_mcx_open()
@@ -2972,7 +3003,7 @@ def live_signals():
                     "ticks": tick_counter,
                     "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
                 },
-                "version": "17.9-FixedSubscription"
+                "version": "17.10-FixedSubscription"
             })
     except Exception as e:
         logger.exception("live_signals crashed")
