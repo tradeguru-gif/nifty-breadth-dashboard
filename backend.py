@@ -1,4 +1,4 @@
-# === HYBRID v15.6 – FINAL: FIXED COMMODITY SIGNALS & MARKET STATUS ===
+# === HYBRID v15.7 – DEBUG LOGS + FIXED COMMODITY SIGNALS ===
 import sys
 import logging
 import os
@@ -63,7 +63,7 @@ DB_PATH = "trading_data.db"
 PAPER_DB_PATH = "paper_trading_data.db" if PAPER_MODE else DB_PATH
 
 # ----------------------------------------------------------------------
-# DATABASE
+# DATABASE (unchanged)
 # ----------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -164,7 +164,7 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Equity + MCX (with is_commodity = True)
+# INDEX CONFIGURATION – Equity + MCX
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -953,7 +953,7 @@ def refresh_all_tokens():
     get_mcx_futures_tokens()
 
 # ============================================================
-# MARKET HOURS (FIXED)
+# MARKET HOURS
 # ============================================================
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -1034,7 +1034,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (FIXED)
+# SENTIMENT, REGIME, CONFIRMATION (with DEBUG logs)
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1223,13 +1223,15 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ============================================================
-# MODIFIED get_signal_from_sentiment – FIXED for commodities
+# MODIFIED get_signal_from_sentiment – with DEBUG logs
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
+    logger.info(f"📢 get_signal_from_sentiment called for {index_name}, sentiment={sentiment}")
     if adx is None:
         adx = get_current_adx(index_name)
     regime = detect_regime(index_name)
     is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
+    logger.info(f"📢 index_name={index_name}, is_commodity={is_commodity}, regime={regime}")
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     confidence_multiplier = 1.0
@@ -1238,18 +1240,23 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
     elif vix < 15:
         confidence_multiplier = 1.1
 
-    # ----- COMMODITY BRANCH (now properly triggered) -----
+    # ----- COMMODITY BRANCH -----
     if is_commodity:
-        logger.info(f"COMMODITY BRANCH: {index_name} sentiment={sentiment}")
+        logger.info(f"🟢 COMMODITY BRANCH: {index_name} sentiment={sentiment}")
         if sentiment >= 50:
-            # Map to "BUY_CE" for frontend compatibility, but we'll treat as BUY
-            return "BUY_CE", int(70 * confidence_multiplier)
+            action = "BUY_CE"
+            conf = int(70 * confidence_multiplier)
         elif sentiment >= 40:
-            return "HOLD", 50
+            action = "HOLD"
+            conf = 50
         else:
-            return "BUY_PE", int(70 * confidence_multiplier)
+            action = "BUY_PE"
+            conf = int(70 * confidence_multiplier)
+        logger.info(f"📢 Returning commodity action: {action}, conf={conf}")
+        return action, conf
 
     # ----- EQUITY BRANCH -----
+    logger.info(f"🔵 EQUITY BRANCH: {index_name} sentiment={sentiment}")
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
             return "STRONG_BUY_CE", int(90 * confidence_multiplier)
@@ -1328,7 +1335,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE
+# SIGNAL QUALITY SCORE (unchanged)
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1357,7 +1364,7 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK
+# DATA READINESS CHECK (unchanged)
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
@@ -1479,7 +1486,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (unchanged)
 # ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1540,7 +1547,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ----------------------------------------------------------------------
-# REST HELPER FUNCTIONS
+# REST HELPER FUNCTIONS (unchanged)
 # ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
@@ -1591,7 +1598,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE (with commodity handling)
+# MAIN SIGNAL ENGINE (with DEBUG logs)
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1601,6 +1608,7 @@ def run_signal_engine_for_index(index_name):
 
         config = INDEX_CONFIG[index_name]
         is_commodity = config.get("is_commodity", False)
+        logger.info(f"🟣 {index_name} is_commodity={is_commodity}")
 
         if is_commodity:
             if not is_mcx_open():
@@ -1626,6 +1634,7 @@ def run_signal_engine_for_index(index_name):
 
         with _candle_histories_lock:
             candle_len = len(candle_histories[index_name]["1min"])
+        logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
         with _market_signal_lock:
             if candle_len < 10:
@@ -1653,7 +1662,7 @@ def run_signal_engine_for_index(index_name):
                 latest_ticks[index_name].setdefault("bid", 0.0)
                 latest_ticks[index_name].setdefault("ask", 0.0)
                 spot = latest_ticks[index_name]["price"] or 0.0
-                ce_prem = spot  # for compatibility
+                ce_prem = spot
                 pe_prem = spot
                 ce_vol = latest_ticks[index_name]["volume"] or 0
                 pe_vol = ce_vol
@@ -1675,6 +1684,8 @@ def run_signal_engine_for_index(index_name):
                 ce_ask = latest_ticks[index_name].get("ce_ask", 0.0) or 0.0
                 pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
                 pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
+
+        logger.info(f"📈 {index_name} spot={spot}")
 
         if spot <= 0:
             with _market_signal_lock:
@@ -1731,6 +1742,7 @@ def run_signal_engine_for_index(index_name):
         sentiment = compute_sentiment(index_name)
         adx = get_current_adx(index_name)
         action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
+        logger.info(f"🎯 {index_name} sentiment={sentiment}, action={action}, confidence={confidence}")
         sentiment_label = get_sentiment_label(sentiment)
 
         with _market_signal_lock:
@@ -2028,7 +2040,7 @@ def run_signal_engine_for_index(index_name):
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Sentiment {sentiment:.0f} - {sentiment_label}"
                 market_signal[index_name]["signal"] = "NO_TRADE"
-            logger.info(f"📢 SET NO_TRADE for {index_name}: sentiment={sentiment}, alert={market_signal[index_name]['alert_message']}")
+            logger.info(f"📢 SET NO_TRADE for {index_name}: sentiment={sentiment}, action={action}")
             return
 
         # Determine side (CE/PE)
@@ -2313,7 +2325,7 @@ def run_signal_engine_for_index(index_name):
                 "strike_price": atm_strike,
                 "trading_symbol": trading_symbol
             })
-        logger.info(f"📢 SET SIGNAL for {index_name}: action={action}, alert={market_signal[index_name]['alert_message']}")
+        logger.info(f"📢 SET SIGNAL for {index_name}: action={action}")
 
     except Exception as e:
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
@@ -2704,7 +2716,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER
+# PRE-MARKET TOKEN REFRESH SCHEDULER (unchanged)
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2723,7 +2735,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK
+# ENHANCED REST FALLBACK (unchanged)
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2873,7 +2885,7 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER
+# CONNECTION MANAGER (unchanged)
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
@@ -2900,7 +2912,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS (unchanged)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2962,7 +2974,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (FIXED market_open)
+# FLASK ROUTES (updated market_open)
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -2975,12 +2987,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.6 – Production Ready (Equity + MCX)",
+        "engine": "Hybrid v15.7 – Debug + Fixed Commodity Signals",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.6-Production"
+        "version": "15.7-Debug"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3001,7 +3013,6 @@ def live_signals():
         for tf in TIMEFRAMES:
             trends_data[idx][tf] = get_trend_for_timeframe(idx, tf)
 
-    # Trigger signal engine if needed
     for idx in INDEX_NAMES:
         if not INDEX_CONFIG[idx].get("active"):
             continue
@@ -3029,14 +3040,14 @@ def live_signals():
             "quality_scores": quality_scores,
             "equity_open": equity_open,
             "mcx_open": mcx_open,
-            "market_open": equity_open or mcx_open,          # combined for frontend
+            "market_open": equity_open or mcx_open,
             "market_status": get_market_status_label(),
             "debug": {
                 "ws_running": ws_running,
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.6-Production"
+            "version": "15.7-Debug"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3052,13 +3063,6 @@ def signal_audio():
                 break
             if sig in ["STRONG_BUY_CE", "BUY_CE", "LOW_BUY_CE", "STRONG_BUY_PE", "BUY_PE", "LOW_BUY_PE"]:
                 latest_action = sig
-                break
-            # For commodities, we map BUY_CE/BUY_PE to appropriate audio
-            if sig == "BUY_CE":
-                latest_action = "BUY_CE"
-                break
-            if sig == "BUY_PE":
-                latest_action = "BUY_PE"
                 break
     audio_map = {
         "STRONG_BUY_CE": "strong_buy_ce.mp3",
