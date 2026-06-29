@@ -1598,7 +1598,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE (with DEBUG logs)
+# MAIN SIGNAL ENGINE (with DEBUG logs) – FIXED for commodities
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1636,14 +1636,12 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        with _market_signal_lock:
-            if candle_len < 10:
-                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/10)"
+        # For commodities, we need fewer candles to start trading
+        min_candles = 3 if is_commodity else 10
+        if candle_len < min_candles:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/{min_candles})"
                 market_signal[index_name]["signal"] = "WAITING"
-            else:
-                market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
-
-                if candle_len < 10:
             return
 
         # ----- ADD THIS BLOCK -----
@@ -1653,10 +1651,6 @@ def run_signal_engine_for_index(index_name):
             if vix <= 0:
                 vix = 15.0
         # --------------------------
-
-        # Get latest prices
-        with _latest_ticks_lock:
-           
 
         with _market_signal_lock:
             if market_signal[index_name]["signal"] == "EXIT":
@@ -2108,12 +2102,14 @@ def run_signal_engine_for_index(index_name):
                         logger.info(f"📢 SET VWAP EXTENDED for {index_name}")
                         return
 
-        if not confirm_signal_with_candles(index_name, side, spot):
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Candle confirmation failed (last 3 closes not aligned with EMA9)"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            logger.info(f"📢 SET CANDLE CONFIRM FAIL for {index_name}")
-            return
+        # Candle confirmation – skip for commodities
+        if not is_commodity:
+            if not confirm_signal_with_candles(index_name, side, spot):
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = "Candle confirmation failed (last 3 closes not aligned with EMA9)"
+                    market_signal[index_name]["signal"] = "BLOCKED"
+                logger.info(f"📢 SET CANDLE CONFIRM FAIL for {index_name}")
+                return
 
         # Volume check (for options)
         if not is_commodity:
@@ -2194,7 +2190,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET HIGH IV for {index_name}")
                 return
 
-        # ML score (only for options)
+        # ML score (only for options) – vix already defined above
         if not is_commodity:
             with _price_histories_lock:
                 prices_spot = list(price_histories[index_name])
@@ -2205,10 +2201,6 @@ def run_signal_engine_for_index(index_name):
                 lows = [c["low"] for c in candles]
                 closes = [c["close"] for c in candles]
             adx = calculate_adx(highs, lows, closes, 14) if len(closes) >= 30 else 20.0
-            with _latest_ticks_lock:
-                vix = latest_ticks["VIX"]["vix"]
-                if vix <= 0:
-                    vix = 15.0
 
             ml_prob = compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment)
             if ml_prob < 0.4 and "STRONG" not in action:
