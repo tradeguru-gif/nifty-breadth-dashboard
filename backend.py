@@ -2200,11 +2200,17 @@ _ws_connect_lock = threading.Lock()
 
 def on_ws_open(wsapp):
     global ws_running, last_heartbeat, sws
+
     try:
-        with _ws_connect_lock:
-            ws_running = True
         last_heartbeat = time.time()
         logger.info("WebSocket connected successfully, subscribing to tokens...")
+
+# build token_list ...
+
+response = sws.subscribe(...)
+
+with _ws_connect_lock:
+    ws_running = True
 
         token_list = []
         for idx, cfg in INDEX_CONFIG.items():
@@ -3153,20 +3159,10 @@ def reload_candles(index_name):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
 
-    def start_background_after_bind():
-        time.sleep(3)
-        try:
-            init_db()
-            load_portfolio_state()
-            get_mcx_futures_tokens()
-            refresh_all_tokens()
-            _load_candle_histories_from_db()
-            _start_background_threads()
-            logger.info("✅ Background initialization complete")
-        except Exception as e:
-            logger.exception("Background init failed")
+    logger.info(f"🚀 Starting Flask on port {port}")
 
-    threading.Thread(target=start_background_after_bind, daemon=True).start()
-
-    logger.info(f"🚀 Starting Flask on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
