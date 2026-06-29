@@ -1,4 +1,4 @@
-# === HYBRID v15.5 – FIXED MARKET HOURS & LOWERED COMMODITY THRESHOLDS ===
+# === HYBRID v15.5 – FULLY CORRECTED ===
 import sys
 import logging
 import os
@@ -19,13 +19,12 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pyotp
-import pytz  # added for reliable timezone
+import pytz
 
 # ---------- DEBUG MODE ----------
 DEBUG_MODE = os.getenv("DEBUG_MODE", "0") == "1"
 PAPER_MODE = os.getenv("PAPER_MODE", "0") == "1"
 
-# Reduce logging noise in production
 if not DEBUG_MODE:
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     logging.getLogger('requests').setLevel(logging.WARNING)
@@ -971,7 +970,6 @@ def refresh_all_tokens():
 IST = pytz.timezone('Asia/Kolkata')
 
 def is_market_open():
-    """Check if equity market is open (Monday-Friday, 9:15 AM - 3:30 PM IST)."""
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
         return True
     now_ist = datetime.now(IST)
@@ -981,7 +979,6 @@ def is_market_open():
     return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_mcx_open():
-    """Check if MCX market is open (Monday-Friday, 10:00 AM - 11:30 PM IST)."""
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
         return True
     now_ist = datetime.now(IST)
@@ -993,7 +990,6 @@ def is_mcx_open():
     return open_time <= current <= close_time
 
 def get_market_status_label():
-    """Get formatted market status label."""
     equity_open = is_market_open()
     mcx_open = is_mcx_open()
     if equity_open and mcx_open:
@@ -1010,13 +1006,52 @@ def is_index_market_open(idx):
     return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (with modified thresholds)
+# CANDLE UPDATE – ensures candles are built
+# ============================================================
+def update_candle(idx, price, cumulative_volume, timestamp):
+    if price <= 0:
+        return
+    with _prev_volume_lock:
+        prev = _prev_volume.get(idx, 0)
+        if cumulative_volume > 0:
+            if prev > 0:
+                tick_vol = max(0, cumulative_volume - prev)
+            else:
+                tick_vol = max(1, cumulative_volume)
+            _prev_volume[idx] = cumulative_volume
+        else:
+            tick_vol = 1
+        if tick_vol > 1000000:
+            tick_vol = 0
+
+    for tf, interval in TIMEFRAME_SECONDS.items():
+        candle_start = int(timestamp / interval) * interval
+        with _current_candle_lock:
+            if _last_candle_time[idx][tf] != candle_start:
+                if _current_candle[idx][tf] is not None:
+                    with _candle_histories_lock:
+                        candle_histories[idx][tf].append(_current_candle[idx][tf])
+                        if tf == "1min":
+                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
+                _current_candle[idx][tf] = {
+                    "open": price, "high": price, "low": price, "close": price,
+                    "volume": tick_vol, "timestamp": candle_start
+                }
+                _last_candle_time[idx][tf] = candle_start
+            else:
+                if _current_candle[idx][tf] is not None:
+                    _current_candle[idx][tf]["high"] = max(_current_candle[idx][tf]["high"], price)
+                    _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
+                    _current_candle[idx][tf]["close"] = price
+                    _current_candle[idx][tf]["volume"] += tick_vol
+
+# ============================================================
+# SENTIMENT, REGIME, CONFIRMATION
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
     logger.debug(f"compute_sentiment {index_name}: candles in 1min = {candle_count}")
-
     if candle_count < 10:
         return 50.0
 
@@ -1066,7 +1101,6 @@ def compute_sentiment(index_name):
 
     if not sentiment_scores:
         return 50.0
-
     total = sum(sentiment_scores)
     sentiment = 50.0 + (total / 3.5)
     return max(0.0, min(100.0, sentiment))
@@ -1090,11 +1124,7 @@ def get_current_adx(index_name):
         return calculate_adx(highs, lows, closes, 14)
     return 18.0
 
-# ============================================================
-# MODIFIED get_signal_from_sentiment – lower commodity thresholds
-# ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
-    """Return action and confidence based on sentiment and regime."""
     if adx is None:
         adx = get_current_adx(index_name)
     regime = detect_regime(index_name)
@@ -1107,16 +1137,16 @@ def get_signal_from_sentiment(index_name, sentiment, adx=None):
     elif vix < 15:
         confidence_multiplier = 1.1
 
-    # ----- MODIFIED COMMODITY BRANCH (more signals) -----
     if is_commodity:
-        if sentiment >= 50:                     # lowered from 55
+        # Lowered thresholds for more signals
+        if sentiment >= 50:
             return "BUY", int(70 * confidence_multiplier)
-        elif sentiment >= 40:                   # HOLD range: 40-49
+        elif sentiment >= 40:
             return "HOLD", 50
-        else:                                   # sentiment < 40
+        else:
             return "SELL", int(70 * confidence_multiplier)
 
-    # ----- EQUITY INDICES (option side) -----
+    # Equity branch unchanged
     if regime == "TRENDING" and adx > 15:
         if sentiment >= 62:
             return "STRONG_BUY_CE", int(90 * confidence_multiplier)
@@ -1711,7 +1741,7 @@ def run_signal_engine_for_index(index_name):
 
         sentiment = compute_sentiment(index_name)
         adx = get_current_adx(index_name)
-        action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)  # UPDATED call
+        action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
         sentiment_label = get_sentiment_label(sentiment)
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
@@ -2352,7 +2382,6 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
 
-    # Only log raw data in DEBUG mode
     if DEBUG_MODE:
         logger.debug(f"RAW WS DATA: {str(message)[:200]}")
     last_heartbeat = time.time()
@@ -2419,7 +2448,6 @@ def on_ws_data(wsapp, message):
                 if is_comm and ltp > 10000:
                     ltp = ltp / 100.0
 
-                # Log only every 100th tick in production
                 if DEBUG_MODE or tick_counter % 100 == 0:
                     logger.debug(f"TICK #{tick_counter}: token={token}, ltp={ltp}")
 
