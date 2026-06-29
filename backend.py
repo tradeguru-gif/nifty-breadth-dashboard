@@ -2880,17 +2880,43 @@ _background_start_lock = threading.Lock()
 
 def auto_start_background():
     global _background_started
+
     with _background_start_lock:
-        if not _background_started:
+        if _background_started:
+            return
+
+        _background_started = True
+
+    def _runner():
+        try:
+            logger.info("Starting background initialization...")
+
             init_db()
             load_portfolio_state()
+
+            get_mcx_futures_tokens()
+
+            refresh_all_tokens()
+
+            _load_candle_histories_from_db()
+
             _start_background_threads()
-            _background_started = True
-            logger.info("Auto-start: Background threads initialized")
+
+            logger.info("✅ Background initialization complete")
+
+        except Exception:
+            logger.exception("Background initialization failed")
+
+    threading.Thread(target=_runner, daemon=True).start()
 
 # ----------------------------------------------------------------------
 # FLASK ROUTES
 # ----------------------------------------------------------------------
+@app.before_request
+def ensure_background_started():
+    auto_start_background()
+
+
 @app.before_request
 def check_auth():
     if API_KEY:
@@ -3160,7 +3186,7 @@ def reload_candles(index_name):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    
+
     def start_background_after_bind():
         time.sleep(3)
         try:
@@ -3173,8 +3199,8 @@ if __name__ == "__main__":
             logger.info("✅ Background initialization complete")
         except Exception as e:
             logger.exception("Background init failed")
-    
+
     threading.Thread(target=start_background_after_bind, daemon=True).start()
-    
+
     logger.info(f"🚀 Starting Flask on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)  
