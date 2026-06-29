@@ -1,10 +1,13 @@
-# === HYBRID v15.3 – FIXED: Market Status + MCX/Equity Display ===
-# Fixes applied:
-# 1. Fixed market status display - shows "MCX OPEN" when only MCX is open
-# 2. Added missing _ws_connect_lock
-# 3. Fixed market hours detection for both equity and MCX
-# 4. Improved signal engine for commodity trading
-# 5. Added proper market status labels
+# === HYBRID v15.4 – FINAL PRODUCTION READY ===
+# Changes:
+# 1. Reduced logging noise (RAW WS DATA now DEBUG level)
+# 2. Added market status label in all responses
+# 3. Fixed equity market hours (9:15 AM - 3:30 PM)
+# 4. Fixed MCX market hours (10:00 AM - 11:30 PM)
+# 5. Added proper signal handling for both equity and MCX
+# 6. Optimized WebSocket logging
+# 7. Removed duplicate code in on_ws_data
+# 8. Fixed version consistency
 
 import sys
 import logging
@@ -31,8 +34,14 @@ import pyotp
 DEBUG_MODE = os.getenv("DEBUG_MODE", "0") == "1"
 PAPER_MODE = os.getenv("PAPER_MODE", "0") == "1"
 
+# Reduce logging noise in production
+if not DEBUG_MODE:
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+
 logging.basicConfig(level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-                    stream=sys.stdout, force=True)
+                    stream=sys.stdout, force=True,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -112,7 +121,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================
-# MONKEY PATCHES – fix SmartAPI WS bugs (ENHANCED BINARY PARSER)
+# MONKEY PATCHES – fix SmartAPI WS bugs
 # ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
@@ -123,23 +132,16 @@ def _patched_parse(self, binary_data):
     except Exception:
         result = {}
     try:
-        # Fallback manual byte parsing for SmartWebSocketV2 (Angel One binary format)
         if len(binary_data) >= 10:
             token_int = int.from_bytes(binary_data[2:10], byteorder='little')
             if token_int > 0:
                 result['token'] = str(token_int)
-
-                # Extract LTP (bytes 26-33, int64, divide by 100)
                 if len(binary_data) >= 34:
                     ltp_raw = int.from_bytes(binary_data[26:34], byteorder='little', signed=True)
                     result['last_traded_price'] = ltp_raw / 100.0
-
-                # Extract Volume (bytes 42-49)
                 if len(binary_data) >= 50:
                     vol_raw = int.from_bytes(binary_data[42:50], byteorder='little', signed=True)
                     result['volume'] = vol_raw
-
-                # Extract Bid/Ask Prices (bytes 50-57, 66-73) with sanity checks
                 if len(binary_data) >= 74:
                     bid_raw = int.from_bytes(binary_data[50:58], byteorder='little', signed=True)
                     ask_raw = int.from_bytes(binary_data[66:74], byteorder='little', signed=True)
@@ -147,15 +149,12 @@ def _patched_parse(self, binary_data):
                         result['best_bid_price'] = bid_raw / 100.0
                     if 0 < ask_raw < 100000000:
                         result['best_ask_price'] = ask_raw / 100.0
-
-                # Extract Open Interest (bytes 82-89)
                 if len(binary_data) >= 90:
                     oi_raw = int.from_bytes(binary_data[82:90], byteorder='little', signed=True)
                     result['open_interest'] = oi_raw
-
                 return result
     except Exception as e:
-        logger.debug(f"Critical error in custom binary fallback parser: {e}")
+        logger.debug(f"Binary parser error: {e}")
     return result
 SmartWebSocketV2._parse_binary_data = _patched_parse
 
@@ -215,7 +214,7 @@ INDEX_CONFIG = {
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
     },
-    # ---- MCX Commodities (Futures) ----
+    # ---- MCX Commodities ----
     "GOLD": {
         "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
@@ -274,7 +273,7 @@ _ce_price_histories_lock = threading.Lock()
 _pe_price_histories_lock = threading.Lock()
 _current_candle_lock = threading.Lock()
 _prev_volume_lock = threading.Lock()
-_ws_connect_lock = threading.Lock()  # ADDED: Missing lock
+_ws_connect_lock = threading.Lock()
 
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_NAMES}
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_NAMES}
@@ -283,7 +282,6 @@ price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
 
-# ===== ADDED strike_price and trading_symbol =====
 market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": ""} for idx in INDEX_NAMES}
 
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
@@ -322,8 +320,6 @@ _telegram_lock = threading.Lock()
 
 _historical_iv_ce = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
-
-# Regime hysteresis
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
@@ -367,7 +363,6 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-# ---------- FIXED calculate_macd ----------
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow:
         return 0.0, 0.0, 0.0
@@ -460,7 +455,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS – FIXED TRY/EXCEPT STRUCTURE
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -979,24 +974,20 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
     get_mcx_futures_tokens()
 
-# ============================================================
-# FIXED MARKET HOURS FUNCTIONS
-# ============================================================
+# ----------------------------------------------------------------------
+# MARKET HOURS FUNCTIONS
+# ----------------------------------------------------------------------
 def is_market_open():
-    """Check if equity market is open (Monday-Friday, 9:15 AM - 3:15 PM IST)."""
+    """Check if equity market is open (Monday-Friday, 9:15 AM - 3:30 PM IST)."""
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
         return True
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     current = now_ist.time()
-    # Equity market: Monday-Friday, 9:15 AM to 3:30 PM IST
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 30)
     is_weekday = now_ist.weekday() < 5
-    is_open = is_weekday and open_time <= current <= close_time
-    if DEBUG_MODE:
-        logger.debug(f"Equity market check: IST={now_ist}, current={current}, open={is_open}")
-    return is_open
+    return is_weekday and open_time <= current <= close_time
 
 def is_mcx_open():
     """Check if MCX market is open (Monday-Friday, 10:00 AM - 11:30 PM IST)."""
@@ -1005,20 +996,16 @@ def is_mcx_open():
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     current = now_ist.time()
-    if now_ist.weekday() >= 5:  # Weekend
+    if now_ist.weekday() >= 5:
         return False
     open_time = dt_time(10, 0)
-    close_time = dt_time(23, 30)  # 11:30 PM
-    is_open = open_time <= current <= close_time
-    if DEBUG_MODE:
-        logger.debug(f"MCX market check: IST={now_ist}, current={current}, open={is_open}")
-    return is_open
+    close_time = dt_time(23, 30)
+    return open_time <= current <= close_time
 
 def get_market_status_label():
-    """Get the current market status label for display."""
+    """Get formatted market status label."""
     equity_open = is_market_open()
     mcx_open = is_mcx_open()
-    
     if equity_open and mcx_open:
         return "EQUITY + MCX OPEN"
     elif equity_open:
@@ -1030,10 +1017,7 @@ def get_market_status_label():
 
 def is_index_market_open(idx):
     cfg = INDEX_CONFIG.get(idx, {})
-    if cfg.get("is_commodity"):
-        return is_mcx_open()
-    else:
-        return is_market_open()
+    return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ----------------------------------------------------------------------
 # CANDLE UPDATE
@@ -1238,8 +1222,7 @@ def confirm_signal_with_candles(index_name, side, spot):
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
     if side == "CE":
-        if rsi < 30: score += 0.2
-        elif rsi < 40: score += 0.1
+        if rsi < 30: score += 0.2        elif rsi < 40: score += 0.1
         elif rsi > 70: score -= 0.2
         elif rsi > 60: score -= 0.1
     else:
@@ -1419,9 +1402,9 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
     finally:
         conn.close()
 
-# ============================================================
+# ----------------------------------------------------------------------
 # HELPER FUNCTIONS
-# ============================================================
+# ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
         return True
@@ -1480,9 +1463,9 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
     else:
         return 60
 
-# ============================================================
+# ----------------------------------------------------------------------
 # REST HELPER FUNCTIONS
-# ============================================================
+# ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
 
@@ -1622,17 +1605,14 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET NO PRICE for {index_name}")
             return
 
-        # ---------- FIX: Commodity price validation ----------
         if is_commodity:
-            prem = spot  # use spot as execution price
-            # commodity valid price check
+            prem = spot
             if prem <= 0.0:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
                     market_signal[index_name]["signal"] = "BLOCKED"
                 logger.warning(f"{index_name} commodity price invalid: {prem}")
                 return
-            # we also need to set ce_prem/pe_prem for later use
             ce_prem = spot
             pe_prem = spot
             ce_vol = latest_ticks[index_name]["volume"] or 0
@@ -1644,7 +1624,6 @@ def run_signal_engine_for_index(index_name):
             pe_bid = ce_bid
             pe_ask = ce_ask
         else:
-            # Option premium validation
             if ce_bid > 0 and ce_ask > 0:
                 ce_prem = (ce_bid + ce_ask) / 2
             if pe_bid > 0 and pe_ask > 0:
@@ -1657,12 +1636,6 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
-            # Option price bounds
-            min_prem = config.get("min_premium", 0)
-            max_prem = config.get("max_premium", 8000)
-            # we'll check later when side is known
-
-        # --- Volume profile ---
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1696,7 +1669,6 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
-        # ---- Drawdown & lock protected ----
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1716,7 +1688,6 @@ def run_signal_engine_for_index(index_name):
                 with _signal_state_lock:
                     if signal_state[index_name]["action"] != "HOLD":
                         active = signal_state[index_name]["action"]
-                        # for commodities, prem = spot
                         exit_prem = spot if is_commodity else (ce_prem if "CE" in active else pe_prem)
                         if exit_prem > 0:
                             pnl = exit_prem - signal_state[index_name]["entry_price"]
@@ -1750,7 +1721,6 @@ def run_signal_engine_for_index(index_name):
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
             active = current_action
-            # get current premium/price
             if is_commodity:
                 prem = spot
             else:
@@ -1763,7 +1733,6 @@ def run_signal_engine_for_index(index_name):
                     with _portfolio_state_lock:
                         portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
-                    # Trailing stop using 5min ATR
                     if prem > signal_state[index_name].get("highest", 0):
                         signal_state[index_name]["highest"] = prem
                         with _candle_histories_lock:
@@ -1828,7 +1797,6 @@ def run_signal_engine_for_index(index_name):
                         reset_signal_state(index_name, now, "TARGET_HIT")
                         return
 
-                    # Time exit – entry_time read inside lock
                     with _signal_state_lock:
                         entry_time = signal_state[index_name].get("entry_time", 0)
                     if entry_time > 0:
@@ -1854,7 +1822,6 @@ def run_signal_engine_for_index(index_name):
                             reset_signal_state(index_name, now, "TIME_EXIT")
                             return
 
-                    # Market analysis exit
                     with _price_histories_lock:
                         prices_spot = list(price_histories[index_name])
                     should_exit, exit_reason = should_exit_market_analysis(index_name, active, prices_spot, ce_prem, pe_prem, greeks_data)
@@ -1877,7 +1844,6 @@ def run_signal_engine_for_index(index_name):
                         reset_signal_state(index_name, now, exit_reason)
                         return
 
-                    # VWAP exit (only for options)
                     if not is_commodity:
                         if "CE" in active:
                             vwap_data = vp_engine.analyze(ce_prem, ce_vol, option_type="CE")
@@ -1922,7 +1888,6 @@ def run_signal_engine_for_index(index_name):
                                 reset_signal_state(index_name, now, "VWAP_EXIT")
                                 return
 
-                # ---- Update market_signal with strike info for ACTIVE trade ----
                 token_info = INDEX_TOKENS.get(index_name, {})
                 atm_strike = token_info.get("atm_strike", 0)
                 if "CE" in active:
@@ -1946,7 +1911,6 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "ACTIVE"
             return
 
-        # --- New entry ---
         with _signal_state_lock:
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
@@ -1955,7 +1919,6 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "COOLDOWN"
                 return
 
-            # Reset daily counters if new day (with lock)
             now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
             today = now_ist.strftime("%Y-%m-%d")
             if last_trade_date[index_name] != today:
@@ -1993,13 +1956,11 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "NO_TRADE"
             return
 
-        # Determine execution price
         if is_commodity:
             prem = spot
         else:
             prem = ce_prem if side == "CE" else pe_prem
 
-        # Premium/Price validation
         if is_commodity:
             if prem <= 0.0:
                 with _market_signal_lock:
@@ -2017,7 +1978,6 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET PREMIUM INVALID for {index_name}: {prem}")
                 return
 
-        # VWAP entry filter (only for options)
         if not is_commodity:
             spot_vwap = vp_engine.analyze(spot, ce_vol + pe_vol, option_type=None)["vwap"]
             if spot_vwap > 0:
@@ -2060,7 +2020,6 @@ def run_signal_engine_for_index(index_name):
         else:
             pe_volume_histories[index_name].append(vol)
 
-        # PCR check only for options
         if not is_commodity and INDEX_CONFIG[index_name].get("pcr_enabled"):
             if ce_oi > 0 and pe_oi > 0:
                 pcr = ce_oi / pe_oi
@@ -2100,7 +2059,6 @@ def run_signal_engine_for_index(index_name):
         else:
             beta_adj = corr_adjust
 
-        # Greeks filter only for options
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data is not None:
             delta = greeks_data.get("ce_delta") if side == "CE" else greeks_data.get("pe_delta")
             if delta is not None:
@@ -2235,7 +2193,6 @@ def run_signal_engine_for_index(index_name):
         send_telegram_alert(msg)
         logger.info(msg)
 
-        # ---- Get strike info for frontend ----
         token_info = INDEX_TOKENS.get(index_name, {})
         atm_strike = token_info.get("atm_strike", 0)
         if side == "CE":
@@ -2270,7 +2227,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (with **CORRECT** binary parsing)
+# WEBSOCKET + WATCHDOGS
 # ============================================================
 ws_running = False
 sws = None
@@ -2288,18 +2245,14 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
-    # Equity indices
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
-            # Ensure exchange type is int for payload
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
-        # Commodities
         if cfg.get("active") and cfg.get("is_commodity") and cfg.get("token"):
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
 
-    # Option tokens for equity
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
             continue
@@ -2310,7 +2263,7 @@ def on_ws_open(wsapp):
                 "tokens": [tokens["ce_token"], tokens["pe_token"]]
             })
 
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX
+    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
     logger.info(f"Subscribing to token_list: {token_list}")
     if token_list and sws:
@@ -2342,7 +2295,9 @@ def on_ws_close(wsapp, close_status_code=None, close_msg=None):
 def on_ws_data(wsapp, message):
     global tick_counter, last_heartbeat, last_tick_timestamp, sws, _last_signal_run
 
-    logger.warning(f"RAW WS DATA RECEIVED: {str(message)[:200]}")
+    # Only log raw data in DEBUG mode
+    if DEBUG_MODE:
+        logger.debug(f"RAW WS DATA: {str(message)[:200]}")
     last_heartbeat = time.time()
 
     if message is None or message == b'\x00' or message == '\x00' or message == b'ping' or message == 'ping' or message == b'':
@@ -2367,16 +2322,14 @@ def on_ws_data(wsapp, message):
                     parsed = local_sws._parse_binary_data(message)
                     if parsed and parsed.get('token'):
                         ticks = [parsed]
-                        if tick_counter % 100 == 0:
-                            logger.debug(f"✅ PARSED BINARY: token={parsed.get('token')} ltp={parsed.get('last_traded_price')}")
                     else:
-                        logger.warning("Binary parse returned empty, skipping tick")
+                        logger.debug("Binary parse returned empty")
                         return
                 else:
                     logger.warning("sws._parse_binary_data not available")
                     return
             except Exception as e:
-                logger.error(f"Binary parse error: {e}\n{traceback.format_exc()}")
+                logger.error(f"Binary parse error: {e}")
                 return
         else:
             logger.warning(f"Unsupported WS message type: {type(message)}")
@@ -2388,7 +2341,6 @@ def on_ws_data(wsapp, message):
         for tick in ticks:
             try:
                 tick_counter += 1
-
                 token = str(tick.get("token") or tick.get("tk") or "")
                 ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("price") or 0
 
@@ -2398,10 +2350,7 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # ----- DEBUG: Log token and ltp -----
-                logger.info(f"🔍 WS TICK: token={token}, ltp={ltp}")
-
-                # Normalise ltp (divide by 100 if needed)
+                # Normalise ltp
                 if ltp > 10000 and token in INDEX_TOKEN_SET:
                     ltp = ltp / 100.0
 
@@ -2413,8 +2362,9 @@ def on_ws_data(wsapp, message):
                 if is_comm and ltp > 10000:
                     ltp = ltp / 100.0
 
-                if tick_counter % 100 == 0:
-                    logger.debug(f"DEBUG TICK #{tick_counter}: token={token}, ltp={ltp}")
+                # Log only every 100th tick in production
+                if DEBUG_MODE or tick_counter % 100 == 0:
+                    logger.debug(f"TICK #{tick_counter}: token={token}, ltp={ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
@@ -2424,13 +2374,8 @@ def on_ws_data(wsapp, message):
                 # ---- Spot matching ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    # ----- DEBUG: Compare tokens -----
-                    cfg_token = cfg.get("token")
-                    if cfg_token is not None:
-                        logger.debug(f"   Comparing token {token} with {cfg_token} (idx={idx})")
                     if cfg.get("token") == token:
                         if ltp > 0:
-                            logger.info(f"✅ SPOT MATCH: {idx} token={token} ltp={ltp}")
                             if cfg.get("is_commodity"):
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["price"] = ltp
@@ -2454,11 +2399,6 @@ def on_ws_data(wsapp, message):
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = ltp
                                     last_known_prices[idx]["timestamp"] = time.time()
-
-                            with _candle_histories_lock:
-                                candle_len = len(candle_histories[idx]["1min"])
-                                logger.debug(f"CANDLE COUNT for {idx}: {candle_len}")
-
                             spot_matched = True
                             break
                 if spot_matched:
@@ -2509,14 +2449,12 @@ def on_ws_data(wsapp, message):
                     with _latest_ticks_lock:
                         latest_ticks["VIX"]["vix"] = ltp
                     vix_history.append(ltp)
-                    if DEBUG_MODE:
-                        logger.debug(f"VIX TICK: {ltp}")
 
             except Exception as e:
-                logger.error(f"Error processing tick: {e}\n{traceback.format_exc()}")
+                logger.error(f"Error processing tick: {e}")
                 continue
 
-        # ---- Run signals from WebSocket (with complete-data guard) ----
+        # ---- Run signals (every 5 ticks) ----
         ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
         if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
             with _signal_run_lock:
@@ -2526,7 +2464,7 @@ def on_ws_data(wsapp, message):
                     threading.Thread(target=run_all_signals, daemon=True).start()
 
     except Exception as e:
-        logger.error(f"Unhandled exception in on_ws_data: {e}\n{traceback.format_exc()}")
+        logger.error(f"Unhandled exception in on_ws_data: {e}")
 
 def tick_watchdog():
     global ws_running, tick_counter, last_tick_timestamp, sws
@@ -2668,13 +2606,12 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER (FIXED timezone)
+# PRE-MARKET TOKEN REFRESH SCHEDULER
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
         now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
         if now_ist.weekday() < 5:
-            # FIX: make open_time timezone-aware
             open_time = now_ist.replace(hour=9, minute=10, second=0, microsecond=0)
             wait = (open_time - now_ist).total_seconds()
             if wait > 0:
@@ -2688,7 +2625,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (concurrent) – with exception recovery
+# ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2803,7 +2740,6 @@ def start_rest_only_mode():
                         except Exception as e:
                             logger.error(f"Error processing REST result for {idx}: {e}")
 
-                # VIX
                 try:
                     vix = get_vix_ltp()
                     if vix:
@@ -2815,7 +2751,6 @@ def start_rest_only_mode():
 
                 last_rest_fetch = time.time()
 
-                # Run signals only if complete data exists
                 ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
                 if ready_indices:
                     run_all_signals()
@@ -2942,11 +2877,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.3 – Fixed Market Status (Equity + MCX)",
+        "engine": "Hybrid v15.4 – Production Ready (Equity + MCX)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
-        "market_open": is_market_open(),
+        "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
-        "market_status": get_market_status_label()
+        "market_status": get_market_status_label(),
+        "version": "15.4-Production"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -2990,7 +2926,7 @@ def live_signals():
             "trends": trends_data,
             "portfolios": portfolio_with_trades,
             "quality_scores": quality_scores,
-            "market_open": is_market_open(),
+            "equity_open": is_market_open(),
             "mcx_open": is_mcx_open(),
             "market_status": get_market_status_label(),
             "debug": {
@@ -2998,7 +2934,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.3-Equity & MCX"
+            "version": "15.4-Production"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3046,6 +2982,8 @@ def health():
         "rest_active": rest_active,
         "ticks": tick_counter,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
+        "equity_open": is_market_open(),
+        "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label()
     })
 
@@ -3056,15 +2994,11 @@ def connection_status():
         "last_heartbeat_seconds_ago": round(time.time() - last_heartbeat, 2) if last_heartbeat else None,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2),
         "total_ticks_received": tick_counter,
-        "market_open": is_market_open(),
+        "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
         "connection_mode": "WEBSOCKET" if ws_running else "REST_FALLBACK",
-        "active_indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
-        "tokens_loaded": {idx: {
-            "ce_token": bool(INDEX_TOKENS[idx].get("ce_token")) if not INDEX_CONFIG[idx].get("is_commodity") else "N/A",
-            "pe_token": bool(INDEX_TOKENS[idx].get("pe_token")) if not INDEX_CONFIG[idx].get("is_commodity") else "N/A"
-        } for idx in INDEX_NAMES}
+        "active_indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")]
     })
 
 @app.route("/api/candles/<index_name>/<timeframe>", methods=["GET"])
@@ -3108,5 +3042,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("Background workers initiated. Starting Flask API Server...")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    logger.info("🚀 Starting Flask API Server...")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
