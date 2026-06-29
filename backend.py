@@ -8,6 +8,7 @@
 # 6. Optimized WebSocket logging
 # 7. Removed duplicate code in on_ws_data
 # 8. Fixed version consistency
+# 9. Fixed syntax error in compute_ml_score
 
 import sys
 import logging
@@ -1222,22 +1223,39 @@ def confirm_signal_with_candles(index_name, side, spot):
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
     if side == "CE":
-        if rsi < 30: score += 0.2        elif rsi < 40: score += 0.1
-        elif rsi > 70: score -= 0.2
-        elif rsi > 60: score -= 0.1
+        if rsi < 30:
+            score += 0.2
+        elif rsi < 40:
+            score += 0.1
+        elif rsi > 70:
+            score -= 0.2
+        elif rsi > 60:
+            score -= 0.1
     else:
-        if rsi > 70: score += 0.2
-        elif rsi > 60: score += 0.1
-        elif rsi < 30: score -= 0.2
-        elif rsi < 40: score -= 0.1
-    if adx > 25: score += 0.1
-    elif adx < 15: score -= 0.1
-    if vix > 25: score -= 0.1
-    elif vix < 15: score += 0.05
-    if side == "CE" and sentiment >= 70: score += 0.1
-    elif side == "PE" and sentiment <= 30: score += 0.1
-    elif side == "CE" and sentiment <= 30: score -= 0.1
-    elif side == "PE" and sentiment >= 70: score -= 0.1
+        if rsi > 70:
+            score += 0.2
+        elif rsi > 60:
+            score += 0.1
+        elif rsi < 30:
+            score -= 0.2
+        elif rsi < 40:
+            score -= 0.1
+    if adx > 25:
+        score += 0.1
+    elif adx < 15:
+        score -= 0.1
+    if vix > 25:
+        score -= 0.1
+    elif vix < 15:
+        score += 0.05
+    if side == "CE" and sentiment >= 70:
+        score += 0.1
+    elif side == "PE" and sentiment <= 30:
+        score += 0.1
+    elif side == "CE" and sentiment <= 30:
+        score -= 0.1
+    elif side == "PE" and sentiment >= 70:
+        score -= 0.1
     return max(0.0, min(1.0, score))
 
 def is_expiry_day(index_name):
