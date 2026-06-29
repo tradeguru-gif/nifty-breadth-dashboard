@@ -1144,9 +1144,6 @@ def update_candle(idx, price, volume, timestamp):
 # ----------------------------------------------------------------------
 # SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#-----------------------------------------------------------------------
-#REPLACED-------------------------------------------------------------
 def compute_sentiment(index_name):
     with _candle_histories_lock:
         candle_count = len(candle_histories[index_name]["1min"])
@@ -1168,10 +1165,7 @@ def compute_sentiment(index_name):
                 return 50.0
         return 50.0
 
-    # ... rest of existing sentiment logic ...
-# ----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#-----------------------------------------------------------------------
+    # Rest of sentiment logic (now correctly indented)
     sentiment_scores = []
     for tf in TIMEFRAMES:
         with _candle_histories_lock:
@@ -1458,9 +1452,6 @@ def compute_signal_quality(index_name):
 # ----------------------------------------------------------------------
 # has_complete_data() – requires sufficient history
 # ----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#---------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
@@ -1485,10 +1476,7 @@ def has_complete_data(index_name):
             if len(price_histories[index_name]) < 15:
                 return False
         return True
-# ----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#----------------------------------------------------------------------
-#---------------------------------------------------------------------
+
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
 
@@ -1510,7 +1498,7 @@ def load_portfolio_state():
                     
                     action = row[1]
                     if action and action != "HOLD":
-                        with _signal_state_lock:  # ADDED LOCK
+                        with _signal_state_lock:
                             signal_state[idx].update({
                                 "action": action,
                                 "entry_price": float(row[2]) if row[2] is not None else 0.0,
@@ -1933,7 +1921,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
         return False
     
     # Signal buffer (reduce churn)
-        # Signal buffer (reduce churn)
     buffer = signal_buffer[index_name]
     if is_commodity:
         if action == "BUY":
@@ -1962,12 +1949,6 @@ def should_enter_trade(index_name, action, spot, ce_prem, pe_prem, confidence, q
             if buffer["pe_count"] < 2:
                 logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
                 return False
-    else:
-        buffer["pe_count"] += 1
-        buffer["ce_count"] = max(0, buffer["ce_count"] - 1)
-        if buffer["pe_count"] < 2:
-            logger.debug(f"{index_name}: PE buffer {buffer['pe_count']}/2")
-            return False
     
     # Correlation filter (NIFTY/BANKNIFTY only)
     pair = cfg.get("correlation_pair")
@@ -1993,7 +1974,6 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     now = time.time()
     
     # Determine side and premium
-        # Determine side and premium
     if is_commodity:
         side = "CE" if action == "BUY" else "PE"
         prem = spot  # For commodities, "premium" is just the spot price
@@ -2093,7 +2073,7 @@ def execute_entry(index_name, action, spot, ce_prem, pe_prem, atr, vix, greeks_d
     # Save state
     save_portfolio_state(index_name)
     
-    # Build alert — FIX: removed undefined 'adx' reference
+    # Build alert — fixed: removed undefined 'adx' reference
     msg = (
         f"🟢 ENTRY {index_name} {action}\n"
         f"Entry: {entry:.2f} | SL: {sl:.2f} | Target: {target:.2f}\n"
@@ -2139,7 +2119,7 @@ def manage_existing_position(index_name, spot, ce_prem, pe_prem, atr, vix, greek
     highest = state["highest"]
     now = time.time()
     
-        is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
+    is_commodity = INDEX_CONFIG[index_name].get("is_commodity", False)
     if is_commodity:
         side = "CE" if action == "BUY" else "PE"
     else:
@@ -3047,8 +3027,6 @@ def auto_start_background():
             _background_started = True
             logger.info("Auto-start: Background threads initialized for production")
 
-auto_start_background()
-
 # ----------------------------------------------------------------------
 # FLASK ROUTES
 # ----------------------------------------------------------------------
@@ -3361,11 +3339,24 @@ def reload_candles(index_name):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    init_db()
-    load_portfolio_state()
-    get_mcx_futures_tokens()
-    refresh_all_tokens()
-    _load_candle_histories_from_db()
-    _start_background_threads()
-    logger.info(f"Background workers initiated. Starting Flask API Server on port {port}...")
+    
+    # CRITICAL: Start Flask immediately so Render detects the port
+    # Background threads start after in a separate thread
+    
+    def start_background_after_bind():
+        time.sleep(3)  # Let Flask start
+        try:
+            init_db()
+            load_portfolio_state()
+            get_mcx_futures_tokens()
+            refresh_all_tokens()
+            _load_candle_histories_from_db()
+            _start_background_threads()
+            logger.info("✅ Background initialization complete")
+        except Exception as e:
+            logger.exception("Background init failed")
+    
+    threading.Thread(target=start_background_after_bind, daemon=True).start()
+    
+    logger.info(f"🚀 Starting Flask on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False)
