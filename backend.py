@@ -1,4 +1,4 @@
-# === HYBRID v15.9 – FIXED MCX PRICES + ATM TOKENS + BETA_ADJ ===
+# === HYBRID v15.10 – FIXED MCX DIVISION + ATM LOGGING ===
 import sys
 import logging
 import os
@@ -246,7 +246,7 @@ INDEX_CONFIG = {
 }
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
-EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}  # <-- NEW
+EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
 INDEX_NAMES = list(INDEX_CONFIG.keys())
 
 # ----------------------------------------------------------------------
@@ -324,7 +324,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS
+# INDICATORS (unchanged)
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -441,7 +441,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS
+# BSM & GREEKS (unchanged)
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -631,7 +631,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE
+# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -734,7 +734,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT
+# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -906,7 +906,7 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 # ================================================================
-# FIXED: get_current_atm_tokens (improved ATM strike selection)
+# FIXED: get_current_atm_tokens with enhanced logging
 # ================================================================
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -982,7 +982,7 @@ def get_current_atm_tokens(index_name):
         ce_symbol = str(ce.iloc[0]["symbol"])
         pe_symbol = str(pe.iloc[0]["symbol"])
 
-        logger.info(f"{index_name} | ATM strike: {actual_strike} (spot={spot}) | CE token {ce_token}, PE token {pe_token} | expiry {expiry}")
+        logger.info(f"✅ {index_name} | ATM strike: {actual_strike} (spot={spot}) | CE token {ce_token}, PE token {pe_token} | expiry {expiry}")
 
         INDEX_TOKENS[index_name].update({
             "ce_token": ce_token,
@@ -1094,7 +1094,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION
+# SENTIMENT, REGIME, CONFIRMATION (unchanged)
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1283,7 +1283,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ============================================================
-# get_signal_from_sentiment (unchanged, but keep for reference)
+# get_signal_from_sentiment (unchanged)
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
     logger.info(f"📢 get_signal_from_sentiment called for {index_name}, sentiment={sentiment}")
@@ -1393,7 +1393,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE
+# SIGNAL QUALITY SCORE (unchanged)
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1422,7 +1422,7 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK
+# DATA READINESS CHECK (unchanged)
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
@@ -1433,7 +1433,7 @@ def has_complete_data(index_name):
              last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE
+# PERSISTENCE (unchanged)
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1544,7 +1544,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (unchanged)
 # ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1605,7 +1605,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ----------------------------------------------------------------------
-# REST HELPER FUNCTIONS
+# REST HELPER FUNCTIONS (unchanged)
 # ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
@@ -1693,7 +1693,6 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        # Commodities need fewer candles to start
         min_candles = 5 if is_commodity else 10
         if candle_len < min_candles:
             with _market_signal_lock:
@@ -2178,7 +2177,7 @@ def run_signal_engine_for_index(index_name):
                     return
 
         # ==== FIXED: beta_adj defined here ====
-        beta_adj = 1.0  # default for commodities and indices without correlation pair
+        beta_adj = 1.0
         if not is_commodity:
             pair = INDEX_CONFIG[index_name].get("correlation_pair")
             corr_adjust = 1.0
@@ -2369,7 +2368,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (unchanged except normalisation fix)
+# WEBSOCKET + WATCHDOGS – FIXED MCX DIVISION
 # ============================================================
 ws_running = False
 sws = None
@@ -2491,10 +2490,21 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # --- FIXED NORMALISATION: Only divide equity indices (NSE/BSE) ---
+                # ========== FIXED NORMALISATION ==========
+                # For equity indices (NSE/BSE), divide by 100 if > 10000 (paise)
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
-                # DO NOT divide commodities – keep raw value (already in rupees)
+
+                # For MCX (exchange_type 5), divide by 100 (Angel One sends in paise)
+                # We can detect MCX by checking the config for this token
+                is_mcx = False
+                for idx, cfg in INDEX_CONFIG.items():
+                    if cfg.get("is_commodity") and cfg.get("token") == token:
+                        is_mcx = True
+                        break
+                if is_mcx and ltp > 0:
+                    # Divide by 100 to convert paise to rupees
+                    ltp = ltp / 100.0
 
                 if DEBUG_MODE or tick_counter % 100 == 0:
                     logger.debug(f"TICK #{tick_counter}: token={token}, ltp={ltp}")
@@ -2739,7 +2749,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER
+# PRE-MARKET TOKEN REFRESH SCHEDULER (unchanged)
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2758,7 +2768,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK
+# ENHANCED REST FALLBACK (unchanged)
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2908,7 +2918,7 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER
+# CONNECTION MANAGER (unchanged)
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
@@ -2935,7 +2945,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS (unchanged)
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2997,7 +3007,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES
+# FLASK ROUTES (unchanged)
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -3010,12 +3020,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.9 – Fixed MCX Prices + ATM Tokens + beta_adj",
+        "engine": "Hybrid v15.10 – MCX Division + ATM Logging",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.9-FixedAll"
+        "version": "15.10-FixedMCXDiv"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3070,7 +3080,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.9-FixedAll"
+            "version": "15.10-FixedMCXDiv"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3179,6 +3189,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server...")
+    logger.info("🚀 Starting Flask API Server (v15.10)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
