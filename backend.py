@@ -1,4 +1,4 @@
-# === HYBRID v15.10 – FIXED MCX DIVISION + ATM LOGGING ===
+# === HYBRID v15.11 – ATM DEBUG + MCX FIXES ===
 import sys
 import logging
 import os
@@ -202,14 +202,14 @@ INDEX_CONFIG = {
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
     },
-    # ---- MCX Commodities (all with is_commodity=True) ----
+    # ---- MCX Commodities ----
     "GOLD": {
         "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 1.0  # will be overridden if needed
     },
     "SILVER": {
         "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -324,7 +324,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS (unchanged)
+# INDICATORS
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -441,7 +441,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS (unchanged)
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -631,7 +631,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -734,7 +734,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
+# AUTHENTICATION & TOKEN MANAGEMENT
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -835,7 +835,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -858,6 +858,10 @@ def get_mcx_futures_tokens():
                        f"{df[df['exch_seg']=='MCX']['instrumenttype'].unique()}")
         return
 
+    # Filter out mini/petal/micro contracts by symbol pattern
+    exclude_patterns = ['MINI', 'PETAL', 'MICRO']
+    mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains('|'.join(exclude_patterns), case=False, na=False)]
+
     mcx_fut = mcx_fut.copy()
     mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
     mcx_fut = mcx_fut.dropna(subset=["expiry_date"])
@@ -870,11 +874,13 @@ def get_mcx_futures_tokens():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
-        matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
+        # Match exact symbol (case-insensitive)
+        matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
         if matching.empty:
-            matching = mcx_fut[mcx_fut["symbol"] == symbol]
+            # Fallback to startswith
+            matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
-            logger.warning(f"MCX symbol '{symbol}' not found")
+            logger.warning(f"MCX symbol '{symbol}' not found after filtering")
             continue
 
         future_sorted = matching.sort_values("expiry_date")
@@ -906,7 +912,7 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 # ================================================================
-# FIXED: get_current_atm_tokens with enhanced logging
+# FIXED: get_current_atm_tokens with strike format detection
 # ================================================================
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -950,7 +956,17 @@ def get_current_atm_tokens(index_name):
         opts = opts.copy()
         opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
         opts = opts.dropna(subset=["expiry_date"])
-        opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100.0
+        # Detect strike format: if values are > 10000, they are likely in paise; else in rupees.
+        sample_strikes = opts["strike"].dropna().astype(float).head(10).tolist()
+        logger.info(f"🔍 {index_name} sample strikes: {sample_strikes}")
+        if sample_strikes and max(sample_strikes) > 10000:
+            strike_divisor = 100.0
+            logger.info(f"🔍 {index_name} strikes appear to be in paise, using divisor 100")
+        else:
+            strike_divisor = 1.0
+            logger.info(f"🔍 {index_name} strikes appear to be in rupees, using divisor 1")
+
+        opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / strike_divisor
         opts = opts.dropna(subset=["strike"])
 
         future = opts[opts["expiry_date"] >= datetime.now()]
@@ -1094,7 +1110,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (unchanged)
+# SENTIMENT, REGIME, CONFIRMATION
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1283,7 +1299,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ============================================================
-# get_signal_from_sentiment (unchanged)
+# get_signal_from_sentiment
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
     logger.info(f"📢 get_signal_from_sentiment called for {index_name}, sentiment={sentiment}")
@@ -1393,7 +1409,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE (unchanged)
+# SIGNAL QUALITY SCORE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1422,7 +1438,7 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK (unchanged)
+# DATA READINESS CHECK
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
@@ -1433,7 +1449,7 @@ def has_complete_data(index_name):
              last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE (unchanged)
+# PERSISTENCE
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1544,7 +1560,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1605,7 +1621,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ----------------------------------------------------------------------
-# REST HELPER FUNCTIONS (unchanged)
+# REST HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
@@ -1656,7 +1672,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – FIXED beta_adj + min_candles
+# MAIN SIGNAL ENGINE – FIXED beta_adj + min_candles + MCX multiplier
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1720,6 +1736,11 @@ def run_signal_engine_for_index(index_name):
                 latest_ticks[index_name].setdefault("bid", 0.0)
                 latest_ticks[index_name].setdefault("ask", 0.0)
                 spot = latest_ticks[index_name]["price"] or 0.0
+                # Apply MCX multiplier if configured
+                mult = config.get("mkt_multiple", 1.0)
+                if mult != 1.0:
+                    spot = spot * mult
+                    logger.debug(f"{index_name} applying multiplier {mult} -> {spot}")
                 ce_prem = spot
                 pe_prem = spot
                 ce_vol = latest_ticks[index_name]["volume"] or 0
@@ -2176,7 +2197,7 @@ def run_signal_engine_for_index(index_name):
                     logger.info(f"📢 SET EXTREME PCR for {index_name}")
                     return
 
-        # ==== FIXED: beta_adj defined here ====
+        # ==== beta_adj defined here ====
         beta_adj = 1.0
         if not is_commodity:
             pair = INDEX_CONFIG[index_name].get("correlation_pair")
@@ -2201,7 +2222,6 @@ def run_signal_engine_for_index(index_name):
                 beta_adj = corr_analysis.get("beta_adjustment", 1.0) * corr_adjust
             else:
                 beta_adj = 1.0
-        # ==== end fix ====
 
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data is not None:
             delta = greeks_data.get("ce_delta") if side == "CE" else greeks_data.get("pe_delta")
@@ -2496,7 +2516,6 @@ def on_ws_data(wsapp, message):
                     ltp = ltp / 100.0
 
                 # For MCX (exchange_type 5), divide by 100 (Angel One sends in paise)
-                # We can detect MCX by checking the config for this token
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("is_commodity") and cfg.get("token") == token:
@@ -2749,7 +2768,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER (unchanged)
+# PRE-MARKET TOKEN REFRESH SCHEDULER
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2768,7 +2787,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (unchanged)
+# ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2918,7 +2937,7 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER (unchanged)
+# CONNECTION MANAGER
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
@@ -2945,7 +2964,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS (unchanged)
+# BACKGROUND THREADS
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -3007,7 +3026,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (unchanged)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -3020,12 +3039,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.10 – MCX Division + ATM Logging",
+        "engine": "Hybrid v15.11 – ATM Debug + MCX Fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.10-FixedMCXDiv"
+        "version": "15.11-ATM-debug"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3080,7 +3099,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.10-FixedMCXDiv"
+            "version": "15.11-ATM-debug"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3189,6 +3208,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.10)...")
+    logger.info("🚀 Starting Flask API Server (v15.11)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
