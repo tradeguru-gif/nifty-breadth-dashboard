@@ -858,6 +858,70 @@ def get_mcx_futures_tokens():
                        f"{df[df['exch_seg']=='MCX']['instrumenttype'].unique()}")
         return
 
+    # Filter out sub-contracts (MINI, PETAL, MICRO, etc.)
+    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
+        mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
+
+    # --- DEBUG: Show COPPER symbols and first 10 symbols ---
+    copper_debug = mcx_fut[mcx_fut['symbol'].str.contains('COPPER', case=False, na=False)]
+    logger.info(f"🔍 COPPER symbols found: {copper_debug['symbol'].tolist()}")
+    logger.info(f"🔍 First 10 MCX symbols: {mcx_fut['symbol'].head(10).tolist()}")
+
+    mcx_fut = mcx_fut.copy()
+    mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
+    mcx_fut = mcx_fut.dropna(subset=["expiry_date"])
+    if mcx_fut.empty:
+        logger.warning("MCX futures found but no parseable expiry dates")
+        return
+
+    today = datetime.now()
+
+    # Updated aliases
+    symbol_aliases = {
+        "GOLD":     ["GOLDM", "GOLD"],
+        "SILVER":   ["SILVERM", "SILVER"],
+        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM"],
+        "NATURALGAS": ["NATURALGAS", "NATURALGASM"],
+        "COPPER":   ["COPPERM", "COPPER", "COPPERMIC", "COPPERMINI", "COPPER1000", "COPPER25"],
+    }
+
+    for idx, cfg in INDEX_CONFIG.items():
+        if not cfg.get("active") or not cfg.get("is_commodity"):
+            continue
+        symbol = cfg["symbol"]
+
+        # Exact match first
+        matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
+
+        # Try aliases
+        if matching.empty and symbol in symbol_aliases:
+            for alias in symbol_aliases[symbol]:
+                matching = mcx_fut[mcx_fut["symbol"].str.upper() == alias.upper()]
+                if not matching.empty:
+                    logger.info(f"MCX {symbol} matched via alias: {alias}")
+                    break
+
+        # Fallback: startswith or regex
+        if matching.empty:
+            matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
+        if matching.empty:
+            matching = mcx_fut[mcx_fut["symbol"].str.contains(f"^{symbol}[A-Z]*$", case=False, na=False, regex=True)]
+
+        if matching.empty:
+            logger.warning(f"MCX symbol '{symbol}' not found after alias/fallback")
+            continue
+
+        future_sorted = matching.sort_values("expiry_date")
+        nearest = future_sorted.iloc[0]
+        token = str(nearest["token"])
+        cfg["token"] = token
+        logger.info(f"MCX {symbol} token: {token} (symbol: {nearest['symbol']}) expiry {nearest['expiry']}")
+
+    global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
+    INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
+    EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
+    logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
+
     # Filter out mini/petal/micro contracts by symbol pattern
     exclude_patterns = ['MINI', 'PETAL', 'MICRO']
     mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains('|'.join(exclude_patterns), case=False, na=False)]
