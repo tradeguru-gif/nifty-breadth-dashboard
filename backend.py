@@ -1,4 +1,4 @@
-# === HYBRID v15.11 – ATM DEBUG + MCX FIXES ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE ===
 import sys
 import logging
 import os
@@ -209,7 +209,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 1.0  # will be overridden if needed
+        "mkt_multiple": 1.0  # will be overridden by REST price
     },
     "SILVER": {
         "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -1672,7 +1672,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – FIXED beta_adj + min_candles + MCX multiplier
+# MAIN SIGNAL ENGINE – with MCX REST price override
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1727,28 +1727,34 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
 
+        # ---- Get spot price ----
         with _latest_ticks_lock:
             if index_name not in latest_ticks:
                 latest_ticks[index_name] = {}
+
             if is_commodity:
-                latest_ticks[index_name].setdefault("price", 0.0)
-                latest_ticks[index_name].setdefault("volume", 0)
-                latest_ticks[index_name].setdefault("bid", 0.0)
-                latest_ticks[index_name].setdefault("ask", 0.0)
-                spot = latest_ticks[index_name]["price"] or 0.0
-                # Apply MCX multiplier if configured
-                mult = config.get("mkt_multiple", 1.0)
-                if mult != 1.0:
-                    spot = spot * mult
-                    logger.debug(f"{index_name} applying multiplier {mult} -> {spot}")
+                # Use REST API to get correct LTP for commodities
+                rest_spot = get_index_spot(index_name)
+                if rest_spot and rest_spot > 0:
+                    spot = rest_spot
+                    # Update latest_ticks with correct price
+                    with _latest_ticks_lock:
+                        latest_ticks[index_name]["price"] = spot
+                    logger.info(f"📈 {index_name} spot (REST) = {spot}")
+                else:
+                    # Fallback to WebSocket price
+                    spot = latest_ticks[index_name].get("price", 0.0) or 0.0
+                    logger.info(f"📈 {index_name} spot (WS fallback) = {spot}")
+
+                # Set other variables
                 ce_prem = spot
                 pe_prem = spot
-                ce_vol = latest_ticks[index_name]["volume"] or 0
+                ce_vol = latest_ticks[index_name].get("volume", 0) or 0
                 pe_vol = ce_vol
                 ce_oi = 0
                 pe_oi = 0
-                ce_bid = latest_ticks[index_name]["bid"] or 0.0
-                ce_ask = latest_ticks[index_name]["ask"] or 0.0
+                ce_bid = latest_ticks[index_name].get("bid", 0.0) or 0.0
+                ce_ask = latest_ticks[index_name].get("ask", 0.0) or 0.0
                 pe_bid = ce_bid
                 pe_ask = ce_ask
             else:
@@ -1764,13 +1770,10 @@ def run_signal_engine_for_index(index_name):
                 pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
                 pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
-        logger.info(f"📈 {index_name} spot={spot}")
-
         if spot <= 0:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "No price data yet"
                 market_signal[index_name]["signal"] = "WAITING"
-            logger.info(f"📢 SET NO PRICE for {index_name}")
             return
 
         if is_commodity:
@@ -1793,6 +1796,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
+        # Rest of the engine (VP, correlation, greeks, sentiment, etc.) unchanged...
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1829,6 +1833,7 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
+        # Drawdown and safety checks (unchanged)
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1877,6 +1882,7 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
 
+        # Existing position management (unchanged)
         with _signal_state_lock:
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
@@ -2388,7 +2394,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS – FIXED MCX DIVISION
+# WEBSOCKET + WATCHDOGS – unchanged (MCX division remains for WS)
 # ============================================================
 ws_running = False
 sws = None
@@ -2510,19 +2516,17 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # ========== FIXED NORMALISATION ==========
-                # For equity indices (NSE/BSE), divide by 100 if > 10000 (paise)
+                # Normalise equity (NSE/BSE) – divide by 100 if > 10000 (paise)
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
 
-                # For MCX (exchange_type 5), divide by 100 (Angel One sends in paise)
+                # MCX: divide by 100 (paise to rupees) but note that we will override with REST later
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("is_commodity") and cfg.get("token") == token:
                         is_mcx = True
                         break
                 if is_mcx and ltp > 0:
-                    # Divide by 100 to convert paise to rupees
                     ltp = ltp / 100.0
 
                 if DEBUG_MODE or tick_counter % 100 == 0:
@@ -3039,12 +3043,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.11 – ATM Debug + MCX Fixes",
+        "engine": "Hybrid v15.12 – MCX REST Price Override",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.11-ATM-debug"
+        "version": "15.12-MCX-REST"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3099,7 +3103,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.11-ATM-debug"
+            "version": "15.12-MCX-REST"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3208,6 +3212,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.11)...")
+    logger.info("🚀 Starting Flask API Server (v15.12)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
