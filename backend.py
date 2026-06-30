@@ -1,4 +1,4 @@
-# === HYBRID v15.16 – Enhanced debug for token matching ===
+# === HYBRID v15.17 – MCX alias + token matching fixes ===
 import sys
 import logging
 import os
@@ -835,7 +835,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering)
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -870,17 +870,40 @@ def get_mcx_futures_tokens():
         return
 
     today = datetime.now()
+
+    # ---------- FIX 1: Alias mapping ----------
+    symbol_aliases = {
+        "GOLD":     ["GOLD", "GOLDM", "GOLDGUINEA", "GOLDPETAL"],
+        "SILVER":   ["SILVER", "SILVERM", "SILVERMIC", "SILVER1000"],
+        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM", "CRUDEOILMIC"],
+        "NATURALGAS": ["NATURALGAS", "NATURALGASM", "NATURALGASMIC"],
+        "COPPER":   ["COPPER", "COPPERM", "COPPERMIC", "COPPER1000"],
+    }
+
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
-        # Match exact symbol (case-insensitive)
+
+        # Exact match first
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
+
+        # Try aliases if exact match fails
+        if matching.empty and symbol in symbol_aliases:
+            for alias in symbol_aliases[symbol]:
+                matching = mcx_fut[mcx_fut["symbol"].str.upper() == alias.upper()]
+                if not matching.empty:
+                    logger.info(f"MCX {symbol} matched via alias: {alias}")
+                    break
+
+        # Fallback to startswith
         if matching.empty:
-            # Fallback to startswith
             matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
-            logger.warning(f"MCX symbol '{symbol}' not found after filtering")
+            matching = mcx_fut[mcx_fut["symbol"].str.contains(f"^{symbol}[A-Z]*$", case=False, na=False, regex=True)]
+
+        if matching.empty:
+            logger.warning(f"MCX symbol '{symbol}' not found after alias/fallback")
             continue
 
         future_sorted = matching.sort_values("expiry_date")
@@ -1672,7 +1695,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – with MCX multiplier
+# MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -2292,18 +2315,19 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET EXPIRY BLOCK for {index_name}")
                 return
 
-                with _candle_histories_lock:
-                    candles = list(candle_histories[index_name]["1min"])
-                    highs = [c["high"] for c in candles]
-                    lows = [c["low"] for c in candles]
-                    closes = [c["close"] for c in candles]
-                atr = calculate_atr(highs, lows, closes, 14)
-        
+        with _candle_histories_lock:
+            candles = list(candle_histories[index_name]["1min"])
+            highs = [c["high"] for c in candles]
+            lows = [c["low"] for c in candles]
+            closes = [c["close"] for c in candles]
+        atr = calculate_atr(highs, lows, closes, 14)
+
         # === FIX: If ATR is zero or very small, use a default based on price ===
         if atr <= 0.01 and prem > 0:
             atr = prem * 0.005  # 0.5% of price as fallback ATR
             logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
         # === END FIX ===
+
         if "STRONG" in action:
             sl_pct = 0.45
             target_mult = 3.5
@@ -2406,13 +2430,19 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
+    # ---------- FIX 3: MCX subscription check ----------
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
-        if cfg.get("active") and cfg.get("is_commodity") and cfg.get("token"):
-            exch_type = int(cfg["ws_exchange_type"])
-            token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+        if cfg.get("active") and cfg.get("is_commodity"):
+            token = cfg.get("token")
+            if token:
+                exch_type = int(cfg["ws_exchange_type"])
+                token_list.append({"exchangeType": exch_type, "tokens": [token]})
+                logger.info(f"WS Subscribe: {idx} token={token}")
+            else:
+                logger.warning(f"WS Skip: {idx} has no token yet")
 
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
@@ -2514,10 +2544,10 @@ def on_ws_data(wsapp, message):
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
 
-                # MCX: divide by 100 (paise to rupees) – will be multiplied later in engine
+                # ---------- FIX 2: MCX is_mcx check ----------
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    if cfg.get("is_commodity") and cfg.get("token") == token:
+                    if cfg.get("is_commodity") and cfg.get("token") and str(cfg["token"]) == token:
                         is_mcx = True
                         break
                 if is_mcx and ltp > 0:
@@ -2534,9 +2564,11 @@ def on_ws_data(wsapp, message):
                 # ---- Spot matching with enhanced debug ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    # Compare tokens as strings
-                    config_token = str(cfg.get("token", ""))
-                    if config_token == token:
+                    # ---------- FIX 2: Skip None tokens ----------
+                    config_token = cfg.get("token")
+                    if config_token is None:
+                        continue
+                    if str(config_token) == token:
                         if ltp > 0:
                             logger.debug(f"✅ Spot match: {idx} token={config_token}, ltp={ltp}")
                             if cfg.get("is_commodity"):
@@ -3010,7 +3042,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (unchanged)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -3023,12 +3055,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.16 – Enhanced debug for token matching",
+        "engine": "Hybrid v15.17 – MCX alias + token matching fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.16-debug"
+        "version": "15.17-MCX-fixes"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3083,7 +3115,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.16-debug"
+            "version": "15.17-MCX-fixes"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3184,6 +3216,30 @@ def backtest_signal(index_name):
     return jsonify({"signals": signals, "count": len(signals)})
 
 # ----------------------------------------------------------------------
+# BONUS: Token status debug endpoint
+# ----------------------------------------------------------------------
+@app.route("/api/token-status", methods=["GET"])
+def token_status():
+    status = {}
+    for idx, cfg in INDEX_CONFIG.items():
+        if not cfg.get("active"):
+            continue
+        is_commodity = cfg.get("is_commodity", False)
+        status[idx] = {
+            "token": cfg.get("token"),
+            "latest_price": latest_ticks.get(idx, {}).get(
+                "price" if is_commodity else "spot_price", 0),
+            "candles_1min": len(candle_histories.get(idx, {}).get("1min", [])),
+            "last_update_ago": round(time.time() - last_known_prices.get(idx, {}).get("timestamp", 0), 1) if last_known_prices.get(idx, {}).get("timestamp") else None
+        }
+    return jsonify({
+        "tokens": status,
+        "ws_running": ws_running,
+        "total_ticks": tick_counter,
+        "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
+    })
+
+# ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
@@ -3192,6 +3248,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.16)...")
+    logger.info("🚀 Starting Flask API Server (v15.17)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
