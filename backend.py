@@ -1,4 +1,4 @@
-# === HYBRID v15.12 – MCX REST PRICE OVERRIDE ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS ===
 import sys
 import logging
 import os
@@ -164,52 +164,102 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Equity + MCX
+# INDEX CONFIGURATION – Equity (Indices + Stocks) + MCX
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
+    # ---------- Existing Equity Indices ----------
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"  # new key
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "NIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY", "lot_size": 40, "expiry_weekday": 1, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY", "lot_size": 75, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
-    # ---- MCX Commodities ----
+
+    # ---------- NEW Equity Stocks (Options) ----------
+    "RELIANCE": {
+        "token": None,  # spot token fetched later
+        "exchange": "NSE", "symbol": "RELIANCE", "lot_size": 250, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "TCS": {
+        "token": None, "exchange": "NSE", "symbol": "TCS", "lot_size": 25, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "INFY": {
+        "token": None, "exchange": "NSE", "symbol": "INFY", "lot_size": 150, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "HDFC": {
+        "token": None, "exchange": "NSE", "symbol": "HDFC", "lot_size": 100, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "ICICIBANK": {
+        "token": None, "exchange": "NSE", "symbol": "ICICIBANK", "lot_size": 25, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+
+    # ---------- Existing MCX Commodities ----------
     "GOLD": {
         "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 1.0  # will be overridden by REST price
+        "mkt_multiple": 1.0
     },
     "SILVER": {
         "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -242,9 +292,52 @@ INDEX_CONFIG = {
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
         "mkt_multiple": 1.0
+    },
+
+    # ---------- NEW MCX Commodities ----------
+    "ZINC": {
+        "token": None, "exchange": "MCX", "symbol": "ZINC", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "LEAD": {
+        "token": None, "exchange": "MCX", "symbol": "LEAD", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "ALUMINIUM": {
+        "token": None, "exchange": "MCX", "symbol": "ALUMINIUM", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "NICKEL": {
+        "token": None, "exchange": "MCX", "symbol": "NICKEL", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "MENTHAOIL": {
+        "token": None, "exchange": "MCX", "symbol": "MENTHAOIL", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
     }
 }
 
+# Compute token sets (will be updated later)
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
 EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
 INDEX_NAMES = list(INDEX_CONFIG.keys())
@@ -895,6 +988,40 @@ def get_mcx_futures_tokens():
     logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
 
 # ================================================================
+# NEW: Fetch equity spot token for stock symbols
+# ================================================================
+def get_equity_spot_tokens():
+    """Fetch spot tokens for all equity (non-commodity) symbols that have token=None."""
+    scrip = get_scrip_master()
+    if not scrip:
+        logger.warning("Scrip master not available for equity spot token fetch")
+        return
+    df = pd.DataFrame(scrip)
+    for idx, cfg in INDEX_CONFIG.items():
+        if cfg.get("is_commodity") or not cfg.get("active"):
+            continue
+        if cfg.get("token") is not None:
+            continue  # already have token
+        symbol = cfg["symbol"]
+        exchange = cfg["exchange"]
+        # Find equity segment for the same symbol
+        equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"] == "EQ")]
+        if equity_rows.empty:
+            # try with different instrumenttype
+            equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"].str.contains("EQ", case=False))]
+        if equity_rows.empty:
+            logger.warning(f"Equity spot token not found for {symbol}")
+            continue
+        token = str(equity_rows.iloc[0]["token"])
+        cfg["token"] = token
+        logger.info(f"Equity spot token for {symbol}: {token}")
+    # Update token sets
+    global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
+    INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
+    EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
+    logger.info(f"Updated token sets after equity fetch: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
+
+# ================================================================
 
 def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -912,7 +1039,7 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 # ================================================================
-# FIXED: get_current_atm_tokens with strike format detection
+# FIXED: get_current_atm_tokens with support for OPTIDX and OPTSTK
 # ================================================================
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -943,13 +1070,15 @@ def get_current_atm_tokens(index_name):
 
     try:
         df = pd.DataFrame(scrip)
+        # Determine instrument type: "OPTIDX" or "OPTSTK"
+        instr_type = config.get("option_instrument_type", "OPTIDX")
         opts = df[
             (df["name"] == config["symbol"]) &
-            (df["instrumenttype"] == "OPTIDX") &
+            (df["instrumenttype"] == instr_type) &
             (df["exch_seg"] == config["option_exchange"])
         ]
         if opts.empty:
-            logger.warning(f"{index_name}: No OPTIDX found")
+            logger.warning(f"{index_name}: No {instr_type} found for {config['symbol']}")
             INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
             return None, None
 
@@ -1017,16 +1146,20 @@ def get_current_atm_tokens(index_name):
         return None, None
 
 # ================================================================
-# refresh_all_tokens now calls get_mcx_futures_tokens()
+# refresh_all_tokens now calls get_mcx_futures_tokens() and get_equity_spot_tokens()
 # ================================================================
 def refresh_all_tokens():
+    # First fetch equity spot tokens for stocks (and other equity) that need them
+    get_equity_spot_tokens()
+    # Then fetch option tokens
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
             if INDEX_CONFIG[idx].get("is_commodity"):
                 continue
             get_current_atm_tokens(idx)
+    # Finally fetch MCX futures tokens
     get_mcx_futures_tokens()
-    logger.info("All tokens refreshed (equity options + MCX futures)")
+    logger.info("All tokens refreshed (equity spot, equity options, MCX futures)")
 
 # ============================================================
 # MARKET HOURS
@@ -2394,7 +2527,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS – unchanged (MCX division remains for WS)
+# WEBSOCKET + WATCHDOGS – extended to include stock spot tokens
 # ============================================================
 ws_running = False
 sws = None
@@ -2412,14 +2545,19 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
+    # Subscribe to spot tokens for all equity (indices and stocks)
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
             exch_type = int(cfg["ws_exchange_type"])
-            token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+            token = cfg.get("token")
+            if token:
+                token_list.append({"exchangeType": exch_type, "tokens": [token]})
+        # For commodities, also subscribe to their futures tokens
         if cfg.get("active") and cfg.get("is_commodity") and cfg.get("token"):
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
 
+    # Subscribe to option tokens for all non-commodity symbols
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
             continue
@@ -2430,6 +2568,7 @@ def on_ws_open(wsapp):
                 "tokens": [tokens["ce_token"], tokens["pe_token"]]
             })
 
+    # VIX token
     token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
     logger.info(f"Subscribing to token_list: {token_list}")
@@ -2993,7 +3132,7 @@ def _start_background_threads():
                             ready += 1
                     else:
                         tokens = INDEX_TOKENS.get(idx, {})
-                        if tokens.get("ce_token") and tokens.get("pe_token"):
+                        if tokens.get("ce_token") and tokens.get("pe_token") and cfg.get("token"):
                             ready += 1
                 total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
                 for idx in INDEX_NAMES:
@@ -3043,12 +3182,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.12 – MCX REST Price Override",
+        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.12-MCX-REST"
+        "version": "15.12-MCX-REST-EXT"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3103,7 +3242,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.12-MCX-REST"
+            "version": "15.12-MCX-REST-EXT"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3209,9 +3348,11 @@ def backtest_signal(index_name):
 if __name__ == "__main__":
     init_db()
     load_portfolio_state()
+    # Ensure tokens are fetched before starting
     get_mcx_futures_tokens()
+    get_equity_spot_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.12)...")
+    logger.info("🚀 Starting Flask API Server (v15.12 Extended)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
