@@ -1539,7 +1539,13 @@ def has_complete_data(index_name):
     return (last_known_prices[index_name].get("spot", 0) > 0 and
             (last_known_prices[index_name].get("ce", 0) > 0 or
              last_known_prices[index_name].get("pe", 0) > 0))
-
+def has_complete_data(index_name):
+    cfg = INDEX_CONFIG.get(index_name, {})
+    if cfg.get("is_commodity"):
+        val = last_known_prices[index_name].get("spot", 0)
+        logger.debug(f"has_complete_data {index_name}: spot={val}")
+        return val > 0
+   
 # ----------------------------------------------------------------------
 # PERSISTENCE (unchanged)
 # ----------------------------------------------------------------------
@@ -1766,6 +1772,15 @@ def get_option_quote(index_name, option_type):
 # ============================================================
 # MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback
 # ============================================================
+def run_all_signals():
+    for idx in INDEX_NAMES:
+        if INDEX_CONFIG[idx].get("active"):
+            logger.info(f"🔄 run_all_signals: checking {idx}")
+            try:
+                run_signal_engine_for_index(idx)
+            except Exception as e:
+                logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
+
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
     try:
@@ -2496,14 +2511,6 @@ def run_signal_engine_for_index(index_name):
 
     except Exception as e:
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
-
-def run_all_signals():
-    for idx in INDEX_NAMES:
-        if INDEX_CONFIG[idx].get("active"):
-            try:
-                run_signal_engine_for_index(idx)
-            except Exception as e:
-                logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
 # WEBSOCKET + WATCHDOGS – with mode=2 and enhanced token matching debug
