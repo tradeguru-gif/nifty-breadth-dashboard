@@ -873,15 +873,16 @@ def get_mcx_futures_tokens():
 
     # ---------- FIX 1: Alias mapping ----------
             # Filter OUT sub-contracts before matching
-    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO']:
+        # Filter out ALL micro/sub-contracts BEFORE matching
+    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
         mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
 
     symbol_aliases = {
-        "GOLD":     ["GOLDM", "GOLD"],      # GOLDM = 1kg main contract
-        "SILVER":   ["SILVERM", "SILVER"],  # SILVERM = 5kg main contract  
+        "GOLD":     ["GOLDM", "GOLD"],      # GOLDM = 100g (most liquid), GOLD = 1kg
+        "SILVER":   ["SILVERM", "SILVER"],  # SILVERM = 5kg, SILVER = 30kg
         "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM"],
         "NATURALGAS": ["NATURALGAS", "NATURALGASM"],
-        "COPPER":   ["COPPERM", "COPPER"],  # COPPERM = 2.5MT main contract
+        "COPPER":   ["COPPERM", "COPPER"],  # COPPERM = 2.5MT, COPPER = 2.5MT
     }
 
     for idx, cfg in INDEX_CONFIG.items():
@@ -1736,7 +1737,7 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        min_candles = 5 if is_commodity else 10
+        min_candles = 3 if is_commodity else 10
         if candle_len < min_candles:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/{min_candles})"
@@ -2325,6 +2326,10 @@ def run_signal_engine_for_index(index_name):
             lows = [c["low"] for c in candles]
             closes = [c["close"] for c in candles]
         atr = calculate_atr(highs, lows, closes, 14)
+                # FIX: If ATR is zero or too small, use price-based fallback
+        if atr <= 0.01 and prem > 0:
+            atr = prem * 0.005  # 0.5% of price as minimum ATR
+            logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
 
         # === FIX: If ATR is zero or very small, use a default based on price ===
         if atr <= 0.01 and prem > 0:
