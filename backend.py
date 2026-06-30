@@ -1,4 +1,4 @@
-# === HYBRID v15.17 – MCX alias + token matching fixes ===
+# === HYBRID v15.18 – Cleaned up, debug logs, MCX signals fixed ===
 import sys
 import logging
 import os
@@ -835,7 +835,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases)
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases) – ONLY ONE BLOCK
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -862,7 +862,7 @@ def get_mcx_futures_tokens():
     for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
         mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
 
-    # --- DEBUG: Show COPPER symbols and first 10 symbols ---
+    # Debug: show COPPER symbols
     copper_debug = mcx_fut[mcx_fut['symbol'].str.contains('COPPER', case=False, na=False)]
     logger.info(f"🔍 COPPER symbols found: {copper_debug['symbol'].tolist()}")
     logger.info(f"🔍 First 10 MCX symbols: {mcx_fut['symbol'].head(10).tolist()}")
@@ -876,7 +876,7 @@ def get_mcx_futures_tokens():
 
     today = datetime.now()
 
-    # Updated aliases
+    # Alias mapping
     symbol_aliases = {
         "GOLD":     ["GOLDM", "GOLD"],
         "SILVER":   ["SILVERM", "SILVER"],
@@ -902,70 +902,6 @@ def get_mcx_futures_tokens():
                     break
 
         # Fallback: startswith or regex
-        if matching.empty:
-            matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
-        if matching.empty:
-            matching = mcx_fut[mcx_fut["symbol"].str.contains(f"^{symbol}[A-Z]*$", case=False, na=False, regex=True)]
-
-        if matching.empty:
-            logger.warning(f"MCX symbol '{symbol}' not found after alias/fallback")
-            continue
-
-        future_sorted = matching.sort_values("expiry_date")
-        nearest = future_sorted.iloc[0]
-        token = str(nearest["token"])
-        cfg["token"] = token
-        logger.info(f"MCX {symbol} token: {token} (symbol: {nearest['symbol']}) expiry {nearest['expiry']}")
-
-    global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
-    INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
-    EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
-    logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
-
-    # Filter out mini/petal/micro contracts by symbol pattern
-    exclude_patterns = ['MINI', 'PETAL', 'MICRO']
-    mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains('|'.join(exclude_patterns), case=False, na=False)]
-
-    mcx_fut = mcx_fut.copy()
-    mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
-    mcx_fut = mcx_fut.dropna(subset=["expiry_date"])
-    if mcx_fut.empty:
-        logger.warning("MCX futures found but no parseable expiry dates")
-        return
-
-    today = datetime.now()
-
-    # ---------- FIX 1: Alias mapping ----------
-            # Filter OUT sub-contracts before matching
-        # Filter out ALL micro/sub-contracts BEFORE matching
-    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
-        mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
-
-    symbol_aliases = {
-        "GOLD":     ["GOLDM", "GOLD"],      # GOLDM = 100g (most liquid), GOLD = 1kg
-        "SILVER":   ["SILVERM", "SILVER"],  # SILVERM = 5kg, SILVER = 30kg
-        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM"],
-        "NATURALGAS": ["NATURALGAS", "NATURALGASM"],
-        "COPPER":   ["COPPERM", "COPPER"],  # COPPERM = 2.5MT, COPPER = 2.5MT
-    }
-
-    for idx, cfg in INDEX_CONFIG.items():
-        if not cfg.get("active") or not cfg.get("is_commodity"):
-            continue
-        symbol = cfg["symbol"]
-
-        # Exact match first
-        matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
-
-        # Try aliases if exact match fails
-        if matching.empty and symbol in symbol_aliases:
-            for alias in symbol_aliases[symbol]:
-                matching = mcx_fut[mcx_fut["symbol"].str.upper() == alias.upper()]
-                if not matching.empty:
-                    logger.info(f"MCX {symbol} matched via alias: {alias}")
-                    break
-
-        # Fallback to startswith
         if matching.empty:
             matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
@@ -1530,22 +1466,18 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK
+# DATA READINESS CHECK – with debug log
 # ----------------------------------------------------------------------
-def has_complete_data(index_name):
-    cfg = INDEX_CONFIG.get(index_name, {})
-    if cfg.get("is_commodity"):
-        return last_known_prices[index_name].get("spot", 0) > 0
-    return (last_known_prices[index_name].get("spot", 0) > 0 and
-            (last_known_prices[index_name].get("ce", 0) > 0 or
-             last_known_prices[index_name].get("pe", 0) > 0))
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
     if cfg.get("is_commodity"):
         val = last_known_prices[index_name].get("spot", 0)
         logger.debug(f"has_complete_data {index_name}: spot={val}")
         return val > 0
-   
+    return (last_known_prices[index_name].get("spot", 0) > 0 and
+            (last_known_prices[index_name].get("ce", 0) > 0 or
+             last_known_prices[index_name].get("pe", 0) > 0))
+
 # ----------------------------------------------------------------------
 # PERSISTENCE (unchanged)
 # ----------------------------------------------------------------------
@@ -1824,26 +1756,24 @@ def run_signal_engine_for_index(index_name):
             if rest_spot and rest_spot > 0:
                 now = time.time()
                 with _latest_ticks_lock:
-                    # Update latest_ticks
                     latest_ticks[index_name]["price"] = rest_spot
                     last_known_prices[index_name]["spot"] = rest_spot
                     last_known_prices[index_name]["timestamp"] = now
                 with _price_histories_lock:
                     price_histories[index_name].append(rest_spot)
-                # Force candle update with current timestamp
                 update_candle(index_name, rest_spot, 0, now)
-                # Re-check candle count after update
                 with _candle_histories_lock:
                     candle_len = len(candle_histories[index_name]["1min"])
                 logger.info(f"✅ {index_name} after REST fallback: candle_len={candle_len}")
             else:
                 logger.warning(f"⚠️ {index_name} REST fallback failed, still waiting for ticks.")
-        
+
         if candle_len < min_candles:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/{min_candles})"
                 market_signal[index_name]["signal"] = "WAITING"
             return
+
         with _latest_ticks_lock:
             vix = latest_ticks["VIX"].get("vix", 15.0)
             if vix <= 0:
@@ -1915,6 +1845,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
+        # ---- Volume profile ----
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1923,6 +1854,7 @@ def run_signal_engine_for_index(index_name):
             vp_engine.update(ce_prem, ce_vol, option_type="CE")
             vp_engine.update(pe_prem, pe_vol, option_type="PE")
 
+        # ---- Correlation ----
         if index_name == "NIFTY":
             nifty_price_series.append(spot)
         elif index_name == "BANKNIFTY":
@@ -1930,10 +1862,12 @@ def run_signal_engine_for_index(index_name):
         if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
             correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
+        # ---- Greeks ----
         greeks_data = None
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled"):
             greeks_data = get_option_greeks(index_name)
 
+        # ---- Sentiment & signal ----
         sentiment = compute_sentiment(index_name)
         adx = get_current_adx(index_name)
         action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
@@ -1951,6 +1885,7 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
+        # ---- Drawdown & safety ----
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1999,6 +1934,7 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
 
+        # ---- Existing position management ----
         with _signal_state_lock:
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
@@ -2426,10 +2362,6 @@ def run_signal_engine_for_index(index_name):
             lows = [c["low"] for c in candles]
             closes = [c["close"] for c in candles]
         atr = calculate_atr(highs, lows, closes, 14)
-                # FIX: If ATR is zero or too small, use price-based fallback
-        if atr <= 0.01 and prem > 0:
-            atr = prem * 0.005  # 0.5% of price as minimum ATR
-            logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
 
         # === FIX: If ATR is zero or very small, use a default based on price ===
         if atr <= 0.01 and prem > 0:
@@ -2531,7 +2463,7 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
-    # ---------- FIX 3: MCX subscription check ----------
+    # MCX subscription check
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
             exch_type = int(cfg["ws_exchange_type"])
@@ -2645,7 +2577,7 @@ def on_ws_data(wsapp, message):
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
 
-                # ---------- FIX 2: MCX is_mcx check ----------
+                # MCX: divide by 100 (paise to rupees) – will be multiplied later in engine
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("is_commodity") and cfg.get("token") and str(cfg["token"]) == token:
@@ -2665,7 +2597,6 @@ def on_ws_data(wsapp, message):
                 # ---- Spot matching with enhanced debug ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    # ---------- FIX 2: Skip None tokens ----------
                     config_token = cfg.get("token")
                     if config_token is None:
                         continue
@@ -3156,12 +3087,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.17 – MCX alias + token matching fixes",
+        "engine": "Hybrid v15.18 – Cleaned up, debug logs",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.17-MCX-fixes"
+        "version": "15.18-clean"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3216,7 +3147,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.17-MCX-fixes"
+            "version": "15.18-clean"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3349,6 +3280,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.17)...")
+    logger.info("🚀 Starting Flask API Server (v15.18)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
