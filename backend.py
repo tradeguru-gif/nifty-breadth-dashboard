@@ -2292,12 +2292,18 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET EXPIRY BLOCK for {index_name}")
                 return
 
-        with _candle_histories_lock:
-            candles = list(candle_histories[index_name]["1min"])
-            highs = [c["high"] for c in candles]
-            lows = [c["low"] for c in candles]
-            closes = [c["close"] for c in candles]
-        atr = calculate_atr(highs, lows, closes, 14)
+                with _candle_histories_lock:
+                    candles = list(candle_histories[index_name]["1min"])
+                    highs = [c["high"] for c in candles]
+                    lows = [c["low"] for c in candles]
+                    closes = [c["close"] for c in candles]
+                atr = calculate_atr(highs, lows, closes, 14)
+        
+        # === FIX: If ATR is zero or very small, use a default based on price ===
+        if atr <= 0.01 and prem > 0:
+            atr = prem * 0.005  # 0.5% of price as fallback ATR
+            logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
+        # === END FIX ===
         if "STRONG" in action:
             sl_pct = 0.45
             target_mult = 3.5
