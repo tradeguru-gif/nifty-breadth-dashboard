@@ -872,12 +872,16 @@ def get_mcx_futures_tokens():
     today = datetime.now()
 
     # ---------- FIX 1: Alias mapping ----------
+            # Filter OUT sub-contracts before matching
+    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO']:
+        mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
+
     symbol_aliases = {
-        "GOLD":     ["GOLD", "GOLDM", "GOLDGUINEA", "GOLDPETAL"],
-        "SILVER":   ["SILVER", "SILVERM", "SILVERMIC", "SILVER1000"],
-        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM", "CRUDEOILMIC"],
-        "NATURALGAS": ["NATURALGAS", "NATURALGASM", "NATURALGASMIC"],
-        "COPPER":   ["COPPER", "COPPERM", "COPPERMIC", "COPPER1000"],
+        "GOLD":     ["GOLDM", "GOLD"],      # GOLDM = 1kg main contract
+        "SILVER":   ["SILVERM", "SILVER"],  # SILVERM = 5kg main contract  
+        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM"],
+        "NATURALGAS": ["NATURALGAS", "NATURALGASM"],
+        "COPPER":   ["COPPERM", "COPPER"],  # COPPERM = 2.5MT main contract
     }
 
     for idx, cfg in INDEX_CONFIG.items():
