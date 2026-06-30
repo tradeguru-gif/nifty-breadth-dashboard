@@ -1,4 +1,4 @@
-# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS (FIXED TOKENS) ===
 import sys
 import logging
 import os
@@ -928,7 +928,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering)
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering and fallback)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -962,18 +962,32 @@ def get_mcx_futures_tokens():
         logger.warning("MCX futures found but no parseable expiry dates")
         return
 
-    today = datetime.now()
+    # Symbol fallback map for common mismatches
+    symbol_map = {
+        "ALUMINIUM": ["ALUMINI", "ALUMINIUM"],
+        # Add more if needed
+    }
+
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
-        # Match exact symbol (case-insensitive)
+        # Try exact match
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
         if matching.empty:
-            # Fallback to startswith
+            # Try fallback synonyms
+            for alt in symbol_map.get(symbol, []):
+                matching = mcx_fut[mcx_fut["symbol"].str.upper().str.contains(alt.upper(), na=False)]
+                if not matching.empty:
+                    break
+        if matching.empty:
+            # Last resort: startswith
             matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
             logger.warning(f"MCX symbol '{symbol}' not found after filtering")
+            # Print a few examples to help debug
+            sample = mcx_fut["symbol"].head(5).tolist()
+            logger.info(f"Sample MCX symbols: {sample}")
             continue
 
         future_sorted = matching.sort_values("expiry_date")
@@ -988,7 +1002,7 @@ def get_mcx_futures_tokens():
     logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
 
 # ================================================================
-# NEW: Fetch equity spot token for stock symbols
+# ENHANCED EQUITY SPOT TOKEN FETCH (with multiple instrument types)
 # ================================================================
 def get_equity_spot_tokens():
     """Fetch spot tokens for all equity (non-commodity) symbols that have token=None."""
@@ -997,6 +1011,8 @@ def get_equity_spot_tokens():
         logger.warning("Scrip master not available for equity spot token fetch")
         return
     df = pd.DataFrame(scrip)
+    # Build a list of instrument types to try
+    inst_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "EQTY"]
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
             continue
@@ -1004,17 +1020,34 @@ def get_equity_spot_tokens():
             continue  # already have token
         symbol = cfg["symbol"]
         exchange = cfg["exchange"]
-        # Find equity segment for the same symbol
-        equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"] == "EQ")]
-        if equity_rows.empty:
-            # try with different instrumenttype
-            equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"].str.contains("EQ", case=False))]
-        if equity_rows.empty:
+        # Try each instrument type
+        found = False
+        for itype in inst_types:
+            rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"] == itype)]
+            if not rows.empty:
+                token = str(rows.iloc[0]["token"])
+                cfg["token"] = token
+                logger.info(f"Equity spot token for {symbol}: {token} (type: {itype})")
+                found = True
+                break
+        if not found:
+            # Try symbol with common suffix removed (e.g., "RELIANCE EQ" -> "RELIANCE")
+            # Also try case-insensitive search
+            symbol_upper = symbol.upper()
+            rows = df[(df["exch_seg"] == exchange) & (df["instrumenttype"].isin(inst_types))]
+            # Look for symbol that contains the exact symbol (case-insensitive)
+            match = rows[rows["symbol"].str.upper().str.contains(symbol_upper, na=False)]
+            if not match.empty:
+                token = str(match.iloc[0]["token"])
+                cfg["token"] = token
+                logger.info(f"Equity spot token for {symbol}: {token} (matched via contains)")
+                found = True
+        if not found:
             logger.warning(f"Equity spot token not found for {symbol}")
-            continue
-        token = str(equity_rows.iloc[0]["token"])
-        cfg["token"] = token
-        logger.info(f"Equity spot token for {symbol}: {token}")
+            # Print a few sample rows for debugging
+            sample = df[(df["exch_seg"] == exchange)][["symbol", "instrumenttype"]].head(5).to_dict('records')
+            logger.info(f"Sample {exchange} symbols: {sample}")
+
     # Update token sets
     global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
     INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
@@ -3182,12 +3215,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols",
+        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols (Fixed Tokens)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.12-MCX-REST-EXT"
+        "version": "15.12-MCX-REST-EXT-FIX"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3242,7 +3275,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.12-MCX-REST-EXT"
+            "version": "15.12-MCX-REST-EXT-FIX"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3353,6 +3386,6 @@ if __name__ == "__main__":
     get_equity_spot_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.12 Extended)...")
+    logger.info("🚀 Starting Flask API Server (v15.12 Extended Fixed)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
