@@ -1,4 +1,4 @@
-# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS (FIXED TOKENS v2) ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS (OPTIMISED STARTUP) ===
 import sys
 import logging
 import os
@@ -1006,12 +1006,11 @@ def get_mcx_futures_tokens():
 # IMPROVED EQUITY SPOT TOKEN FETCH using searchScrip API
 # ================================================================
 def get_equity_spot_tokens():
-    """Fetch spot tokens for equity stocks using searchScrip if scrip master fails."""
-    scrip = get_scrip_master()
-    if scrip:
-        df = pd.DataFrame(scrip)
-    else:
-        df = None
+    """Fetch spot tokens for equity stocks using searchScrip (fast and reliable)."""
+    _, _, obj = get_auth_token()
+    if not obj:
+        logger.warning("No auth object for searchScrip")
+        return
 
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
@@ -1021,48 +1020,44 @@ def get_equity_spot_tokens():
 
         symbol = cfg["symbol"]
         exchange = cfg["exchange"]
-        token = None
 
-        # 1) Try scrip master with EQ instrumenttype
-        if df is not None:
-            # Try exact match
-            rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"].isin(["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "EQTY"]))]
-            if not rows.empty:
-                token = str(rows.iloc[0]["token"])
-                logger.info(f"Equity spot token for {symbol}: {token} (from scrip master EQ)")
-                cfg["token"] = token
-                continue
-
-            # Try contains match
-            rows = df[(df["exch_seg"] == exchange) & (df["instrumenttype"].isin(["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "EQTY"]))]
-            match = rows[rows["symbol"].str.upper().str.contains(symbol.upper(), na=False)]
-            if not match.empty:
-                token = str(match.iloc[0]["token"])
-                logger.info(f"Equity spot token for {symbol}: {token} (from scrip master contains)")
-                cfg["token"] = token
-                continue
-
-        # 2) Fallback: use SmartConnect.searchScrip
         try:
-            _, _, obj = get_auth_token()
-            if obj:
-                # searchScrip expects exchange and symbol
-                resp = obj.searchScrip(exchange, symbol)
-                if resp and resp.get("status") and resp.get("data"):
-                    data = resp["data"]
-                    if isinstance(data, list) and len(data) > 0:
-                        # The first result is usually the equity
-                        scrip_info = data[0]
-                        token = str(scrip_info.get("symboltoken", scrip_info.get("token")))
-                        if token:
-                            cfg["token"] = token
-                            logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip)")
-                            continue
-        except Exception as e:
-            logger.warning(f"searchScrip failed for {symbol}: {e}")
+            resp = obj.searchScrip(exchange, symbol)
+            if not resp or not resp.get("status"):
+                logger.warning(f"searchScrip failed for {symbol}")
+                continue
 
-        if not token:
-            logger.warning(f"Equity spot token not found for {symbol}")
+            data = resp.get("data", [])
+            if not data:
+                logger.warning(f"No search results for {symbol}")
+                continue
+
+            # Find the best match: exact symbol or symbol-EQ
+            token = None
+            for item in data:
+                tradingsymbol = item.get("tradingsymbol", "")
+                if tradingsymbol.upper() == symbol.upper():
+                    token = str(item.get("symboltoken"))
+                    break
+            if not token:
+                # Look for -EQ suffix
+                for item in data:
+                    tradingsymbol = item.get("tradingsymbol", "")
+                    if tradingsymbol.upper() == f"{symbol}-EQ":
+                        token = str(item.get("symboltoken"))
+                        break
+            if not token:
+                # Fallback: first result
+                token = str(data[0].get("symboltoken"))
+                logger.info(f"Using fallback token for {symbol}: {token} (first result: {data[0].get('tradingsymbol')})")
+
+            if token:
+                cfg["token"] = token
+                logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip)")
+            else:
+                logger.warning(f"Could not find token for {symbol} in search results")
+        except Exception as e:
+            logger.error(f"searchScrip error for {symbol}: {e}")
 
     # Update token sets
     global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
@@ -1088,7 +1083,7 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 # ================================================================
-# FIXED: get_current_atm_tokens with support for OPTIDX and OPTSTK
+# get_current_atm_tokens with support for OPTIDX and OPTSTK
 # ================================================================
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -1195,18 +1190,16 @@ def get_current_atm_tokens(index_name):
         return None, None
 
 # ================================================================
-# refresh_all_tokens now calls get_mcx_futures_tokens() and get_equity_spot_tokens()
+# refresh_all_tokens – now uses searchScrip for stocks, scrip master for options & MCX
 # ================================================================
 def refresh_all_tokens():
-    # First fetch equity spot tokens for stocks (and other equity) that need them
+    # First fetch equity spot tokens using searchScrip (fast)
     get_equity_spot_tokens()
-    # Then fetch option tokens
+    # Then fetch option tokens for all equity symbols (indices and stocks)
     for idx in INDEX_NAMES:
-        if INDEX_CONFIG[idx].get("active"):
-            if INDEX_CONFIG[idx].get("is_commodity"):
-                continue
+        if INDEX_CONFIG[idx].get("active") and not INDEX_CONFIG[idx].get("is_commodity"):
             get_current_atm_tokens(idx)
-    # Finally fetch MCX futures tokens
+    # Finally fetch MCX futures tokens (from scrip master)
     get_mcx_futures_tokens()
     logger.info("All tokens refreshed (equity spot, equity options, MCX futures)")
 
@@ -3156,7 +3149,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS – Optimised startup: only fetch essential tokens synchronously
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -3165,40 +3158,36 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            logger.info("Pre-fetching option tokens...")
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    refresh_all_tokens()
-                except Exception as e:
-                    logger.error(f"Token refresh attempt {attempt+1} failed: {e}")
-                ready = 0
-                for idx, cfg in INDEX_CONFIG.items():
-                    if not cfg.get("active"):
-                        continue
-                    if cfg.get("is_commodity"):
-                        if cfg.get("token"):
-                            ready += 1
-                    else:
-                        tokens = INDEX_TOKENS.get(idx, {})
-                        if tokens.get("ce_token") and tokens.get("pe_token") and cfg.get("token"):
-                            ready += 1
-                total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
-                for idx in INDEX_NAMES:
-                    if INDEX_CONFIG[idx].get("is_commodity"):
-                        logger.info(f"Token status {idx}: token={INDEX_CONFIG[idx].get('token')}")
-                    else:
-                        tokens = INDEX_TOKENS.get(idx, {})
-                        logger.info(f"Token status {idx}: ce={tokens.get('ce_token')}, pe={tokens.get('pe_token')}, spot_token={INDEX_CONFIG[idx].get('token')}")
-                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
-                if ready == total_active:
-                    break
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
+            logger.info("Starting background threads...")
+
+            # 1. Load persistent state
+            load_portfolio_state()
+
+            # 2. Quick initial token fetch for indices (we already have their tokens)
+            #    But we need option tokens for them. We'll do that synchronously.
+            logger.info("Fetching option tokens for indices (synchronous)...")
+            for idx in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]:
+                if INDEX_CONFIG[idx].get("active"):
+                    get_current_atm_tokens(idx)
+
+            # 3. Fetch spot tokens for stocks in the background (non-blocking)
+            def fetch_stock_tokens():
+                logger.info("Background: Fetching equity spot tokens for stocks...")
+                get_equity_spot_tokens()
+                # After spot tokens, fetch option tokens for stocks
+                for idx in ["RELIANCE", "TCS", "INFY", "HDFC", "ICICIBANK"]:
+                    if INDEX_CONFIG[idx].get("active"):
+                        get_current_atm_tokens(idx)
+                # Also fetch MCX futures tokens
+                get_mcx_futures_tokens()
+                logger.info("Background: Stock tokens and MCX tokens refreshed.")
+
+            threading.Thread(target=fetch_stock_tokens, daemon=True).start()
+
+            # 4. Start connection manager (WebSocket + REST fallback)
             conn_manager = ConnectionManager()
             conn_manager.start()
+
             _init_completed = True
             logger.info("Background threads started with connection manager")
 
@@ -3210,7 +3199,6 @@ def auto_start_background():
     with _background_start_lock:
         if not _background_started:
             init_db()
-            load_portfolio_state()
             _start_background_threads()
             _background_started = True
             logger.info("Auto-start: Background threads initialized for production")
@@ -3231,12 +3219,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols (Fixed Tokens v2)",
+        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols (Optimised Startup)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.12-MCX-REST-EXT-FIX-v2"
+        "version": "15.12-MCX-REST-OPTIMISED"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3291,7 +3279,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.12-MCX-REST-EXT-FIX-v2"
+            "version": "15.12-MCX-REST-OPTIMISED"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3396,12 +3384,7 @@ def backtest_signal(index_name):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
-    load_portfolio_state()
-    # Ensure tokens are fetched before starting
-    get_mcx_futures_tokens()
-    get_equity_spot_tokens()
-    refresh_all_tokens()
-    _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.12 Extended Fixed v2)...")
+    # Do not fetch everything here – background thread will handle
+    logger.info("🚀 Starting Flask API Server (v15.12 Optimised)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
