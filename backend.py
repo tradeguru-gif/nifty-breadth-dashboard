@@ -921,64 +921,97 @@ def get_current_atm_tokens(index_name):
         return None, None
     if config.get("is_commodity"):
         return None, None
+
     spot = get_index_spot(index_name)
     if not spot or spot <= 0:
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
+
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
     next_expiry = get_next_expiry_date(index_name)
     if not next_expiry:
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
+
     expiry = next_expiry.strftime("%d%b%Y").upper()
     scrip = get_scrip_master()
-    if scrip:
-        try:
-            df = pd.DataFrame(scrip)
-            opts = df[(df["name"] == config["symbol"]) &
-                      (df["instrumenttype"] == "OPTIDX") &
-                      (df["exch_seg"] == config["option_exchange"])]
-            if not opts.empty:
-                opts = opts.copy()
-                opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
-                opts = opts.dropna(subset=["expiry_date"])
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
-                opts = opts.dropna(subset=["strike"])
-                future = opts[opts["expiry_date"] >= datetime.now()]
-                if not future.empty:
-                    nearest = future["expiry_date"].min()
-                    atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
-                    if atm_opts.empty:
-                        same_exp = future[future["expiry_date"] == nearest]
-                        if not same_exp.empty:
-                            diff = (same_exp["strike"] - atm).abs()
-                            atm_opts = same_exp.loc[[diff.idxmin()]]
-                    if not atm_opts.empty:
-                        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
-                        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
-                        if not ce.empty and not pe.empty:
-                            ce_token = str(ce.iloc[0]["token"])
-                            pe_token = str(pe.iloc[0]["token"])
-                            ce_symbol = str(ce.iloc[0]["symbol"])
-                            pe_symbol = str(pe.iloc[0]["symbol"])
-                            actual_strike = int(ce.iloc[0]["strike"])
-                            if actual_strike != atm:
-                                logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
-                            else:
-                                logger.info(f"{index_name} ATM strike {atm} selected")
-                            INDEX_TOKENS[index_name].update({
-                                "ce_token": ce_token, "pe_token": pe_token, "atm_strike": actual_strike,
-                                "expiry": expiry, "expiry_date": nearest,
-                                "ce_symbol": ce_symbol, "pe_symbol": pe_symbol
-                            })
-                            logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token} expiry={expiry}")
-                            return ce_token, pe_token
-        except Exception as e:
-            logger.warning(f"{index_name} token fetch error: {e}")
-    INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
-    return None, None
+    if not scrip:
+        logger.warning(f"{index_name}: No scrip master available")
+        INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+        return None, None
 
+    try:
+        df = pd.DataFrame(scrip)
+
+        # Filter options for this index
+        opts = df[
+            (df["name"] == config["symbol"]) &
+            (df["instrumenttype"] == "OPTIDX") &
+            (df["exch_seg"] == config["option_exchange"])
+        ]
+        if opts.empty:
+            logger.warning(f"{index_name}: No OPTIDX found in scrip master")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        opts = opts.copy()
+        opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
+        opts = opts.dropna(subset=["expiry_date"])
+        opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100.0
+        opts = opts.dropna(subset=["strike"])
+
+        # Keep only future expiries
+        future = opts[opts["expiry_date"] >= datetime.now()]
+        if future.empty:
+            future = opts  # fallback to nearest even if expired
+
+        # Get the nearest expiry
+        nearest_expiry = future["expiry_date"].min()
+        same_exp = future[future["expiry_date"] == nearest_expiry]
+
+        # Find strike closest to ATM
+        same_exp["strike_diff"] = abs(same_exp["strike"] - atm)
+        closest_row = same_exp.loc[same_exp["strike_diff"].idxmin()]
+        actual_strike = int(closest_row["strike"])
+
+        # Now get CE and PE for that strike
+        atm_opts = same_exp[same_exp["strike"] == actual_strike]
+        if atm_opts.empty:
+            logger.warning(f"{index_name}: No options for strike {actual_strike}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+
+        if ce.empty or pe.empty:
+            logger.warning(f"{index_name}: Missing CE or PE for strike {actual_strike}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce_token = str(ce.iloc[0]["token"])
+        pe_token = str(pe.iloc[0]["token"])
+        ce_symbol = str(ce.iloc[0]["symbol"])
+        pe_symbol = str(pe.iloc[0]["symbol"])
+
+        logger.info(f"{index_name} | ATM strike: {actual_strike} (spot={spot}) | CE token {ce_token}, PE token {pe_token} | expiry {expiry}")
+
+        INDEX_TOKENS[index_name].update({
+            "ce_token": ce_token,
+            "pe_token": pe_token,
+            "atm_strike": actual_strike,
+            "expiry": expiry,
+            "expiry_date": nearest_expiry,
+            "ce_symbol": ce_symbol,
+            "pe_symbol": pe_symbol
+        })
+        return ce_token, pe_token
+
+    except Exception as e:
+        logger.error(f"{index_name} token fetch error: {e}\n{traceback.format_exc()}")
+        INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+        return None, None
 # ================================================================
 # FIXED: refresh_all_tokens now calls get_mcx_futures_tokens()
 # ================================================================
@@ -2177,9 +2210,11 @@ def run_signal_engine_for_index(index_name):
                     return
 
         # Correlation adjustment (only for equity)
-        corr_adjust = 1.0
+                # Correlation adjustment
+        beta_adj = 1.0  # default for commodities and if no correlation pair
         if not is_commodity:
             pair = INDEX_CONFIG[index_name].get("correlation_pair")
+            corr_adjust = 1.0
             if pair:
                 corr_analysis = correlation_filter.analyze(index_name, action)
                 corr = abs(corr_analysis.get("correlation", 0))
@@ -2200,6 +2235,7 @@ def run_signal_engine_for_index(index_name):
                 beta_adj = corr_analysis.get("beta_adjustment", 1.0) * corr_adjust
             else:
                 beta_adj = 1.0
+        # Now beta_adj is always defined
 
         # Greeks filter (only for options)
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled") and greeks_data is not None:
