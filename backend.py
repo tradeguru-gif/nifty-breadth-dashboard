@@ -1,4 +1,4 @@
-# === HYBRID v15.14 – WS Mode=2 + REST fallback based on tick age ===
+# === HYBRID v15.15 – Full code, WS mode=2, MCX multipliers ===
 import sys
 import logging
 import os
@@ -324,7 +324,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS (unchanged)
+# INDICATORS
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -441,7 +441,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS (unchanged)
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -631,7 +631,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -1110,7 +1110,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (unchanged)
+# SENTIMENT, REGIME, CONFIRMATION
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1299,7 +1299,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ============================================================
-# get_signal_from_sentiment (unchanged)
+# get_signal_from_sentiment
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
     logger.info(f"📢 get_signal_from_sentiment called for {index_name}, sentiment={sentiment}")
@@ -1672,7 +1672,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – with MCX multiplier (stable)
+# MAIN SIGNAL ENGINE – with MCX multiplier
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1737,8 +1737,7 @@ def run_signal_engine_for_index(index_name):
                 multiplier = config.get("mkt_multiple", 1.0)
                 spot = raw_ws_price * multiplier
                 logger.info(f"📈 {index_name} raw WS price = {raw_ws_price}, multiplier = {multiplier}, final spot = {spot}")
-                latest_ticks[index_name]["price"] = spot  # update with corrected value
-                # Set other variables
+                latest_ticks[index_name]["price"] = spot
                 ce_prem = spot
                 pe_prem = spot
                 ce_vol = latest_ticks[index_name].get("volume", 0) or 0
@@ -1788,7 +1787,6 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
-        # ---- Volume profile ----
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1797,7 +1795,6 @@ def run_signal_engine_for_index(index_name):
             vp_engine.update(ce_prem, ce_vol, option_type="CE")
             vp_engine.update(pe_prem, pe_vol, option_type="PE")
 
-        # ---- Correlation ----
         if index_name == "NIFTY":
             nifty_price_series.append(spot)
         elif index_name == "BANKNIFTY":
@@ -1805,12 +1802,10 @@ def run_signal_engine_for_index(index_name):
         if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
             correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
-        # ---- Greeks ----
         greeks_data = None
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled"):
             greeks_data = get_option_greeks(index_name)
 
-        # ---- Sentiment & signal ----
         sentiment = compute_sentiment(index_name)
         adx = get_current_adx(index_name)
         action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
@@ -1828,7 +1823,6 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
-        # ---- Drawdown and safety (unchanged from v15.11) ----
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1877,7 +1871,6 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
 
-        # ---- Existing position management (unchanged) ----
         with _signal_state_lock:
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
@@ -2430,9 +2423,8 @@ def on_ws_open(wsapp):
     logger.info(f"Subscribing to token_list: {token_list}")
     if token_list and sws:
         try:
-            # CHANGE: use mode=2 (SnapQuote) for continuous updates
             correlation_id = "hybrid_bot_v2"
-            mode = 2
+            mode = 2  # SnapQuote for continuous updates
             response = sws.subscribe(correlation_id, mode, token_list)
             logger.info(f"Subscription response: {response}")
             if response and isinstance(response, dict) and not response.get("status", True):
@@ -2516,7 +2508,7 @@ def on_ws_data(wsapp, message):
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
 
-                # MCX: divide by 100 (paise to rupees) – will be multiplied later
+                # MCX: divide by 100 (paise to rupees) – will be multiplied later in engine
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
                     if cfg.get("is_commodity") and cfg.get("token") == token:
@@ -2804,6 +2796,122 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
+# WEBSOCKET MAIN LOOP (start_angel_websocket_improved)
+# ----------------------------------------------------------------------
+def start_angel_websocket_improved():
+    global sws, ws_running, last_heartbeat
+    retry_delay = 5
+
+    while True:
+        try:
+            with _ws_connect_lock:
+                ws_running = False
+
+            if not is_market_open() and not is_mcx_open():
+                time.sleep(60)
+                continue
+
+            auth_token, feed_token, _ = get_auth_token()
+            if not feed_token:
+                logger.error("Failed to get feed token, retrying in 10 seconds...")
+                time.sleep(10)
+                continue
+
+            new_sws = SmartWebSocketV2(
+                auth_token,
+                ANGEL_API_KEY,
+                ANGEL_CLIENT_ID,
+                feed_token,
+                max_retry_attempt=3
+            )
+
+            new_sws.on_open = on_ws_open
+            new_sws.on_data = on_ws_data
+            new_sws.on_error = on_ws_error
+            new_sws.on_close = on_ws_close
+
+            with _ws_connect_lock:
+                sws = new_sws
+
+            logger.info("Attempting WebSocket connection...")
+            ws_thread = threading.Thread(target=sws.connect, daemon=True)
+            ws_thread.start()
+
+            time.sleep(5)
+
+            retry_delay = 5
+
+            while True:
+                try:
+                    force_ws = os.getenv("FORCE_WS", "0") == "1"
+                    if not force_ws:
+                        if not is_market_open() and not is_mcx_open():
+                            time.sleep(60)
+                            continue
+
+                    with _ws_connect_lock:
+                        is_running = ws_running
+                    if not is_running:
+                        logger.warning("WebSocket disconnected detected")
+                        break
+
+                    if time.time() - last_heartbeat > 30:
+                        logger.warning("No heartbeat for 30s, forcing reconnect")
+                        with _ws_connect_lock:
+                            ws_running = False
+                        try:
+                            sws.close_connection()
+                        except:
+                            pass
+                        break
+
+                    if time.time() - last_heartbeat > 20:
+                        try:
+                            if hasattr(sws, 'send_heartbeat'):
+                                sws.send_heartbeat()
+                            elif hasattr(sws, 'ping'):
+                                sws.ping()
+                            last_heartbeat = time.time()
+                        except Exception:
+                            pass
+
+                    time.sleep(5)
+                except Exception as e:
+                    logger.error(f"Error in inner loop: {e}")
+                    break
+
+            logger.warning(f"WebSocket disconnected, reconnecting in {retry_delay}s...")
+            with _ws_connect_lock:
+                ws_running = False
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+
+        except Exception as e:
+            logger.error(f"WebSocket thread error: {e}")
+            with _ws_connect_lock:
+                ws_running = False
+            time.sleep(10)
+
+# ----------------------------------------------------------------------
+# PRE-MARKET TOKEN REFRESH SCHEDULER
+# ----------------------------------------------------------------------
+def schedule_token_refresh():
+    while True:
+        now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        if now_ist.weekday() < 5:
+            open_time = now_ist.replace(hour=9, minute=10, second=0, microsecond=0)
+            wait = (open_time - now_ist).total_seconds()
+            if wait > 0:
+                time.sleep(wait)
+                logger.info("⏰ Pre-market token refresh triggered")
+                try:
+                    refresh_all_tokens()
+                except Exception as e:
+                    logger.error(f"Token refresh error: {e}")
+                logger.info("Pre-market token refresh completed")
+        time.sleep(60)
+
+# ----------------------------------------------------------------------
 # CONNECTION MANAGER
 # ----------------------------------------------------------------------
 class ConnectionManager:
@@ -2906,12 +3014,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.14 – WS mode=2, REST fallback on tick age",
+        "engine": "Hybrid v15.15 – Full code, WS mode=2, MCX multipliers",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.14-WS-mode2"
+        "version": "15.15-Full"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -2966,7 +3074,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.14-WS-mode2"
+            "version": "15.15-Full"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3075,6 +3183,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.14)...")
+    logger.info("🚀 Starting Flask API Server (v15.15)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
