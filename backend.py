@@ -1,4 +1,4 @@
-# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS (OPTIMISED STARTUP) ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + FINAL TOKEN FIXES ===
 import sys
 import logging
 import os
@@ -928,7 +928,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering and fallback)
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with substring search)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -962,11 +962,6 @@ def get_mcx_futures_tokens():
         logger.warning("MCX futures found but no parseable expiry dates")
         return
 
-    # Symbol fallback map for common mismatches
-    symbol_map = {
-        "ALUMINIUM": ["ALUMINI", "ALUMINIUM"],
-    }
-
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
@@ -974,19 +969,14 @@ def get_mcx_futures_tokens():
         # Try exact match
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
         if matching.empty:
-            # Try fallback synonyms
-            found = False
-            for alt in symbol_map.get(symbol, []):
-                matching = mcx_fut[mcx_fut["symbol"].str.upper().str.contains(alt.upper(), na=False)]
-                if not matching.empty:
-                    found = True
-                    break
-            if not found:
-                # Last resort: startswith
+            # Try contains search for ALUMINIUM
+            if "ALUM" in symbol.upper():
+                matching = mcx_fut[mcx_fut["symbol"].str.upper().str.contains("ALUM", na=False)]
+            if matching.empty:
+                # Fallback to startswith
                 matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
             logger.warning(f"MCX symbol '{symbol}' not found after filtering")
-            # Print a few examples to help debug
             sample = mcx_fut["symbol"].head(5).tolist()
             logger.info(f"Sample MCX symbols: {sample}")
             continue
@@ -1003,14 +993,18 @@ def get_mcx_futures_tokens():
     logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
 
 # ================================================================
-# IMPROVED EQUITY SPOT TOKEN FETCH using searchScrip API
+# IMPROVED EQUITY SPOT TOKEN FETCH using scrip master (no rate limit)
 # ================================================================
 def get_equity_spot_tokens():
-    """Fetch spot tokens for equity stocks using searchScrip (fast and reliable)."""
-    _, _, obj = get_auth_token()
-    if not obj:
-        logger.warning("No auth object for searchScrip")
+    """Fetch spot tokens for equity stocks using the scrip master (no rate limit)."""
+    scrip = get_scrip_master()
+    if not scrip:
+        logger.warning("Scrip master not available for equity spot token fetch")
         return
+    df = pd.DataFrame(scrip)
+
+    # Filter to equity segments (NSE, BSE)
+    equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(["EQ", "EQUITY", "BSE_EQ", "NSE_EQ"]))]
 
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
@@ -1021,43 +1015,37 @@ def get_equity_spot_tokens():
         symbol = cfg["symbol"]
         exchange = cfg["exchange"]
 
-        try:
-            resp = obj.searchScrip(exchange, symbol)
-            if not resp or not resp.get("status"):
-                logger.warning(f"searchScrip failed for {symbol}")
+        # Try exact match
+        match = equity_rows[(equity_rows["symbol"] == symbol) & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # Try symbol with -EQ suffix (common for NSE)
+            match = equity_rows[(equity_rows["symbol"] == f"{symbol}-EQ") & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # Try contains match (case-insensitive)
+            match = equity_rows[(equity_rows["exch_seg"] == exchange) & 
+                                (equity_rows["symbol"].str.upper().str.contains(symbol.upper(), na=False))]
+            if match.empty:
+                logger.warning(f"Equity spot token not found for {symbol} in scrip master")
+                # Optional: try searchScrip as fallback, but with rate limit delay
+                try:
+                    _, _, obj = get_auth_token()
+                    if obj:
+                        resp = obj.searchScrip(exchange, symbol)
+                        if resp and resp.get("status") and resp.get("data"):
+                            data = resp.get("data", [])
+                            if data:
+                                token = str(data[0].get("symboltoken"))
+                                cfg["token"] = token
+                                logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip fallback)")
+                                time.sleep(0.5)  # avoid rate limit
+                except Exception as e:
+                    logger.warning(f"searchScrip fallback failed for {symbol}: {e}")
                 continue
 
-            data = resp.get("data", [])
-            if not data:
-                logger.warning(f"No search results for {symbol}")
-                continue
-
-            # Find the best match: exact symbol or symbol-EQ
-            token = None
-            for item in data:
-                tradingsymbol = item.get("tradingsymbol", "")
-                if tradingsymbol.upper() == symbol.upper():
-                    token = str(item.get("symboltoken"))
-                    break
-            if not token:
-                # Look for -EQ suffix
-                for item in data:
-                    tradingsymbol = item.get("tradingsymbol", "")
-                    if tradingsymbol.upper() == f"{symbol}-EQ":
-                        token = str(item.get("symboltoken"))
-                        break
-            if not token:
-                # Fallback: first result
-                token = str(data[0].get("symboltoken"))
-                logger.info(f"Using fallback token for {symbol}: {token} (first result: {data[0].get('tradingsymbol')})")
-
-            if token:
-                cfg["token"] = token
-                logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip)")
-            else:
-                logger.warning(f"Could not find token for {symbol} in search results")
-        except Exception as e:
-            logger.error(f"searchScrip error for {symbol}: {e}")
+        # Pick the first matching row
+        token = str(match.iloc[0]["token"])
+        cfg["token"] = token
+        logger.info(f"Equity spot token for {symbol}: {token} (from scrip master)")
 
     # Update token sets
     global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
@@ -1190,10 +1178,10 @@ def get_current_atm_tokens(index_name):
         return None, None
 
 # ================================================================
-# refresh_all_tokens – now uses searchScrip for stocks, scrip master for options & MCX
+# refresh_all_tokens – now uses scrip master for equity stocks
 # ================================================================
 def refresh_all_tokens():
-    # First fetch equity spot tokens using searchScrip (fast)
+    # First fetch equity spot tokens using scrip master (no rate limit)
     get_equity_spot_tokens()
     # Then fetch option tokens for all equity symbols (indices and stocks)
     for idx in INDEX_NAMES:
@@ -3219,12 +3207,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols (Optimised Startup)",
+        "engine": "Hybrid v15.12 – MCX REST + Final Token Fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.12-MCX-REST-OPTIMISED"
+        "version": "15.12-MCX-REST-FINAL"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3279,7 +3267,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.12-MCX-REST-OPTIMISED"
+            "version": "15.12-MCX-REST-FINAL"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3384,7 +3372,6 @@ def backtest_signal(index_name):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
-    # Do not fetch everything here – background thread will handle
-    logger.info("🚀 Starting Flask API Server (v15.12 Optimised)...")
+    logger.info("🚀 Starting Flask API Server (v15.12 Final)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
