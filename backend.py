@@ -1,4 +1,4 @@
-# === HYBRID v15.7 – DEBUG LOGS + FIXED COMMODITY SIGNALS ===
+# === HYBRID v15.8 – FIXED MCX TOKENS & SIGNALS ===
 import sys
 import logging
 import os
@@ -63,7 +63,7 @@ DB_PATH = "trading_data.db"
 PAPER_DB_PATH = "paper_trading_data.db" if PAPER_MODE else DB_PATH
 
 # ----------------------------------------------------------------------
-# DATABASE (unchanged)
+# DATABASE
 # ----------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -323,7 +323,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS (unchanged)
+# INDICATORS
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -440,7 +440,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS (unchanged)
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -630,7 +630,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -733,7 +733,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
+# AUTHENTICATION & TOKEN MANAGEMENT
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -833,36 +833,71 @@ def get_scrip_master():
             logger.error(f"Scrip master failed: {e}")
             return _scrip_cache["data"] or []
 
+# ================================================================
+# FIXED: ENHANCED MCX FUTURES TOKEN RETRIEVAL
+# ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
     if not scrip:
+        logger.warning("Scrip master not available for MCX token fetch")
         return
     df = pd.DataFrame(scrip)
-    mcx_fut = df[(df["exch_seg"]=="MCX") & (df["instrumenttype"]=="FUTCOM")]
+
+    # Try multiple possible instrument types for MCX futures
+    possible_types = ["FUTCOM", "FUT", "FUTURES", "COMMODITY"]
+    mcx_fut = pd.DataFrame()
+    for itype in possible_types:
+        subset = df[(df["exch_seg"] == "MCX") & (df["instrumenttype"] == itype)]
+        if not subset.empty:
+            mcx_fut = subset
+            logger.info(f"MCX futures found with instrumenttype='{itype}' ({len(mcx_fut)} rows)")
+            break
+
     if mcx_fut.empty:
-        logger.warning("No MCX FUTCOM found in scrip master")
+        logger.warning("No MCX futures found in scrip master. Available instrument types: "
+                       f"{df[df['exch_seg']=='MCX']['instrumenttype'].unique()}")
         return
+
+    # Parse expiry dates
+    mcx_fut = mcx_fut.copy()
+    mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
+    mcx_fut = mcx_fut.dropna(subset=["expiry_date"])
+    if mcx_fut.empty:
+        logger.warning("MCX futures found but no parseable expiry dates")
+        return
+
+    today = datetime.now()
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
+        # Filter by symbol (case-insensitive)
         matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
-            logger.warning(f"MCX symbol {symbol} not found")
+            # Try exact match
+            matching = mcx_fut[mcx_fut["symbol"] == symbol]
+        if matching.empty:
+            logger.warning(f"MCX symbol '{symbol}' not found in scrip master")
             continue
-        matching = matching.copy()
-        matching["expiry_date"] = matching["expiry"].apply(parse_expiry_date)
-        matching = matching.dropna(subset=["expiry_date"])
-        today = datetime.now()
+
+        # Pick the nearest expiry (in the future, or closest overall)
         future = matching[matching["expiry_date"] >= today]
         if future.empty:
-            future = matching
-        nearest = future.iloc[0]
+            future = matching  # take the closest if all expired
+        # Sort by expiry_date and take the nearest
+        future_sorted = matching.sort_values("expiry_date")
+        nearest = future_sorted.iloc[0]
+
         token = str(nearest["token"])
         cfg["token"] = token
         logger.info(f"MCX {symbol} token: {token} (symbol: {nearest['symbol']}) expiry {nearest['expiry']}")
+
+    # Update global token set
     global INDEX_TOKEN_SET
     INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
+    logger.info(f"Updated INDEX_TOKEN_SET with MCX tokens: {INDEX_TOKEN_SET}")
+
+# ================================================================
 
 def get_next_expiry_date(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -944,13 +979,17 @@ def get_current_atm_tokens(index_name):
     INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
     return None, None
 
+# ================================================================
+# FIXED: refresh_all_tokens now calls get_mcx_futures_tokens()
+# ================================================================
 def refresh_all_tokens():
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
             if INDEX_CONFIG[idx].get("is_commodity"):
                 continue
             get_current_atm_tokens(idx)
-    get_mcx_futures_tokens()
+    get_mcx_futures_tokens()   # <-- now properly fetches MCX tokens
+    logger.info("All tokens refreshed (equity options + MCX futures)")
 
 # ============================================================
 # MARKET HOURS
@@ -1034,7 +1073,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (with DEBUG logs)
+# SENTIMENT, REGIME, CONFIRMATION
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1335,7 +1374,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE (unchanged)
+# SIGNAL QUALITY SCORE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1364,7 +1403,7 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK (unchanged)
+# DATA READINESS CHECK
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
@@ -1375,7 +1414,7 @@ def has_complete_data(index_name):
              last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE (unchanged)
+# PERSISTENCE
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1486,7 +1525,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1547,7 +1586,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ----------------------------------------------------------------------
-# REST HELPER FUNCTIONS (unchanged)
+# REST HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
@@ -1598,7 +1637,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE (with DEBUG logs) – FIXED for commodities
+# MAIN SIGNAL ENGINE – FIXED for commodities
 # ============================================================
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
@@ -1636,7 +1675,6 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        # For commodities, we need fewer candles to start trading
         min_candles = 3 if is_commodity else 10
         if candle_len < min_candles:
             with _market_signal_lock:
@@ -1644,13 +1682,11 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
-        # ----- ADD THIS BLOCK -----
-        # Get VIX for all indices (default to 15 if not available)
+        # Get VIX
         with _latest_ticks_lock:
             vix = latest_ticks["VIX"].get("vix", 15.0)
             if vix <= 0:
                 vix = 15.0
-        # --------------------------
 
         with _market_signal_lock:
             if market_signal[index_name]["signal"] == "EXIT":
@@ -1700,7 +1736,6 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET NO PRICE for {index_name}")
             return
 
-        # For commodities, the "premium" is the spot price
         if is_commodity:
             prem = spot
             if prem <= 0.0:
@@ -1710,7 +1745,6 @@ def run_signal_engine_for_index(index_name):
                 logger.warning(f"{index_name} commodity price invalid: {prem}")
                 return
         else:
-            # Option premium from bid/ask
             if ce_bid > 0 and ce_ask > 0:
                 ce_prem = (ce_bid + ce_ask) / 2
             if pe_bid > 0 and pe_ask > 0:
@@ -2049,7 +2083,6 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET NO_TRADE for {index_name}: sentiment={sentiment}, action={action}")
             return
 
-        # Determine side (CE/PE)
         side = "CE" if "CE" in action else "PE" if "PE" in action else None
         if side is None:
             with _market_signal_lock:
@@ -2057,15 +2090,11 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "NO_TRADE"
             return
 
-        # For commodities, we map "BUY_CE" to long and "BUY_PE" to short (but we use spot)
         if is_commodity:
             prem = spot
-            # For commodities, we treat "BUY_CE" as long, "BUY_PE" as short
-            # We'll keep the action as is for display
         else:
             prem = ce_prem if side == "CE" else pe_prem
 
-        # Validate premium/price
         if is_commodity:
             if prem <= 0.0:
                 with _market_signal_lock:
@@ -2190,7 +2219,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET HIGH IV for {index_name}")
                 return
 
-        # ML score (only for options) – vix already defined above
+        # ML score (only for options)
         if not is_commodity:
             with _price_histories_lock:
                 prices_spot = list(price_histories[index_name])
@@ -2343,7 +2372,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (unchanged)
+# WEBSOCKET + WATCHDOGS
 # ============================================================
 ws_running = False
 sws = None
@@ -2720,7 +2749,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER (unchanged)
+# PRE-MARKET TOKEN REFRESH SCHEDULER
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2739,7 +2768,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (unchanged)
+# ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2889,7 +2918,7 @@ def start_rest_only_mode():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# CONNECTION MANAGER (unchanged)
+# CONNECTION MANAGER
 # ----------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
@@ -2916,7 +2945,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS (unchanged)
+# BACKGROUND THREADS
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2978,7 +3007,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (updated market_open)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -2991,12 +3020,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.7 – Debug + Fixed Commodity Signals",
+        "engine": "Hybrid v15.8 – Fixed MCX Tokens & Signals",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.7-Debug"
+        "version": "15.8-FixedMCX"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3051,7 +3080,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.7-Debug"
+            "version": "15.8-FixedMCX"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
