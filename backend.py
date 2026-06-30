@@ -1,4 +1,4 @@
-# === HYBRID v15.18 – Cleaned up, debug logs, MCX signals fixed ===
+# === HYBRID v15.19 – Full PnL + MCX working ===
 import sys
 import logging
 import os
@@ -1702,7 +1702,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback
+# MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback + FULL PnL
 # ============================================================
 def run_all_signals():
     for idx in INDEX_NAMES:
@@ -2129,6 +2129,7 @@ def run_signal_engine_for_index(index_name):
 
         # ---- New entry logic ----
         with _signal_state_lock:
+            logger.info(f"🔎 {index_name} ENTRY CHECK: cooldown={signal_state[index_name]['cooldown']}, now={now}")
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
                 with _market_signal_lock:
@@ -2153,7 +2154,9 @@ def run_signal_engine_for_index(index_name):
             max_trades = 15
         with _signal_state_lock:
             current_trades = daily_trade_count[index_name]
+        logger.info(f"📊 {index_name} daily trades: {current_trades}/{max_trades}")
         if current_trades >= max_trades:
+            logger.warning(f"🚫 {index_name} max trades reached ({current_trades}/{max_trades})")
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Max daily trades ({max_trades})"
                 market_signal[index_name]["signal"] = "BLOCKED"
@@ -2396,6 +2399,9 @@ def run_signal_engine_for_index(index_name):
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
 
+        logger.info(f"✅ {index_name} ENTRY ATTEMPT: action={action}, prem={prem}, sl={sl}, target={target}, lots={lots}")
+
+        # ========== ENTRY: Update signal_state and portfolio_state ==========
         with _signal_state_lock:
             signal_state[index_name].update({
                 "action": action,
@@ -2407,12 +2413,16 @@ def run_signal_engine_for_index(index_name):
                 "highest": prem,
                 "cooldown": 0
             })
-            daily_trade_count[index_name] += 1
+            daily_trade_count[index_name] += 1   # <-- CRITICAL: increment daily trades
 
         with _portfolio_state_lock:
-            portfolio_state[index_name]["open_positions"] = 1
-        save_portfolio_state(index_name)
+            portfolio_state[index_name]["open_positions"] = 1   # <-- CRITICAL: mark as active
+            # portfolio_state[index_name]["live_pnl"] will be updated in the position management loop
+        save_portfolio_state(index_name)   # <-- CRITICAL: save to database
 
+        logger.info(f"✅ {index_name} ENTRY EXECUTED: open_positions={portfolio_state[index_name]['open_positions']}")
+
+        # ========== Send alerts and update market_signal ==========
         emoji = "🔥" if "STRONG" in action and "CE" in action else "❄️" if "STRONG" in action and "PE" in action else "⚡" if "LOW" in action else "📊"
         msg = (f"{emoji} {action} {index_name} | Spot:{spot:.0f} Prem:{prem:.2f} SL:{sl:.2f} Tgt:{target:.2f} | "
                f"Sentiment:{sentiment:.0f} ({sentiment_label}) | Regime:{regime} | Lots:{lots} Risk:{risk_pct:.1f}%")
@@ -3087,12 +3097,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.18 – Cleaned up, debug logs",
+        "engine": "Hybrid v15.19 – Full PnL + MCX working",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.18-clean"
+        "version": "15.19-full-pnl"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3147,7 +3157,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.18-clean"
+            "version": "15.19-full-pnl"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3280,6 +3290,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.18)...")
+    logger.info("🚀 Starting Flask API Server (v15.19)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
