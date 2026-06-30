@@ -974,11 +974,12 @@ def get_mcx_futures_tokens():
         # Try exact match
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
         if matching.empty:
-            # Try contains search for ALUMINIUM
+            # For ALUMINIUM, search for symbols containing "ALUM"
             if "ALUM" in symbol.upper():
-                matching = mcx_fut[mcx_fut["symbol"].str.upper().str.contains("ALUM", na=False)]
-                if not matching.empty:
-                    logger.info(f"Found ALUMINIUM-like symbols: {matching['symbol'].tolist()}")
+                alum_matches = mcx_fut[mcx_fut["symbol"].str.upper().str.contains("ALUM", na=False)]
+                if not alum_matches.empty:
+                    logger.info(f"Found ALUMINIUM-like symbols: {alum_matches['symbol'].tolist()}")
+                    matching = alum_matches
             if matching.empty:
                 # Fallback to startswith
                 matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
@@ -1000,7 +1001,7 @@ def get_mcx_futures_tokens():
     logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
 
 # ================================================================
-# IMPROVED EQUITY SPOT TOKEN FETCH using scrip master (no rate limit)
+# IMPROVED EQUITY SPOT TOKEN FETCH – reads directly from scrip master
 # ================================================================
 def get_equity_spot_tokens():
     """Fetch spot tokens for equity stocks using the scrip master (no rate limit)."""
@@ -1010,13 +1011,16 @@ def get_equity_spot_tokens():
         return
     df = pd.DataFrame(scrip)
 
-    # Broad instrument types for equity
+    # Broad instrument types for equity spot – include all variants
     instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "STK", "NSE_STK"]
     equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(instrument_types))]
 
     if len(equity_rows) > 0:
         sample_symbols = equity_rows["symbol"].head(10).tolist()
         logger.info(f"Sample equity symbols from scrip master: {sample_symbols}")
+        # Also log some instrument types present
+        sample_types = equity_rows["instrumenttype"].head(10).tolist()
+        logger.info(f"Sample instrument types: {sample_types}")
 
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
@@ -1027,36 +1031,48 @@ def get_equity_spot_tokens():
         symbol = cfg["symbol"]
         exchange = cfg["exchange"]
 
-        # Try multiple matching strategies
+        # Try multiple matching strategies on the master data
         match = pd.DataFrame()
-        # 1. Exact match (case-insensitive)
+
+        # 1. Exact match on symbol (case-insensitive)
         match = equity_rows[(equity_rows["symbol"].str.upper() == symbol.upper()) & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # 2. Symbol with "-EQ" suffix
+            # 2. Match on 'name' field (often contains ticker)
+            match = equity_rows[(equity_rows["name"].str.upper() == symbol.upper()) & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # 3. Match on 'tradingsymbol' field
+            match = equity_rows[(equity_rows["tradingsymbol"].str.upper() == symbol.upper()) & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # 4. Symbol with "-EQ" suffix
             match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()}-EQ") & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # 3. Symbol with " EQ" suffix (space)
+            # 5. Symbol with " EQ" suffix (space)
             match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()} EQ") & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # 4. Symbol contains the symbol (substring) – but may match multiple; take the shortest symbol length (likely the spot)
+            # 6. Symbol with "-EQN" suffix
+            match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()}-EQN") & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # 7. If still not found, search for any row where symbol contains the symbol (case-insensitive)
+            #    and pick the one with the shortest symbol length (likely the spot)
             possible = equity_rows[(equity_rows["exch_seg"] == exchange) & 
                                    (equity_rows["symbol"].str.upper().str.contains(symbol.upper(), na=False))]
             if not possible.empty:
-                # Prefer exact or with -EQ among these
-                exact_candidates = possible[possible["symbol"].str.upper().isin([symbol.upper(), f"{symbol.upper()}-EQ", f"{symbol.upper()} EQ"])]
+                # Prefer exact matches among these
+                exact_candidates = possible[possible["symbol"].str.upper().isin([symbol.upper(), f"{symbol.upper()}-EQ", f"{symbol.upper()} EQ", f"{symbol.upper()}-EQN"])]
                 if not exact_candidates.empty:
                     match = exact_candidates.head(1)
                 else:
                     # Take the one with the shortest symbol length (likely the spot)
                     possible["len"] = possible["symbol"].str.len()
                     match = possible.sort_values("len").head(1)
+
         if match.empty:
             logger.warning(f"Equity spot token not found for {symbol} in scrip master")
-            # Fallback to searchScrip with longer delay and try different suffixes
+            # As a last resort, try to use the searchScrip API with a longer delay
             try:
                 _, _, obj = get_auth_token()
                 if obj:
-                    # Try exact, then with -EQ, then with EQ
+                    # Try multiple variants
                     for variant in [symbol, f"{symbol}-EQ", f"{symbol} EQ"]:
                         time.sleep(2)  # longer delay to avoid rate limit
                         resp = obj.searchScrip(exchange, variant)
@@ -1074,7 +1090,7 @@ def get_equity_spot_tokens():
         # If we found a match, pick the first row
         token = str(match.iloc[0]["token"])
         cfg["token"] = token
-        logger.info(f"Equity spot token for {symbol}: {token} (from scrip master, symbol: {match.iloc[0]['symbol']})")
+        logger.info(f"Equity spot token for {symbol}: {token} (from scrip master, symbol: {match.iloc[0]['symbol']}, type: {match.iloc[0]['instrumenttype']})")
 
     # Update token sets
     global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
@@ -2416,6 +2432,7 @@ def run_signal_engine_for_index(index_name):
                             with _market_signal_lock:
                                 market_signal[index_name]["alert_message"] = f"Correlation block: {pair} stronger"
                                 market_signal[index_name]["signal"] = "BLOCKED"
+
                             logger.info(f"📢 SET CORRELATION BLOCK for {index_name}")
                             return
                 beta_adj = corr_analysis.get("beta_adjustment", 1.0) * corr_adjust
