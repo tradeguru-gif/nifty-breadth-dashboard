@@ -1802,12 +1802,33 @@ def run_signal_engine_for_index(index_name):
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
         min_candles = 3 if is_commodity else 10
+        if candle_len < min_candles and is_commodity:
+            # Fallback: try to fetch price via REST and manually add candle
+            logger.info(f"🔄 {index_name} candle count low ({candle_len}), attempting REST fallback...")
+            rest_spot = get_index_spot(index_name)
+            if rest_spot and rest_spot > 0:
+                now = time.time()
+                with _latest_ticks_lock:
+                    # Update latest_ticks
+                    latest_ticks[index_name]["price"] = rest_spot
+                    last_known_prices[index_name]["spot"] = rest_spot
+                    last_known_prices[index_name]["timestamp"] = now
+                with _price_histories_lock:
+                    price_histories[index_name].append(rest_spot)
+                # Force candle update with current timestamp
+                update_candle(index_name, rest_spot, 0, now)
+                # Re-check candle count after update
+                with _candle_histories_lock:
+                    candle_len = len(candle_histories[index_name]["1min"])
+                logger.info(f"✅ {index_name} after REST fallback: candle_len={candle_len}")
+            else:
+                logger.warning(f"⚠️ {index_name} REST fallback failed, still waiting for ticks.")
+        
         if candle_len < min_candles:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/{min_candles})"
                 market_signal[index_name]["signal"] = "WAITING"
             return
-
         with _latest_ticks_lock:
             vix = latest_ticks["VIX"].get("vix", 15.0)
             if vix <= 0:
