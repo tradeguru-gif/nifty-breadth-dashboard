@@ -1003,8 +1003,9 @@ def get_equity_spot_tokens():
         return
     df = pd.DataFrame(scrip)
 
-    # Filter to equity segments (NSE, BSE)
-    equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(["EQ", "EQUITY", "BSE_EQ", "NSE_EQ"]))]
+    # Filter to equity segments (NSE, BSE) – include multiple instrument types
+    instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ"]
+    equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(instrument_types))]
 
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
@@ -1015,34 +1016,48 @@ def get_equity_spot_tokens():
         symbol = cfg["symbol"]
         exchange = cfg["exchange"]
 
-        # Try exact match
-        match = equity_rows[(equity_rows["symbol"] == symbol) & (equity_rows["exch_seg"] == exchange)]
+        # Try multiple matching strategies
+        match = pd.DataFrame()
+        # 1. Exact match (case-insensitive)
+        match = equity_rows[(equity_rows["symbol"].str.upper() == symbol.upper()) & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # Try symbol with -EQ suffix (common for NSE)
-            match = equity_rows[(equity_rows["symbol"] == f"{symbol}-EQ") & (equity_rows["exch_seg"] == exchange)]
+            # 2. Symbol with "-EQ" suffix
+            match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()}-EQ") & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # Try contains match (case-insensitive)
-            match = equity_rows[(equity_rows["exch_seg"] == exchange) & 
-                                (equity_rows["symbol"].str.upper().str.contains(symbol.upper(), na=False))]
-            if match.empty:
-                logger.warning(f"Equity spot token not found for {symbol} in scrip master")
-                # Optional: try searchScrip as fallback, but with rate limit delay
-                try:
-                    _, _, obj = get_auth_token()
-                    if obj:
-                        resp = obj.searchScrip(exchange, symbol)
-                        if resp and resp.get("status") and resp.get("data"):
-                            data = resp.get("data", [])
-                            if data:
-                                token = str(data[0].get("symboltoken"))
-                                cfg["token"] = token
-                                logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip fallback)")
-                                time.sleep(0.5)  # avoid rate limit
-                except Exception as e:
-                    logger.warning(f"searchScrip fallback failed for {symbol}: {e}")
-                continue
+            # 3. Symbol with " EQ" suffix (space)
+            match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()} EQ") & (equity_rows["exch_seg"] == exchange)]
+        if match.empty:
+            # 4. Symbol contains the symbol (substring) – but may match multiple; take first
+            possible = equity_rows[(equity_rows["exch_seg"] == exchange) & 
+                                   (equity_rows["symbol"].str.upper().str.contains(symbol.upper(), na=False))]
+            if not possible.empty:
+                # Prefer exact or with -EQ among these
+                exact_candidates = possible[possible["symbol"].str.upper().isin([symbol.upper(), f"{symbol.upper()}-EQ", f"{symbol.upper()} EQ"])]
+                if not exact_candidates.empty:
+                    match = exact_candidates.head(1)
+                else:
+                    match = possible.head(1)  # take first match
+        if match.empty:
+            logger.warning(f"Equity spot token not found for {symbol} in scrip master")
+            # Fallback to searchScrip with a delay to avoid rate limit
+            try:
+                _, _, obj = get_auth_token()
+                if obj:
+                    # Add a small delay before calling searchScrip to avoid rate limit
+                    time.sleep(0.5)
+                    resp = obj.searchScrip(exchange, symbol)
+                    if resp and resp.get("status") and resp.get("data"):
+                        data = resp.get("data", [])
+                        if data:
+                            token = str(data[0].get("symboltoken"))
+                            cfg["token"] = token
+                            logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip fallback)")
+                            continue  # success, skip rest
+            except Exception as e:
+                logger.warning(f"searchScrip fallback failed for {symbol}: {e}")
+            continue
 
-        # Pick the first matching row
+        # If we found a match, pick the first row
         token = str(match.iloc[0]["token"])
         cfg["token"] = token
         logger.info(f"Equity spot token for {symbol}: {token} (from scrip master)")
@@ -1135,7 +1150,7 @@ def get_current_atm_tokens(index_name):
             future = opts
 
         nearest_expiry = future["expiry_date"].min()
-        same_exp = future[future["expiry_date"] == nearest_expiry]
+        same_exp = future[future["expiry_date"] == nearest_expiry].copy()  # FIX: create a copy to avoid SettingWithCopyWarning
         same_exp["strike_diff"] = abs(same_exp["strike"] - atm)
         closest_row = same_exp.loc[same_exp["strike_diff"].idxmin()]
         actual_strike = int(closest_row["strike"])
