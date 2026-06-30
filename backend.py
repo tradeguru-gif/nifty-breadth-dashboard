@@ -928,7 +928,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with substring search)
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with substring search & expiry filter)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -958,8 +958,13 @@ def get_mcx_futures_tokens():
     mcx_fut = mcx_fut.copy()
     mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
     mcx_fut = mcx_fut.dropna(subset=["expiry_date"])
+
+    # CRITICAL: Remove expired contracts
+    today = pd.Timestamp.now().normalize()
+    mcx_fut = mcx_fut[mcx_fut["expiry_date"] >= today]
+
     if mcx_fut.empty:
-        logger.warning("MCX futures found but no parseable expiry dates")
+        logger.warning("No future MCX contracts available (all expired?)")
         return
 
     for idx, cfg in INDEX_CONFIG.items():
@@ -972,6 +977,8 @@ def get_mcx_futures_tokens():
             # Try contains search for ALUMINIUM
             if "ALUM" in symbol.upper():
                 matching = mcx_fut[mcx_fut["symbol"].str.upper().str.contains("ALUM", na=False)]
+                if not matching.empty:
+                    logger.info(f"Found ALUMINIUM-like symbols: {matching['symbol'].tolist()}")
             if matching.empty:
                 # Fallback to startswith
                 matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
@@ -1003,11 +1010,10 @@ def get_equity_spot_tokens():
         return
     df = pd.DataFrame(scrip)
 
-    # Filter to equity segments (NSE, BSE) – include multiple instrument types
-    instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "STK"]
+    # Broad instrument types for equity
+    instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "STK", "NSE_STK"]
     equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(instrument_types))]
 
-    # Log some sample symbols for debugging
     if len(equity_rows) > 0:
         sample_symbols = equity_rows["symbol"].head(10).tolist()
         logger.info(f"Sample equity symbols from scrip master: {sample_symbols}")
@@ -1046,19 +1052,21 @@ def get_equity_spot_tokens():
                     match = possible.sort_values("len").head(1)
         if match.empty:
             logger.warning(f"Equity spot token not found for {symbol} in scrip master")
-            # Fallback to searchScrip with a longer delay to avoid rate limit
+            # Fallback to searchScrip with longer delay and try different suffixes
             try:
                 _, _, obj = get_auth_token()
                 if obj:
-                    time.sleep(2)  # longer delay
-                    resp = obj.searchScrip(exchange, symbol)
-                    if resp and resp.get("status") and resp.get("data"):
-                        data = resp.get("data", [])
-                        if data:
-                            token = str(data[0].get("symboltoken"))
-                            cfg["token"] = token
-                            logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip fallback)")
-                            continue  # success, skip rest
+                    # Try exact, then with -EQ, then with EQ
+                    for variant in [symbol, f"{symbol}-EQ", f"{symbol} EQ"]:
+                        time.sleep(2)  # longer delay to avoid rate limit
+                        resp = obj.searchScrip(exchange, variant)
+                        if resp and resp.get("status") and resp.get("data"):
+                            data = resp.get("data", [])
+                            if data:
+                                token = str(data[0].get("symboltoken"))
+                                cfg["token"] = token
+                                logger.info(f"Equity spot token for {symbol}: {token} (from searchScrip fallback, variant: {variant})")
+                                break
             except Exception as e:
                 logger.warning(f"searchScrip fallback failed for {symbol}: {e}")
             continue
@@ -1156,8 +1164,9 @@ def get_current_atm_tokens(index_name):
             future = opts
 
         nearest_expiry = future["expiry_date"].min()
-        same_exp = future[future["expiry_date"] == nearest_expiry].copy()  # FIX: create a copy to avoid SettingWithCopyWarning
-        same_exp["strike_diff"] = abs(same_exp["strike"] - atm)
+        # Create a copy before adding new column to avoid SettingWithCopyWarning
+        same_exp = future[future["expiry_date"] == nearest_expiry].copy()
+        same_exp.loc[:, "strike_diff"] = (same_exp["strike"] - atm).abs()
         closest_row = same_exp.loc[same_exp["strike_diff"].idxmin()]
         actual_strike = int(closest_row["strike"])
 
