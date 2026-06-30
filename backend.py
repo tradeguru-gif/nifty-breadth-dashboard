@@ -1004,8 +1004,13 @@ def get_equity_spot_tokens():
     df = pd.DataFrame(scrip)
 
     # Filter to equity segments (NSE, BSE) – include multiple instrument types
-    instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ"]
+    instrument_types = ["EQ", "EQUITY", "BSE_EQ", "NSE_EQ", "STK"]
     equity_rows = df[(df["exch_seg"].isin(["NSE", "BSE"])) & (df["instrumenttype"].isin(instrument_types))]
+
+    # Log some sample symbols for debugging
+    if len(equity_rows) > 0:
+        sample_symbols = equity_rows["symbol"].head(10).tolist()
+        logger.info(f"Sample equity symbols from scrip master: {sample_symbols}")
 
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("is_commodity") or not cfg.get("active"):
@@ -1027,7 +1032,7 @@ def get_equity_spot_tokens():
             # 3. Symbol with " EQ" suffix (space)
             match = equity_rows[(equity_rows["symbol"].str.upper() == f"{symbol.upper()} EQ") & (equity_rows["exch_seg"] == exchange)]
         if match.empty:
-            # 4. Symbol contains the symbol (substring) – but may match multiple; take first
+            # 4. Symbol contains the symbol (substring) – but may match multiple; take the shortest symbol length (likely the spot)
             possible = equity_rows[(equity_rows["exch_seg"] == exchange) & 
                                    (equity_rows["symbol"].str.upper().str.contains(symbol.upper(), na=False))]
             if not possible.empty:
@@ -1036,15 +1041,16 @@ def get_equity_spot_tokens():
                 if not exact_candidates.empty:
                     match = exact_candidates.head(1)
                 else:
-                    match = possible.head(1)  # take first match
+                    # Take the one with the shortest symbol length (likely the spot)
+                    possible["len"] = possible["symbol"].str.len()
+                    match = possible.sort_values("len").head(1)
         if match.empty:
             logger.warning(f"Equity spot token not found for {symbol} in scrip master")
-            # Fallback to searchScrip with a delay to avoid rate limit
+            # Fallback to searchScrip with a longer delay to avoid rate limit
             try:
                 _, _, obj = get_auth_token()
                 if obj:
-                    # Add a small delay before calling searchScrip to avoid rate limit
-                    time.sleep(0.5)
+                    time.sleep(2)  # longer delay
                     resp = obj.searchScrip(exchange, symbol)
                     if resp and resp.get("status") and resp.get("data"):
                         data = resp.get("data", [])
@@ -1060,7 +1066,7 @@ def get_equity_spot_tokens():
         # If we found a match, pick the first row
         token = str(match.iloc[0]["token"])
         cfg["token"] = token
-        logger.info(f"Equity spot token for {symbol}: {token} (from scrip master)")
+        logger.info(f"Equity spot token for {symbol}: {token} (from scrip master, symbol: {match.iloc[0]['symbol']})")
 
     # Update token sets
     global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
