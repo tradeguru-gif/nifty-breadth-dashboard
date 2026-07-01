@@ -1791,12 +1791,12 @@ def run_signal_engine_for_index(index_name):
                 latest_ticks[index_name] = {}
 
             if is_commodity:
-                raw_ws_price = latest_ticks[index_name].get("price", 0.0) or 0.0
-                multiplier = config.get("mkt_multiple", 1.0)
-                spot = raw_ws_price * multiplier
-                logger.info(f"📈 {index_name} raw WS price = {raw_ws_price}, multiplier = {multiplier}, final spot = {spot}")
-                latest_ticks[index_name]["price"] = spot
-                ce_prem = spot
+if is_commodity:
+    raw_ws_price = latest_ticks[index_name].get("price", 0.0) or 0.0
+    multiplier = config.get("mkt_multiple", 1.0)
+    spot = raw_ws_price * multiplier
+    latest_ticks[index_name]["price"] = spot
+    prem = raw_ws_price  # Store entry in rupees, NOT scaled
                 pe_prem = spot
                 ce_vol = latest_ticks[index_name].get("volume", 0) or 0
                 pe_vol = ce_vol
