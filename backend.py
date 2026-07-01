@@ -1,4 +1,4 @@
-# === HYBRID v15.18 – MCX PnL fixes (mkt_multiple, live PnL on ticks, new API) ===
+# === HYBRID v15.18 – MCX PnL fixes (entry in rupees, correct live PnL) ===
 import sys
 import logging
 import os
@@ -1791,13 +1791,15 @@ def run_signal_engine_for_index(index_name):
                 latest_ticks[index_name] = {}
 
             if is_commodity:
-if is_commodity:
-    raw_ws_price = latest_ticks[index_name].get("price", 0.0) or 0.0
-    multiplier = config.get("mkt_multiple", 1.0)
-    spot = raw_ws_price * multiplier
-    latest_ticks[index_name]["price"] = spot
-    prem = raw_ws_price  # Store entry in rupees, NOT scaled
-                pe_prem = spot
+                raw_ws_price = latest_ticks[index_name].get("price", 0.0) or 0.0
+                multiplier = config.get("mkt_multiple", 1.0)
+                # Display spot is raw * multiplier
+                spot = raw_ws_price * multiplier
+                logger.info(f"📈 {index_name} raw WS price = {raw_ws_price}, multiplier = {multiplier}, display spot = {spot}")
+                latest_ticks[index_name]["price"] = spot
+                # Store premium as raw price (rupees) for entry
+                ce_prem = raw_ws_price
+                pe_prem = raw_ws_price
                 ce_vol = latest_ticks[index_name].get("volume", 0) or 0
                 pe_vol = ce_vol
                 ce_oi = 0
@@ -1826,7 +1828,7 @@ if is_commodity:
             return
 
         if is_commodity:
-            prem = spot
+            prem = raw_ws_price   # entry price in rupees (raw)
             if prem <= 0.0:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
@@ -1943,19 +1945,26 @@ if is_commodity:
         if current_action != "HOLD":
             active = current_action
             if is_commodity:
-                prem = spot
+                prem = spot   # for display, but we'll use raw price for PnL
+                raw_prem = latest_ticks[index_name].get("price", 0.0) or 0.0
+                # For PnL, entry_price is stored in rupees, so use raw_prem
+                pnl_raw = raw_prem - signal_state[index_name]["entry_price"]
             else:
                 prem = ce_prem if "CE" in active else pe_prem
+                pnl_raw = prem - signal_state[index_name]["entry_price"]
             if prem <= 0:
                 prem = last_known_prices[index_name].get("ce" if "CE" in active else "pe", 0) or 0.0
             if prem > 0:
                 with _signal_state_lock:
-                    pnl = prem - signal_state[index_name]["entry_price"]
-                    with _portfolio_state_lock:
-                        # Live PnL for commodities uses multiplier
-                        if is_commodity:
+                    # Update live PnL using raw values for commodities
+                    if is_commodity:
+                        # entry_price is raw, raw_prem is current raw
+                        pnl = raw_prem - signal_state[index_name]["entry_price"]
+                        with _portfolio_state_lock:
                             portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] * config.get("mkt_multiple", 1.0)
-                        else:
+                    else:
+                        pnl = prem - signal_state[index_name]["entry_price"]
+                        with _portfolio_state_lock:
                             portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
                     if prem > signal_state[index_name].get("highest", 0):
@@ -2189,7 +2198,7 @@ if is_commodity:
             return
 
         if is_commodity:
-            prem = spot
+            prem = raw_ws_price  # entry price in rupees
         else:
             prem = ce_prem if side == "CE" else pe_prem
 
@@ -2411,7 +2420,7 @@ if is_commodity:
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
 
-                # ---- DEBUG MCX ENTRY ----
+        # ---- DEBUG MCX ENTRY ----
         if is_commodity:
             logger.info(f"MCX ENTRY {index_name}: raw_ws_price={raw_ws_price}, multiplier={multiplier}, spot={spot}, prem={prem}")
 
@@ -2644,10 +2653,10 @@ def on_ws_data(wsapp, message):
                                     entry_price = signal_state[idx]["entry_price"]
                                     lots = signal_state[idx]["lots"]
                                 if current_action != "HOLD" and entry_price > 0:
-                                    # Calculate price difference based on direction (CE/BUY = long)
+                                    # Both ltp and entry_price are in rupees now
                                     if "CE" in current_action or "BUY" in current_action:
                                         points_diff = ltp - entry_price
-                                    else:  # PE/SELL = short
+                                    else:
                                         points_diff = entry_price - ltp
                                     multiplier = cfg.get("mkt_multiple", 1.0)
                                     lot_size = cfg.get("lot_size", 1)
@@ -3126,7 +3135,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.18 – MCX PnL fixes",
+        "engine": "Hybrid v15.18 – MCX PnL fixes (entry in rupees)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
