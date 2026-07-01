@@ -1,4 +1,4 @@
-# === HYBRID v15.22 – Full integration of candle progress, dynamic signals, thread‑safe exec ===
+# === HYBRID v15.23 – Fixed syntax errors in ready_indices and REST fallback ===
 import sys
 import logging
 import os
@@ -2700,8 +2700,19 @@ def on_ws_data(wsapp, message):
                 logger.error(f"Error processing tick: {e}")
                 continue
 
-        # Run signals
-        ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx) if not INDEX_CONFIG[idx].get("is_commodity") else True]  # commodities use min_candles
+        # ---- Run signals ----
+        # Compute ready indices correctly
+        ready_indices = []
+        for idx in INDEX_NAMES:
+            if not INDEX_CONFIG[idx].get("active"):
+                continue
+            if INDEX_CONFIG[idx].get("is_commodity"):
+                if last_known_prices[idx].get("spot", 0) > 0:
+                    ready_indices.append(idx)
+            else:
+                if has_complete_data(idx):
+                    ready_indices.append(idx)
+
         if ready_indices and tick_counter % 5 == 0 and tick_counter > 0:
             with _signal_run_lock:
                 now = time.time()
@@ -2922,18 +2933,18 @@ def start_rest_only_mode():
 
                 last_rest_fetch = time.time()
 
-                # Compute ready indices: for equity require complete data, for commodities require at least 1 candle
-ready_indices = []
-for idx in INDEX_NAMES:
-    if not INDEX_CONFIG[idx].get("active"):
-        continue
-    if INDEX_CONFIG[idx].get("is_commodity"):
-        # Commodities only need a spot price (already checked elsewhere)
-        if last_known_prices[idx].get("spot", 0) > 0:
-            ready_indices.append(idx)
-    else:
-        if has_complete_data(idx):
-            ready_indices.append(idx)
+                # Compute ready indices for REST fallback
+                ready_indices = []
+                for idx in INDEX_NAMES:
+                    if not INDEX_CONFIG[idx].get("active"):
+                        continue
+                    if INDEX_CONFIG[idx].get("is_commodity"):
+                        if last_known_prices[idx].get("spot", 0) > 0:
+                            ready_indices.append(idx)
+                    else:
+                        if has_complete_data(idx):
+                            ready_indices.append(idx)
+
                 if ready_indices:
                     run_all_signals()
 
@@ -3188,12 +3199,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.22 – Full integration",
+        "engine": "Hybrid v15.23 – Syntax fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.22-full"
+        "version": "15.23-full"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3248,7 +3259,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.22-full"
+            "version": "15.23-full"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3350,7 +3361,7 @@ def get_candle_progress(index_name, timeframe):
         "duration_seconds": duration,
         "seconds_elapsed": seconds_elapsed,
         "progress_percent": round(progress_pct, 2),
-        "live_candle": live_candle  # open, high, low, close, volume
+        "live_candle": live_candle
     })
 
 @app.route("/api/backtest-signal/<index_name>", methods=["POST"])
@@ -3406,6 +3417,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.22)...")
+    logger.info("🚀 Starting Flask API Server (v15.23)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
