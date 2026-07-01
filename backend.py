@@ -2411,6 +2411,10 @@ def run_signal_engine_for_index(index_name):
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
 
+                # ---- DEBUG MCX ENTRY ----
+        if is_commodity:
+            logger.info(f"MCX ENTRY {index_name}: raw_ws_price={raw_ws_price}, multiplier={multiplier}, spot={spot}, prem={prem}")
+
         with _signal_state_lock:
             signal_state[index_name].update({
                 "action": action,
@@ -2618,19 +2622,21 @@ def on_ws_data(wsapp, message):
                     if str(config_token) == token:
                         if ltp > 0:
                             logger.debug(f"✅ Spot match: {idx} token={config_token}, ltp={ltp}")
-                            if cfg.get("is_commodity"):
-                                with _latest_ticks_lock:
-                                    latest_ticks[idx]["price"] = ltp
-                                    latest_ticks[idx]["volume"] = vol
-                                    latest_ticks[idx]["bid"] = bid
-                                    latest_ticks[idx]["ask"] = ask
-                                with _price_histories_lock:
-                                    price_histories[idx].append(ltp)
-                                update_candle(idx, ltp, vol, time.time())
-                                last_tick_timestamp = time.time()
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["spot"] = ltp
-                                    last_known_prices[idx]["timestamp"] = time.time()
+if cfg.get("is_commodity"):
+    with _latest_ticks_lock:
+        latest_ticks[idx]["price"] = ltp
+        latest_ticks[idx]["volume"] = vol
+        latest_ticks[idx]["bid"] = bid
+        latest_ticks[idx]["ask"] = ask
+    with _price_histories_lock:
+        price_histories[idx].append(ltp)
+    update_candle(idx, ltp, vol, time.time())
+    last_tick_timestamp = time.time()
+    # ---- DEBUG MCX TICK ----
+    logger.info(f"MCX TICK {idx}: raw_ltp={ltp}, spot_after_multiplier={ltp * cfg.get('mkt_multiple', 1.0)}")
+    with _latest_ticks_lock:
+        last_known_prices[idx]["spot"] = ltp
+        last_known_prices[idx]["timestamp"] = time.time()
 
                                 # ---- LIVE MCX PNL UPDATE ON EACH TICK ----
                                 with _signal_state_lock:
