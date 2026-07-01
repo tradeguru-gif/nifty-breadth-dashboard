@@ -209,7 +209,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 100.0  # ₹100 per 1 rupee move per standard lot
+        "mkt_multiple": 100.0
     },
     "SILVER": {
         "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -217,7 +217,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "GOLD", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 30.0   # ₹30 per 1 rupee move per standard lot
+        "mkt_multiple": 30.0
     },
     "CRUDEOIL": {
         "token": None, "exchange": "MCX", "symbol": "CRUDEOIL", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -225,7 +225,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 100.0  # ₹100 per 1 point move per standard lot
+        "mkt_multiple": 100.0
     },
     "NATURALGAS": {
         "token": None, "exchange": "MCX", "symbol": "NATURALGAS", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -233,7 +233,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 1250.0 # ₹1250 per 1 point move per standard lot
+        "mkt_multiple": 1250.0
     },
     "COPPER": {
         "token": None, "exchange": "MCX", "symbol": "COPPER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -241,7 +241,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
-        "mkt_multiple": 100.0  # adjust as needed
+        "mkt_multiple": 100.0
     }
 }
 
@@ -2622,21 +2622,21 @@ def on_ws_data(wsapp, message):
                     if str(config_token) == token:
                         if ltp > 0:
                             logger.debug(f"✅ Spot match: {idx} token={config_token}, ltp={ltp}")
-if cfg.get("is_commodity"):
-    with _latest_ticks_lock:
-        latest_ticks[idx]["price"] = ltp
-        latest_ticks[idx]["volume"] = vol
-        latest_ticks[idx]["bid"] = bid
-        latest_ticks[idx]["ask"] = ask
-    with _price_histories_lock:
-        price_histories[idx].append(ltp)
-    update_candle(idx, ltp, vol, time.time())
-    last_tick_timestamp = time.time()
-    # ---- DEBUG MCX TICK ----
-    logger.info(f"MCX TICK {idx}: raw_ltp={ltp}, spot_after_multiplier={ltp * cfg.get('mkt_multiple', 1.0)}")
-    with _latest_ticks_lock:
-        last_known_prices[idx]["spot"] = ltp
-        last_known_prices[idx]["timestamp"] = time.time()
+                            if cfg.get("is_commodity"):
+                                with _latest_ticks_lock:
+                                    latest_ticks[idx]["price"] = ltp
+                                    latest_ticks[idx]["volume"] = vol
+                                    latest_ticks[idx]["bid"] = bid
+                                    latest_ticks[idx]["ask"] = ask
+                                with _price_histories_lock:
+                                    price_histories[idx].append(ltp)
+                                update_candle(idx, ltp, vol, time.time())
+                                last_tick_timestamp = time.time()
+                                # ---- DEBUG MCX TICK ----
+                                logger.info(f"MCX TICK {idx}: raw_ltp={ltp}, spot_after_multiplier={ltp * cfg.get('mkt_multiple', 1.0)}")
+                                with _latest_ticks_lock:
+                                    last_known_prices[idx]["spot"] = ltp
+                                    last_known_prices[idx]["timestamp"] = time.time()
 
                                 # ---- LIVE MCX PNL UPDATE ON EACH TICK ----
                                 with _signal_state_lock:
