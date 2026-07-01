@@ -2922,7 +2922,18 @@ def start_rest_only_mode():
 
                 last_rest_fetch = time.time()
 
-                ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and (has_complete_data(idx) if not INDEX_CONFIG[idx].get("is_commodity") else True)]
+                # Compute ready indices: for equity require complete data, for commodities require at least 1 candle
+ready_indices = []
+for idx in INDEX_NAMES:
+    if not INDEX_CONFIG[idx].get("active"):
+        continue
+    if INDEX_CONFIG[idx].get("is_commodity"):
+        # Commodities only need a spot price (already checked elsewhere)
+        if last_known_prices[idx].get("spot", 0) > 0:
+            ready_indices.append(idx)
+    else:
+        if has_complete_data(idx):
+            ready_indices.append(idx)
                 if ready_indices:
                     run_all_signals()
 
