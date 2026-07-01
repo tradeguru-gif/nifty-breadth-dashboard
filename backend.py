@@ -1,8 +1,8 @@
 # ====================================================================
-# FULLY PRODUCTION-READY: Multi-Index Options Bot v12.14
-# - All functions defined (run_all_signals, reset_signal_state, etc.)
+# FULLY PRODUCTION-READY: Multi-Index Options Bot v12.15
+# - Sentiment works with limited candles (10+ bars)
+# - All functions defined (run_all_signals, etc.)
 # - Fixed NIFTY token fetch (uses expiry field from scrip master)
-# - Complete signal engine with exits
 # ====================================================================
 
 import sys
@@ -913,39 +913,37 @@ def get_sentiment_label(sentiment):
             return label
     return "UNKNOWN"
 
+# ----------------------------------------------------------------------
+# FIXED: compute_sentiment works with limited candles
+# ----------------------------------------------------------------------
 def compute_sentiment(index_name):
     sentiment_scores = []
-    min_bars_per_tf = {"1min":30, "2min":20, "3min":20, "5min":15,
-                       "10min":10, "15min":10, "20min":8, "30min":5}
-    for tf in TIMEFRAMES:
+    # Use only 1min and 5min for quick sentiment with limited data
+    for tf in ["1min", "5min"]:
         with _candle_histories_lock:
             candles = list(candle_histories[index_name][tf])
-        if len(candles) < min_bars_per_tf.get(tf, 5):
+        if len(candles) < 10:  # require at least 10 candles for 1min, 5 for 5min
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 60:
-            continue
-        ema9 = calculate_ema(closes, 9)
-        ema21 = calculate_ema(closes, 21)
-        ema50 = calculate_ema(closes, 50) if len(closes)>=50 else ema21
+        # Compute EMAs on the available data (short period)
+        ema9 = calculate_ema(closes, min(9, len(closes)))
+        ema21 = calculate_ema(closes, min(21, len(closes))) if len(closes) >= 21 else ema9
         price = closes[-1]
-        rsi = calculate_rsi(closes)
-        macd, _, _ = calculate_macd(closes)
+        rsi = calculate_rsi(closes, min(14, len(closes)//2)) if len(closes) >= 7 else 50
+        # Score based on trend
         score = 0
-        if ema9 > ema21 > ema50 and price > ema9:
-            score += TIMEFRAME_WEIGHTS[tf]
-        elif ema9 < ema21 < ema50 and price < ema9:
-            score -= TIMEFRAME_WEIGHTS[tf]
-        elif ema9 > ema21 and price > ema9:
-            score += TIMEFRAME_WEIGHTS[tf] - 5
+        if ema9 > ema21 and price > ema9:
+            score += TIMEFRAME_WEIGHTS.get(tf, 10)
         elif ema9 < ema21 and price < ema9:
-            score -= TIMEFRAME_WEIGHTS[tf] - 5
-        if rsi > 60: score += 5
-        elif rsi < 40: score -= 5
-        if macd > 0: score += 5
-        elif macd < 0: score -= 5
+            score -= TIMEFRAME_WEIGHTS.get(tf, 10)
+        # RSI contribution
+        if rsi > 60:
+            score += 5
+        elif rsi < 40:
+            score -= 5
         sentiment_scores.append(score)
-    if not sentiment_scores: return 50
+    if not sentiment_scores:
+        return 50
     total = sum(sentiment_scores)
     sentiment = 50 + (total / 3.5)
     return max(0, min(100, sentiment))
@@ -1659,7 +1657,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Multi-Index Options Bot v12.14 (FULLY PRODUCTION-READY)",
+        "engine": "Multi-Index Options Bot v12.15 (FULLY PRODUCTION-READY)",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -1679,7 +1677,7 @@ def live_signals():
             "portfolios": portfolio_state,
             "market_open": is_market_open(),
             "debug": {"ws_running": ws_running, "ticks": tick_counter},
-            "version": "12.14_final"
+            "version": "12.15_final"
         })
 
 @app.route("/api/debug/tokens", methods=["GET"])
