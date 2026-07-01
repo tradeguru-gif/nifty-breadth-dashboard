@@ -2429,9 +2429,8 @@ def run_signal_engine_for_index(index_name):
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
 
+        # ---- Debug logs before entry ----
         logger.info(f"ENTRY ATTEMPT {index_name}: prem={prem}, sl={sl}, stop_dist={stop_dist}, risk_amount={risk_amount}, lots={lots}")
-
-        # ---- DEBUG MCX ENTRY ----
         if is_commodity:
             logger.info(f"MCX ENTRY {index_name}: raw_ws_price={raw_ws_price}, multiplier={multiplier}, display_spot={display_spot}, prem={prem}")
 
@@ -2447,6 +2446,7 @@ def run_signal_engine_for_index(index_name):
                 "cooldown": 0
             })
             daily_trade_count[index_name] += 1
+
         with _portfolio_state_lock:
             portfolio_state[index_name]["open_positions"] = 1
         save_portfolio_state(index_name)
