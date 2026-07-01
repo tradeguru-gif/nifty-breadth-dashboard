@@ -1,4 +1,4 @@
-# === HYBRID v15.18 – Cleaned up, debug logs, MCX signals fixed ===
+# === HYBRID v15.18 – MCX PnL fixes (mkt_multiple, live PnL on ticks, new API) ===
 import sys
 import logging
 import os
@@ -164,7 +164,7 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Equity + MCX (with multipliers)
+# INDEX CONFIGURATION – Equity + MCX (with mkt_multiple)
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -202,14 +202,14 @@ INDEX_CONFIG = {
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
     },
-    # ---- MCX Commodities ----
+    # ---- MCX Commodities with mkt_multiple ----
     "GOLD": {
         "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 100.0  # ₹100 per 1 rupee move per standard lot
     },
     "SILVER": {
         "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -217,7 +217,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "GOLD", "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 30.0   # ₹30 per 1 rupee move per standard lot
     },
     "CRUDEOIL": {
         "token": None, "exchange": "MCX", "symbol": "CRUDEOIL", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -225,7 +225,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 100.0  # ₹100 per 1 point move per standard lot
     },
     "NATURALGAS": {
         "token": None, "exchange": "MCX", "symbol": "NATURALGAS", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -233,7 +233,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 1250.0 # ₹1250 per 1 point move per standard lot
     },
     "COPPER": {
         "token": None, "exchange": "MCX", "symbol": "COPPER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -241,7 +241,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
-        "mkt_multiple": 1.0
+        "mkt_multiple": 100.0  # adjust as needed
     }
 }
 
@@ -1909,6 +1909,9 @@ def run_signal_engine_for_index(index_name):
                         if exit_prem > 0:
                             pnl = exit_prem - signal_state[index_name]["entry_price"]
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                            # Use mkt_multiple for commodities
+                            if is_commodity:
+                                pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                             pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1949,7 +1952,11 @@ def run_signal_engine_for_index(index_name):
                 with _signal_state_lock:
                     pnl = prem - signal_state[index_name]["entry_price"]
                     with _portfolio_state_lock:
-                        portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        # Live PnL for commodities uses multiplier
+                        if is_commodity:
+                            portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] * config.get("mkt_multiple", 1.0)
+                        else:
+                            portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
                     if prem > signal_state[index_name].get("highest", 0):
                         signal_state[index_name]["highest"] = prem
@@ -1969,6 +1976,8 @@ def run_signal_engine_for_index(index_name):
 
                     if stop_loss_val is not None and prem <= stop_loss_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        if is_commodity:
+                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -1994,6 +2003,8 @@ def run_signal_engine_for_index(index_name):
 
                     if target_val is not None and prem >= target_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        if is_commodity:
+                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -2021,6 +2032,8 @@ def run_signal_engine_for_index(index_name):
                         time_limit = get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data)
                         if elapsed_min >= time_limit:
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                            if is_commodity:
+                                pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                             pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                             with _portfolio_state_lock:
                                 portfolio_state[index_name]["equity"] += pnl_total
@@ -2043,6 +2056,8 @@ def run_signal_engine_for_index(index_name):
                     should_exit, exit_reason = should_exit_market_analysis(index_name, active, prices_spot, ce_prem, pe_prem, greeks_data)
                     if should_exit:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        if is_commodity:
+                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -2445,7 +2460,7 @@ def run_signal_engine_for_index(index_name):
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS – with mode=2 and enhanced token matching debug
+# WEBSOCKET + WATCHDOGS – with live MCX PnL update on each tick
 # ============================================================
 ws_running = False
 sws = None
@@ -2616,6 +2631,24 @@ def on_ws_data(wsapp, message):
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = ltp
                                     last_known_prices[idx]["timestamp"] = time.time()
+
+                                # ---- LIVE MCX PNL UPDATE ON EACH TICK ----
+                                with _signal_state_lock:
+                                    current_action = signal_state[idx]["action"]
+                                    entry_price = signal_state[idx]["entry_price"]
+                                    lots = signal_state[idx]["lots"]
+                                if current_action != "HOLD" and entry_price > 0:
+                                    # Calculate price difference based on direction (CE/BUY = long)
+                                    if "CE" in current_action or "BUY" in current_action:
+                                        points_diff = ltp - entry_price
+                                    else:  # PE/SELL = short
+                                        points_diff = entry_price - ltp
+                                    multiplier = cfg.get("mkt_multiple", 1.0)
+                                    lot_size = cfg.get("lot_size", 1)
+                                    with _portfolio_state_lock:
+                                        portfolio_state[idx]["live_pnl"] = points_diff * multiplier * lot_size * lots
+                                # ---- END LIVE MCX PNL UPDATE ----
+
                             else:
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["spot_price"] = ltp
@@ -3087,12 +3120,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.18 – Cleaned up, debug logs",
+        "engine": "Hybrid v15.18 – MCX PnL fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.18-clean"
+        "version": "15.18-mcx-fix"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3147,7 +3180,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.18-clean"
+            "version": "15.18-mcx-fix"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3248,6 +3281,51 @@ def backtest_signal(index_name):
     return jsonify({"signals": signals, "count": len(signals)})
 
 # ----------------------------------------------------------------------
+# NEW: Portfolio PnL Endpoint (MCX & Equity)
+# ----------------------------------------------------------------------
+@app.route("/api/portfolio-pnl", methods=["GET"])
+def get_portfolio_pnl():
+    total_live_pnl = 0.0
+    total_daily_pnl = 0.0
+    total_realized_pnl = 0.0
+
+    breakdown = {}
+
+    with _portfolio_state_lock, _signal_state_lock:
+        for idx in INDEX_NAMES:
+            cfg = INDEX_CONFIG[idx]
+            is_active = cfg.get("active", False)
+            if not is_active:
+                continue
+
+            live = portfolio_state[idx].get("live_pnl", 0.0)
+            daily = portfolio_state[idx].get("daily_pnl", 0.0)
+            total = portfolio_state[idx].get("total_pnl", 0.0)
+
+            total_live_pnl += live
+            total_daily_pnl += daily
+            total_realized_pnl += total
+
+            breakdown[idx] = {
+                "is_commodity": cfg.get("is_commodity", False),
+                "active_position": signal_state[idx]["action"],
+                "entry_price": signal_state[idx]["entry_price"],
+                "lots": signal_state[idx]["lots"],
+                "live_pnl": round(live, 2),
+                "daily_pnl": round(daily, 2),
+                "total_pnl": round(total, 2)
+            }
+
+    return jsonify({
+        "summary": {
+            "net_live_pnl": round(total_live_pnl, 2),
+            "net_daily_pnl": round(total_daily_pnl, 2),
+            "net_total_pnl": round(total_realized_pnl, 2)
+        },
+        "breakdown": breakdown
+    })
+
+# ----------------------------------------------------------------------
 # BONUS: Token status debug endpoint
 # ----------------------------------------------------------------------
 @app.route("/api/token-status", methods=["GET"])
@@ -3280,6 +3358,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.18)...")
+    logger.info("🚀 Starting Flask API Server (v15.18-mcx-fix)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
