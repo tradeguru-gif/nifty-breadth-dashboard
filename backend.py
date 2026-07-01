@@ -2411,17 +2411,25 @@ def run_signal_engine_for_index(index_name):
         sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
         target = prem + atr * target_mult
 
-        stop_dist = prem - sl
+                stop_dist = prem - sl
         if stop_dist <= 0:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Invalid stop distance"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            logger.warning(f"Invalid stop distance for {index_name}: prem={prem}, sl={sl}")
-            return
+            if is_commodity:
+                # Force a minimal stop distance for commodities
+                stop_dist = prem * 0.005
+                sl = prem - stop_dist
+                logger.warning(f"{index_name} stop_dist was <=0, using fallback sl={sl}, stop_dist={stop_dist}")
+            else:
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = "Invalid stop distance"
+                    market_signal[index_name]["signal"] = "BLOCKED"
+                logger.warning(f"Invalid stop distance for {index_name}: prem={prem}, sl={sl}")
+                return
 
         risk_amount = portfolio_state[index_name]["equity"] * (risk_pct / 100)
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
+
+        logger.info(f"ENTRY ATTEMPT {index_name}: prem={prem}, sl={sl}, stop_dist={stop_dist}, risk_amount={risk_amount}, lots={lots}")
 
         # ---- DEBUG MCX ENTRY ----
         if is_commodity:
@@ -2439,7 +2447,6 @@ def run_signal_engine_for_index(index_name):
                 "cooldown": 0
             })
             daily_trade_count[index_name] += 1
-
         with _portfolio_state_lock:
             portfolio_state[index_name]["open_positions"] = 1
         save_portfolio_state(index_name)
