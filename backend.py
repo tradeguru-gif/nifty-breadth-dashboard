@@ -1,4 +1,4 @@
-# === HYBRID v15.18 – Cleaned up, debug logs, MCX signals fixed ===
+# === HYBRID v15.19 – Fixed equity staleness, option price scaling, periodic re-subscription ===
 import sys
 import logging
 import os
@@ -267,6 +267,8 @@ _ws_connect_lock = threading.Lock()
 INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "expiry_date": None, "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_NAMES}
 last_known_prices = {idx: {"spot": 0.0, "ce": 0.0, "pe": 0.0, "timestamp": 0} for idx in INDEX_NAMES}
 price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
+# Per-index last spot tick time (for staleness detection)
+last_spot_tick = {idx: 0.0 for idx in INDEX_NAMES}
 
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
@@ -835,7 +837,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases) – ONLY ONE BLOCK
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -858,11 +860,10 @@ def get_mcx_futures_tokens():
                        f"{df[df['exch_seg']=='MCX']['instrumenttype'].unique()}")
         return
 
-    # Filter out sub-contracts (MINI, PETAL, MICRO, etc.)
+    # Filter out sub-contracts
     for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
         mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
 
-    # Debug: show COPPER symbols
     copper_debug = mcx_fut[mcx_fut['symbol'].str.contains('COPPER', case=False, na=False)]
     logger.info(f"🔍 COPPER symbols found: {copper_debug['symbol'].tolist()}")
     logger.info(f"🔍 First 10 MCX symbols: {mcx_fut['symbol'].head(10).tolist()}")
@@ -876,7 +877,6 @@ def get_mcx_futures_tokens():
 
     today = datetime.now()
 
-    # Alias mapping
     symbol_aliases = {
         "GOLD":     ["GOLDM", "GOLD"],
         "SILVER":   ["SILVERM", "SILVER"],
@@ -890,10 +890,7 @@ def get_mcx_futures_tokens():
             continue
         symbol = cfg["symbol"]
 
-        # Exact match first
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
-
-        # Try aliases
         if matching.empty and symbol in symbol_aliases:
             for alias in symbol_aliases[symbol]:
                 matching = mcx_fut[mcx_fut["symbol"].str.upper() == alias.upper()]
@@ -901,7 +898,6 @@ def get_mcx_futures_tokens():
                     logger.info(f"MCX {symbol} matched via alias: {alias}")
                     break
 
-        # Fallback: startswith or regex
         if matching.empty:
             matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
@@ -984,7 +980,6 @@ def get_current_atm_tokens(index_name):
         opts = opts.copy()
         opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
         opts = opts.dropna(subset=["expiry_date"])
-        # Detect strike format
         sample_strikes = opts["strike"].dropna().astype(float).head(10).tolist()
         logger.info(f"🔍 {index_name} sample strikes: {sample_strikes}")
         if sample_strikes and max(sample_strikes) > 10000:
@@ -2616,6 +2611,7 @@ def on_ws_data(wsapp, message):
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = ltp
                                     last_known_prices[idx]["timestamp"] = time.time()
+                                    last_spot_tick[idx] = time.time()  # Update per-index last tick
                             else:
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["spot_price"] = ltp
@@ -2626,6 +2622,7 @@ def on_ws_data(wsapp, message):
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = ltp
                                     last_known_prices[idx]["timestamp"] = time.time()
+                                    last_spot_tick[idx] = time.time()  # Update per-index last tick
                             spot_matched = True
                             break
                 if spot_matched:
@@ -2638,6 +2635,11 @@ def on_ws_data(wsapp, message):
                         continue
                     if token == tokens.get("ce_token"):
                         if ltp > 0:
+                            # Option prices from WS may be in paise; divide if > 10000
+                            if ltp > 10000:
+                                ltp = ltp / 100.0
+                                bid = bid / 100.0 if bid > 10000 else bid
+                                ask = ask / 100.0 if ask > 10000 else ask
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
                                 latest_ticks[idx]["ce_volume"] = vol
@@ -2654,6 +2656,10 @@ def on_ws_data(wsapp, message):
                             break
                     elif token == tokens.get("pe_token"):
                         if ltp > 0:
+                            if ltp > 10000:
+                                ltp = ltp / 100.0
+                                bid = bid / 100.0 if bid > 10000 else bid
+                                ask = ask / 100.0 if ask > 10000 else ask
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
                                 latest_ticks[idx]["pe_volume"] = vol
@@ -2705,7 +2711,7 @@ def tick_watchdog():
             else:
                 last_count = tick_counter
 
-# ---- WS watchdog: checks heartbeats and data age ----
+# ---- WS watchdog: checks heartbeats and data age, and per-index staleness ----
 def ws_watchdog():
     global ws_running, last_heartbeat, last_tick_timestamp, sws
     while True:
@@ -2714,6 +2720,7 @@ def ws_watchdog():
         with _ws_connect_lock:
             is_running = ws_running
         if is_running:
+            # Global staleness
             if (now - last_heartbeat > 30) or (now - last_tick_timestamp > 120):
                 logger.warning(f"Data stall – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s – closing WS")
                 with _ws_connect_lock:
@@ -2723,6 +2730,61 @@ def ws_watchdog():
                         sws.close_connection()
                     except Exception:
                         pass
+            else:
+                # Check per-index staleness for active equity indices (non-commodity)
+                for idx in INDEX_NAMES:
+                    cfg = INDEX_CONFIG[idx]
+                    if not cfg.get("active") or cfg.get("is_commodity"):
+                        continue
+                    if is_market_open():  # equity market open
+                        last_spot = last_spot_tick.get(idx, 0)
+                        if last_spot > 0 and (now - last_spot > 60):
+                            logger.warning(f"Equity index {idx} spot data stale (last tick {now-last_spot:.1f}s ago) – forcing reconnect")
+                            with _ws_connect_lock:
+                                ws_running = False
+                            if sws:
+                                try:
+                                    sws.close_connection()
+                                except Exception:
+                                    pass
+                            break
+
+# ---- Periodic re-subscription (every 5 minutes) ----
+def periodic_resubscribe():
+    global sws
+    while True:
+        time.sleep(300)  # 5 minutes
+        with _ws_connect_lock:
+            if ws_running and sws:
+                logger.info("Periodic re-subscription started")
+                # Build same token list as in on_ws_open
+                token_list = []
+                for idx, cfg in INDEX_CONFIG.items():
+                    if cfg.get("active") and not cfg.get("is_commodity"):
+                        exch_type = int(cfg["ws_exchange_type"])
+                        token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
+                    if cfg.get("active") and cfg.get("is_commodity"):
+                        token = cfg.get("token")
+                        if token:
+                            exch_type = int(cfg["ws_exchange_type"])
+                            token_list.append({"exchangeType": exch_type, "tokens": [token]})
+                for idx, tokens in INDEX_TOKENS.items():
+                    if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
+                        continue
+                    if tokens.get("ce_token") and tokens.get("pe_token"):
+                        exch_type = int(INDEX_CONFIG[idx]["option_ws_exchange_type"])
+                        token_list.append({
+                            "exchangeType": exch_type,
+                            "tokens": [tokens["ce_token"], tokens["pe_token"]]
+                        })
+                token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
+                try:
+                    correlation_id = "hybrid_bot_v2"
+                    mode = 2
+                    response = sws.subscribe(correlation_id, mode, token_list)
+                    logger.info(f"Re-subscription response: {response}")
+                except Exception as e:
+                    logger.error(f"Re-subscription error: {e}")
 
 # ----------------------------------------------------------------------
 # REST FALLBACK – now based on tick age
@@ -2802,6 +2864,7 @@ def start_rest_only_mode():
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = spot
                                     last_known_prices[idx]["timestamp"] = time.time()
+                                    last_spot_tick[idx] = time.time()
                                 last_tick_timestamp = time.time()
                                 logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
@@ -2928,6 +2991,28 @@ def start_angel_websocket_improved():
                         logger.warning("WebSocket disconnected detected")
                         break
 
+                    # Check per-index staleness (replaces simple heartbeat check)
+                    now = time.time()
+                    # If any active equity index is stale > 60s, force reconnect
+                    for idx in INDEX_NAMES:
+                        cfg = INDEX_CONFIG[idx]
+                        if not cfg.get("active") or cfg.get("is_commodity"):
+                            continue
+                        if is_market_open():
+                            last_spot = last_spot_tick.get(idx, 0)
+                            if last_spot > 0 and (now - last_spot > 60):
+                                logger.warning(f"Equity {idx} stale for {now-last_spot:.1f}s – forcing reconnect")
+                                with _ws_connect_lock:
+                                    ws_running = False
+                                try:
+                                    sws.close_connection()
+                                except:
+                                    pass
+                                break
+
+                    if not ws_running:
+                        break
+
                     if time.time() - last_heartbeat > 30:
                         logger.warning("No heartbeat for 30s, forcing reconnect")
                         with _ws_connect_lock:
@@ -3002,6 +3087,7 @@ class ConnectionManager:
             self._ws_thread.start()
             threading.Thread(target=ws_watchdog, daemon=True).start()
             threading.Thread(target=tick_watchdog, daemon=True).start()
+            threading.Thread(target=periodic_resubscribe, daemon=True).start()
         else:
             logger.info("REST-only mode forced (FORCE_REST_MODE=1). No WebSocket thread.")
         self._rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
@@ -3087,12 +3173,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.18 – Cleaned up, debug logs",
+        "engine": "Hybrid v15.19 – Fixed equity staleness, option scaling",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.18-clean"
+        "version": "15.19-stable"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3147,7 +3233,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.18-clean"
+            "version": "15.19-stable"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -3280,6 +3366,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.18)...")
+    logger.info("🚀 Starting Flask API Server (v15.19)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
