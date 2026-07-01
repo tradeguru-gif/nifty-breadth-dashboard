@@ -1,1079 +1,1303 @@
-# === VERSION 10.2 - MULTI-INDEX SENTIMENT ENGINE (V6 WORKING LOGIC MERGED) ===
-import sys
-import logging
 import os
 import time
+import logging
 import threading
 import json
 import requests
 import pandas as pd
-import numpy as np
-import sqlite3
 import math
 from collections import deque
-from datetime import datetime, timedelta, time as dt_time
-from flask import Flask, jsonify, request
+from datetime import datetime
+from flask import Flask, jsonify
 from flask_cors import CORS
+from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import pyotp
 
-# -------------------------------
-#  INITIAL LOGGING
-# -------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-logger.info(f"Python version: {sys.version}")
+# The rest of your code follows...
 
-for pkg in ['numpy', 'pandas', 'flask', 'requests']:
+# ------------------------------------------------------------
+# MONKEY PATCH for SmartWebSocketV2 (binary token parsing)
+# ------------------------------------------------------------
+_original_parse = SmartWebSocketV2._parse_binary_data
+def _patched_parse(self, binary_data):
     try:
-        __import__(pkg)
-        logger.info(f"{pkg} loaded")
-    except Exception as e:
-        logger.error(f"{pkg} import failed: {e}")
+        result = _original_parse(self, binary_data)
+    except:
+        result = {}
+    try:
+        token_bytes = binary_data[2:26]
+        token_int = int.from_bytes(token_bytes, byteorder='little')
+        result['token'] = str(token_int)
+    except:
+        pass
+    return result
+SmartWebSocketV2._parse_binary_data = _patched_parse
+
+_original_on_close = SmartWebSocketV2._on_close
+def _patched_on_close(self, wsapp, *args):
+    try:
+        _original_on_close(self, wsapp)
+    except:
+        pass
+SmartWebSocketV2._on_close = _patched_on_close
+# ------------------------------------------------------------
 
 app = Flask(__name__)
 CORS(app)
 application = app
 
-# ML imports (optional)
-try:
-    from sklearn.ensemble import RandomForestClassifier
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-try:
-    import telebot
-    TELEGRAM_AVAILABLE = True
-except ImportError:
-    TELEGRAM_AVAILABLE = False
-
-# -------------------------------
-#  ENVIRONMENT VARIABLES
-# -------------------------------
+# ---------- Environment ----------
 ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
 ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
 ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
 ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET]):
-    raise ValueError("Missing critical Angel One environment variables")
+    raise ValueError("Missing Angel One credentials")
 
-DB_PATH = "trading_data.db"
+# ---------- Global State ----------
+CE_TOKEN = None
+PE_TOKEN = None
+NIFTY_TOKEN = None
+ATM_STRIKE = 0
+EXPIRY_DATE = ""
 
-# -------------------------------
-#  DATABASE INIT
-# -------------------------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS ticks (timestamp REAL, token TEXT, price REAL, volume REAL, bid REAL, ask REAL, oi REAL)""")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_time ON ticks(timestamp)")
-    c.execute("""CREATE TABLE IF NOT EXISTS signals (timestamp REAL, action TEXT, signal_type TEXT, grade TEXT, confidence REAL, ce_price REAL, pe_price REAL, rsi REAL, pcr REAL, regime TEXT, vwap REAL, vix REAL, ml_score REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS trades (timestamp REAL, action TEXT, entry_price REAL, exit_price REAL, pnl REAL, size_pct REAL, status TEXT, grade TEXT, atr REAL, vix REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS daily_performance (date TEXT, equity REAL, daily_pnl REAL, drawdown_pct REAL, sharpe REAL, var REAL, win_rate REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS ml_models (id INTEGER PRIMARY KEY, model BLOB, created_at REAL, features TEXT, accuracy REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS backtest_results (id INTEGER PRIMARY KEY, date TEXT, strategy TEXT, trades INTEGER, win_rate REAL, profit_factor REAL, max_drawdown REAL, sharpe REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS greeks (timestamp REAL, delta REAL, gamma REAL, theta REAL, vega REAL, iv REAL, ce_delta REAL, pe_delta REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS market_profile (timestamp REAL, poc REAL, value_area_high REAL, value_area_low REAL, vwap REAL, volume_profile TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS portfolio_equity (index_name TEXT PRIMARY KEY, equity REAL, last_updated REAL)""")
-    conn.commit()
-    conn.close()
+ce_price_history = deque(maxlen=500)
+pe_price_history = deque(maxlen=500)
+ce_volume_history = deque(maxlen=500)
+pe_volume_history = deque(maxlen=500)
+ce_oi_history = deque(maxlen=20)
+pe_oi_history = deque(maxlen=20)
 
-init_db()
-
-# -------------------------------
-#  ANGEL ONE API SETUP
-# -------------------------------
-from SmartApi import SmartConnect
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-
-# -------------------------------
-#  MULTI-INDEX CONFIGURATION
-# -------------------------------
-INDEX_CONFIG = {
-    "NIFTY": {
-        "token": "99926000", "exchange": "NSE", "symbol": "NIFTY",
-        "lot_size": 50, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
-        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2
-    },
-    "BANKNIFTY": {
-        "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY",
-        "lot_size": 25, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
-        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2
-    },
-    "FINNIFTY": {
-        "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY",
-        "lot_size": 40, "expiry_weekday": 2, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 50,
-        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2
-    },
-    "MIDCPNIFTY": {
-        "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY",
-        "lot_size": 75, "expiry_weekday": 4, "active": True,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 25,
-        "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2
-    },
-    "SENSEX": {
-        "token": None,
-        "exchange": "BSE", "symbol": "SENSEX",
-        "lot_size": 15, "expiry_weekday": 4, "active": False,
-        "min_premium": 10, "max_premium": 5000, "atm_strike_multiple": 100,
-        "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4
-    }
+latest_ticks = {
+    "ce_price": 0.0, "pe_price": 0.0,
+    "ce_volume": 0, "pe_volume": 0,
+    "ce_oi": 0, "pe_oi": 0,
+    "ce_bid": 0.0, "ce_ask": 0.0,
+    "pe_bid": 0.0, "pe_ask": 0.0,
+    "nifty_spot": 0.0
 }
-
-ACTIVE_INDEX = "NIFTY"
-
-# -------------------------------
-#  GLOBAL STATE (PER INDEX)
-# -------------------------------
-INDEX_TOKENS = {idx: {"ce_token": None, "pe_token": None, "atm_strike": 0, "expiry": "", "ce_symbol": "", "pe_symbol": ""} for idx in INDEX_CONFIG}
-
-price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
-ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
-pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_CONFIG}
-ce_volume_histories = {idx: deque(maxlen=1000) for idx in INDEX_CONFIG}
-pe_volume_histories = {idx: deque(maxlen=1000) for idx in INDEX_CONFIG}
-ce_oi_histories = {idx: deque(maxlen=200) for idx in INDEX_CONFIG}
-pe_oi_histories = {idx: deque(maxlen=200) for idx in INDEX_CONFIG}
-
-vix_history = deque(maxlen=200)
-banknifty_history = deque(maxlen=1000)
-
-latest_ticks = {idx: {"spot_price": 0.0, "ce_price": 0.0, "pe_price": 0.0,
-                      "ce_volume": 0, "pe_volume": 0, "ce_oi": 0, "pe_oi": 0}
-                for idx in INDEX_CONFIG}
-latest_ticks["VIX"] = {"vix": 15.0}
 
 tick_counter = 0
 ws_running = False
 sws = None
 last_tick_time = time.time()
-startup_complete = False
+engine_active = True
 
-_signal_lock = threading.Lock()
-_portfolio_lock = threading.Lock()
+# Multi‑timeframe snapshots
+timeframe_history = {
+    "1min": deque(maxlen=60),
+    "5min": deque(maxlen=20),
+    "10min": deque(maxlen=15),
+    "15min": deque(maxlen=10),
+    "20min": deque(maxlen=10)
+}
+last_minute_snapshot = {"time": 0, "price": 0, "volume": 0}
 
-# -------------------------------
-#  RATE LIMITING (from v6 working pattern)
-# -------------------------------
-_api_last_call = 0
-_api_min_interval = 0.5
-_api_lock = threading.Lock()
-
-def rate_limited_api_call(func, *args, **kwargs):
-    """Wrapper to enforce rate limiting on API calls"""
-    global _api_last_call
-    with _api_lock:
-        elapsed = time.time() - _api_last_call
-        if elapsed < _api_min_interval:
-            time.sleep(_api_min_interval - elapsed)
-        try:
-            result = func(*args, **kwargs)
-            _api_last_call = time.time()
-            return result
-        except Exception as e:
-            _api_last_call = time.time()
-            raise e
-
-# -------------------------------
-#  SENTIMENT ENGINE CONFIG
-# -------------------------------
-TIMEFRAMES = ["1min", "5min", "15min"]
-TIMEFRAME_WEIGHTS = {"1min": 30, "5min": 40, "15min": 30}
-EMA_SHORT, EMA_MEDIUM, EMA_LONG = 9, 21, 50
-
-SENTIMENT_SCORES = {
-    "STRONG_BULLISH": (85, 100, "🟢 STRONG BULLISH", "STRONG_BUY_CE"),
-    "BULLISH": (70, 84, "🟢 BULLISH", "BUY_CE"),
-    "SLOW_BULLISH": (55, 69, "🟡 SLOW BULLISH", "LOW_BUY_CE"),
-    "NEUTRAL": (45, 54, "⚪ NEUTRAL", "NO_TRADE"),
-    "SLOW_BEARISH": (30, 44, "🟠 SLOW BEARISH", "LOW_BUY_PE"),
-    "BEARISH": (15, 29, "🔴 BEARISH", "BUY_PE"),
-    "STRONG_BEARISH": (0, 14, "🔴 STRONG BEARISH", "STRONG_BUY_PE")
+# Signal persistent state
+signal_state = {
+    "current_action": "HOLD",
+    "current_signal_type": "NONE",
+    "pending_action": None,
+    "pending_signal_type": None,
+    "confirmation_count": 0,
+    "required_confirmations": 2,
+    "signal_start_time": None,
+    "cooldown_until": 0,
+    "last_logged_action": "",
+    "signal_grade": "D",
+    "entry_price": 0.0,
+    "stop_loss": 0.0,
+    "target": 0.0,
+    "position_size_pct": 0,
+    "risk_reward": 0.0,
+    "flip_count_hour": 0,
+    "flip_window_start": 0,
+    "highest_price_since_entry": 0.0,
+    "lowest_price_since_entry": float("inf")
 }
 
-market_sentiment = {idx: {"score": 50, "label": "NEUTRAL", "trend_1m": "NEUTRAL", "trend_5m": "NEUTRAL", "trend_15m": "NEUTRAL"} for idx in INDEX_CONFIG}
-signal_state = {idx: {"action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0, "lots": 1, "cooldown": 0, "confidence": 0} for idx in INDEX_CONFIG}
+portfolio_state = {
+    "equity": 100000.0,
+    "total_exposure_pct": 0.0,
+    "open_positions": 0
+}
 
-def load_portfolio_equity():
+market_signal = {
+    "signal": "WAITING", "ce_price": 0.0, "pe_price": 0.0, "spread": 0.0,
+    "rsi": 50, "macd": 0.0, "pcr": 1.0, "vwap": 0.0, "atr": 0.0,
+    "ema_fast": 0.0, "ema_slow": 0.0, "delta": 0.0, "gamma": 0.0,
+    "theta": 0.0, "vega": 0.0, "volume": 0, "timestamp": "",
+    "atr_pct": 0.0, "adx": 0.0, "bb_position": 50.0, "rsi_divergence": "NONE",
+    "iv_rank": 50, "signal_grade": "D", "regime": "RANGING", "session_phase": "UNKNOWN",
+    "ce_spread_pct": 0.0, "pe_spread_pct": 0.0, "ce_oi_change": 0, "pe_oi_change": 0
+}
+
+market_state = {
+    "rsi": 50, "momentum": "NEUTRAL", "strength": "LOW", "trend": "SIDEWAYS",
+    "action": "HOLD", "confidence": 0, "volatility": "NORMAL", "alert": "NONE",
+    "regime": "UNKNOWN", "session_phase": "UNKNOWN",
+    "trend_1min": "SIDEWAYS", "trend_5min": "SIDEWAYS", "trend_10min": "SIDEWAYS",
+    "trend_15min": "SIDEWAYS", "trend_20min": "SIDEWAYS", "timeframe_agreement": 0,
+    "portfolio_heat": 0
+}
+
+institutional_state = {
+    "vwap": 0, "ema_fast": 0, "ema_slow": 0, "ema_signal": "NEUTRAL", "atr": 0,
+    "oi_buildup": "NEUTRAL", "iv_state": "NORMAL", "candle_structure": "SIDEWAYS",
+    "market_breadth": "BALANCED", "volume_profile": "NORMAL", "smart_money_flow": "NEUTRAL",
+    "delta": 0, "gamma": 0, "theta": 0, "vega": 0, "iv": 0,
+    "institutional_signal": "HOLD", "institutional_confidence": 0,
+    "signal_grade": "D", "position_size_pct": 0, "risk_reward": 0.0,
+    "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0,
+    "ce_delta": 0, "pe_delta": 0, "ce_iv": 0, "pe_iv": 0,
+    "ce_oi_change": 0, "pe_oi_change": 0
+}
+
+# Caches
+pcr_cache = {"value": 1.0, "time": 0}
+spot_cache = {"value": None, "timestamp": 0}
+CACHE_TTL = 30
+
+CONFIG = {
+    "RSI_PERIOD": 14,
+    "MACD_FAST": 12, "MACD_SLOW": 26,
+    "ATR_PERIOD": 14,
+    "BB_PERIOD": 20, "BB_STD": 2.0,
+    "ADX_PERIOD": 14,
+    "EMA_FAST": 9, "EMA_SLOW": 21,
+    "PCR_BULLISH": 0.9, "PCR_BEARISH": 1.2,
+    "STRONG_BUY_THRESHOLD": 85, "BUY_THRESHOLD": 70, "CONSIDER_THRESHOLD": 55,
+    "SIGNAL_CONFIRMATION_BARS": 2,
+    "SIGNAL_MAX_AGE_SEC": 1800,
+    "COOLDOWN_AFTER_FLIP_SEC": 30,
+    "MAX_FLIPS_PER_HOUR": 3,
+    "POSITION_SIZE_BASE_PCT": 10, "POSITION_SIZE_MAX_PCT": 25,
+    "STOP_LOSS_ATR_MULT": 1.5, "TARGET_ATR_MULT": 3.0,
+    "DAYS_TO_EXPIRY": 7,
+}
+
+# ---------- Helper Functions ----------
+def is_market_open():
+    now = datetime.now()
+    if now.weekday() >= 5: return False
+    start = datetime.strptime("09:15", "%H:%M").time()
+    end = datetime.strptime("15:30", "%H:%M").time()
+    return start <= now.time() <= end
+
+def get_market_phase():
+    mins = datetime.now().hour * 60 + datetime.now().minute
+    if mins < 9*60+15: return "PRE_MARKET"
+    elif mins < 9*60+45: return "OPENING"
+    elif mins < 12*60: return "MORNING"
+    elif mins < 13*60+30: return "MIDDAY"
+    elif mins < 15*60: return "AFTERNOON"
+    elif mins < 15*60+30: return "CLOSING"
+    else: return "POST_MARKET"
+
+def get_nifty_index_token():
+    """
+    Dynamically find valid NIFTY index token from Angel scrip master.
+    """
+
+    global NIFTY_TOKEN
+
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT index_name, equity FROM portfolio_equity")
-        rows = c.fetchall()
-        conn.close()
-        return {row[0]: {"equity": row[1], "open_positions": 0, "daily_trades": 0} for row in rows}
+
+        resp = requests.get(
+            "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json",
+            timeout=30
+        )
+
+        resp.raise_for_status()
+
+        data = resp.json()
+
+        for item in data:
+
+            symbol = str(item.get("symbol", "")).upper()
+            exch_seg = str(item.get("exch_seg", "")).upper()
+
+            # Valid NSE NIFTY index
+            if (
+                exch_seg == "NSE"
+                and symbol in ["NIFTY", "NIFTY 50", "NIFTY50"]
+            ):
+
+                token = str(item.get("token"))
+
+                logger.info(
+                    f"NIFTY token found dynamically: {symbol} -> {token}"
+                )
+
+                NIFTY_TOKEN = token
+
+                return token
+
+        logger.error("NIFTY token not found in scrip master")
+
     except Exception as e:
-        logger.error(f"Failed to load portfolio equity: {e}")
-        return {}
+        logger.exception(f"Error finding NIFTY token: {e}")
 
-persisted = load_portfolio_equity()
-portfolio_state = {idx: {"equity": persisted.get(idx, {}).get("equity", 100000.0), "open_positions": 0, "daily_trades": 0} for idx in INDEX_CONFIG}
+    return None
 
-market_signal = {idx: {"signal": "WAITING", "sentiment_score": 50, "alert_message": ""} for idx in INDEX_CONFIG}
-safety_state = {idx: {"consecutive_sl": 0, "circuit_breaker": False, "circuit_breaker_until": 0} for idx in INDEX_CONFIG}
-signal_buffer = {idx: {"ce_count": 0, "pe_count": 0, "consecutive_ce": 0, "consecutive_pe": 0} for idx in INDEX_CONFIG}
-daily_trade_count = {idx: 0 for idx in INDEX_CONFIG}
-last_trade_date = {idx: "" for idx in INDEX_CONFIG}
+# ============================================================
+# NIFTY SPOT FETCHER (FIXED VERSION)
+# ============================================================
 
-# -------------------------------
-#  VALIDATION HELPERS (from v6)
-# -------------------------------
-def is_valid_option_premium(premium, spot_price, side):
-    """Validate if the premium looks like a real option price."""
-    if premium <= 0 or spot_price <= 0:
-        return False
-    premium_pct = premium / spot_price
-    # ATM options typically 1-5% of spot, OTM can be 0.1-2%
-    return 0.001 < premium_pct < 0.15  # 0.1% to 15% of spot
+import requests
+import time
+import logging
 
-# -------------------------------
-#  TECHNICAL INDICATORS
-# -------------------------------
-def calculate_rsi(prices, period=14, smoothing=3):
-    if len(prices) < period + 1: return 50.0
+logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------
+# CACHE
+# ------------------------------------------------------------
+
+CACHE_TTL = 3  # seconds
+
+spot_cache = {
+    "value": None,
+    "timestamp": 0
+}
+
+token_cache = {
+    "token": None,
+    "symbol": None,
+    "timestamp": 0
+}
+
+# ------------------------------------------------------------
+# FETCH NIFTY TOKEN FROM ANGEL SCRIP MASTER
+# ------------------------------------------------------------
+
+def get_nifty_token():
+    """
+    Dynamically fetch correct NIFTY token from Angel master.
+    """
+
+    # Use cached token for 1 hour
+    if (
+        token_cache["token"] is not None
+        and (time.time() - token_cache["timestamp"]) < 3600
+    ):
+        return token_cache["symbol"], token_cache["token"]
+
+    try:
+        url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+
+        for item in data:
+
+            symbol = str(item.get("symbol", "")).upper()
+            exch_seg = str(item.get("exch_seg", "")).upper()
+            token = str(item.get("token", ""))
+
+            # Find NIFTY index
+            if (
+                exch_seg == "NSE"
+                and symbol in ["NIFTY", "NIFTY 50", "NIFTY50"]
+            ):
+
+                token_cache["token"] = token
+                token_cache["symbol"] = symbol
+                token_cache["timestamp"] = time.time()
+
+                logger.info(f"Loaded NIFTY token: {symbol} -> {token}")
+
+                return symbol, token
+
+        logger.error("NIFTY token not found in scrip master")
+
+    except Exception as e:
+        logger.exception(f"Error loading NIFTY token: {e}")
+
+    return None, None
+
+
+# ------------------------------------------------------------
+# FETCH SPOT FROM ANGEL LTP API
+# ------------------------------------------------------------
+
+def get_spot_from_angel_ltp():
+
+    try:
+
+        auth_token, feed_token, obj = get_auth_token()
+
+        if not auth_token or obj is None:
+            logger.warning("Angel auth failed")
+            return None
+
+        trading_symbol, symbol_token = get_nifty_token()
+
+        if not trading_symbol or not symbol_token:
+            logger.warning("Could not get valid NIFTY token")
+            return None
+
+        logger.info(
+            f"Fetching LTP for {trading_symbol} ({symbol_token})"
+        )
+
+        ltp_data = obj.ltpData(
+            "NSE",
+            trading_symbol,
+            symbol_token
+        )
+
+        if (
+            ltp_data
+            and ltp_data.get("status")
+            and ltp_data.get("data")
+            and ltp_data["data"].get("ltp")
+        ):
+
+            spot = float(ltp_data["data"]["ltp"])
+
+            logger.info(f"NIFTY Spot from Angel LTP: {spot}")
+
+            return spot
+
+        logger.warning(f"Invalid LTP response: {ltp_data}")
+
+    except AttributeError:
+        logger.warning("ltpData not available in this SmartAPI version")
+
+    except Exception as e:
+        logger.exception(f"Angel LTP fetch error: {e}")
+
+    return None
+
+
+# ------------------------------------------------------------
+# MAIN SPOT FETCHER
+# ------------------------------------------------------------
+
+def get_nifty_spot():
+    """
+    Priority:
+    1. WebSocket live tick
+    2. Angel REST LTP fallback
+    """
+
+    try:
+
+        # Use fresh websocket tick first
+        if (
+            latest_ticks.get("nifty_spot", 0) > 0
+            and (time.time() - last_tick_time) < 5
+        ):
+
+            return latest_ticks["nifty_spot"]
+
+        logger.warning("WebSocket spot stale -> using REST fallback")
+
+        # Fallback to REST
+        return get_spot_from_angel_ltp()
+
+    except Exception as e:
+        logger.exception(f"get_nifty_spot error: {e}")
+
+    return None
+
+
+# ------------------------------------------------------------
+# CACHED SPOT FETCHER
+# ------------------------------------------------------------
+
+def get_nifty_spot_cached():
+
+    now = time.time()
+
+    # Return cached value if fresh
+    if (
+        now - spot_cache["timestamp"] < CACHE_TTL
+        and spot_cache["value"] is not None
+    ):
+        return spot_cache["value"]
+
+    # Fetch fresh spot
+    spot = get_nifty_spot()
+
+    if spot is not None:
+
+        spot_cache["value"] = spot
+        spot_cache["timestamp"] = now
+
+    return spot_cache["value"]
+
+
+
+
+def get_current_atm_tokens():
+    """Auto-fetch CE/PE tokens using live spot and scrip master."""
+    global CE_TOKEN, PE_TOKEN, ATM_STRIKE, EXPIRY_DATE
+    spot = get_nifty_spot_cached()
+    if not spot:
+        logger.error("No spot – cannot auto-fetch tokens")
+        return
+    atm_strike = round(spot / 50) * 50
+    logger.info(f"ATM strike = {atm_strike}")
+    try:
+        resp = requests.get("https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json", timeout=30)
+        df = pd.DataFrame(resp.json())
+    except Exception as e:
+        logger.error(f"Failed to load scrip master: {e}")
+        return
+
+    nifty_opts = df[(df["name"]=="NIFTY") & (df["instrumenttype"]=="OPTIDX") & (df["exch_seg"]=="NFO")].copy()
+    if nifty_opts.empty:
+        logger.error("No NIFTY OPTIDX found")
+        return
+
+    nifty_opts["expiry_date"] = pd.to_datetime(nifty_opts["expiry"], format="%d%b%Y", errors="coerce")
+    nifty_opts = nifty_opts.dropna(subset=["expiry_date"])
+    nifty_opts["strike"] = pd.to_numeric(nifty_opts["strike"], errors="coerce") / 100
+    nifty_opts = nifty_opts.dropna(subset=["strike"])
+
+    today = datetime.now()
+    future = nifty_opts[nifty_opts["expiry_date"] >= today]
+    if future.empty:
+        logger.error("No future expiry found")
+        return
+    nearest_expiry = future["expiry_date"].min()
+
+    atm_opts = future[(future["strike"]==atm_strike) & (future["expiry_date"]==nearest_expiry)]
+    if atm_opts.empty:
+        strikes = sorted(future[future["expiry_date"]==nearest_expiry]["strike"].unique())
+        nearest_strike = min(strikes, key=lambda x: abs(x-atm_strike))
+        atm_opts = future[(future["strike"]==nearest_strike) & (future["expiry_date"]==nearest_expiry)]
+        atm_strike = nearest_strike
+
+    ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+    pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+    if not ce.empty and not pe.empty:
+        CE_TOKEN = str(ce.iloc[0]["token"])
+        PE_TOKEN = str(pe.iloc[0]["token"])
+        ATM_STRIKE = atm_strike
+        EXPIRY_DATE = nearest_expiry.strftime("%d%b%Y").upper()
+        logger.info(f"Auto tokens: CE={CE_TOKEN} ({ce.iloc[0]['symbol']}), PE={PE_TOKEN}")
+    else:
+        logger.error("CE/PE not found for ATM strike")
+
+# ---------- Technical Indicators ----------
+def calculate_rsi(prices, period=14):
+    if len(prices) < period+1: return 50.0
     gains, losses = [], []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i-1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+        gains.append(max(diff,0))
+        losses.append(max(-diff,0))
+    avg_gain = sum(gains[-period:])/period
+    avg_loss = sum(losses[-period:])/period
     if avg_loss == 0: return 100.0
-    rsi_raw = 100 - (100 / (1 + avg_gain / avg_loss))
-    if smoothing > 1 and len(prices) >= period + smoothing:
-        rsi_vals = []
-        for j in range(smoothing):
-            sub_gains = gains[-(period+j):-j if j > 0 else None]
-            sub_losses = losses[-(period+j):-j if j > 0 else None]
-            if len(sub_gains) == period:
-                ag = sum(sub_gains) / period
-                al = sum(sub_losses) / period
-                rsi_vals.append(100 - (100 / (1 + ag / al)) if al > 0 else 100.0)
-        if rsi_vals:
-            alpha = 2 / (smoothing + 1)
-            rsi_smooth = rsi_vals[0]
-            for rv in rsi_vals[1:]:
-                rsi_smooth = alpha * rv + (1 - alpha) * rsi_smooth
-            return rsi_smooth
-    return rsi_raw
+    return 100 - (100/(1+avg_gain/avg_loss))
+
+def calculate_macd(prices, fast=12, slow=26):
+    if len(prices) < slow: return 0.0, 0.0
+    def ema(series, period):
+        alpha = 2/(period+1)
+        val = series[0]
+        for x in series[1:]:
+            val = alpha*x + (1-alpha)*val
+        return val
+    ema_fast = ema(prices[-fast:], fast) if len(prices)>=fast else prices[-1]
+    ema_slow = ema(prices[-slow:], slow) if len(prices)>=slow else prices[-1]
+    return ema_fast - ema_slow, ema_fast - ema_slow
+
+def calculate_vwap(prices, volumes):
+    if not prices or not volumes or len(prices)!=len(volumes):
+        return prices[-1] if prices else 0
+    cum_pv = sum(p*v for p,v in zip(prices, volumes))
+    cum_vol = sum(volumes)
+    return cum_pv/cum_vol if cum_vol>0 else prices[-1]
 
 def calculate_ema(prices, period):
-    if len(prices) < period: return sum(prices) / len(prices) if prices else 0
-    alpha = 2 / (period + 1)
-    ema = sum(prices[:period]) / period
-    for p in prices[period:]:
-        ema = alpha * p + (1 - alpha) * ema
-    return ema
-
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow + signal: return 0.0, 0.0, 0.0
-    def ema(arr, p):
-        alpha = 2 / (p + 1)
-        val = arr[0]
-        for x in arr[1:]: val = alpha * x + (1 - alpha) * val
-        return val
-    ema_fast = ema(prices[-fast:], fast)
-    ema_slow = ema(prices[-slow:], slow)
-    macd_line = ema_fast - ema_slow
-    hist = []
-    for i in range(signal, 0, -1):
-        if len(prices) >= slow + i:
-            ef = ema(prices[-(fast+i):-i], fast)
-            es = ema(prices[-(slow+i):-i], slow)
-            hist.append(ef - es)
-    sig_line = ema(hist, signal) if hist else macd_line
-    return macd_line, sig_line, macd_line - sig_line
+    if len(prices) < period: return prices[-1] if prices else 0
+    alpha = 2/(period+1)
+    val = prices[0]
+    for p in prices[1:]:
+        val = alpha*p + (1-alpha)*val
+    return val
 
 def calculate_atr(prices, period=14):
-    if len(prices) < period + 1: return 5.0
-    tr = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    return sum(tr[-period:]) / period
+    if len(prices) < period+1: return 0.0
+    trs = [abs(prices[i]-prices[i-1]) for i in range(1, len(prices))]
+    return sum(trs[-period:])/period if len(trs)>=period else 0.0
+
+def calculate_bollinger(prices, period=20, std_dev=2.0):
+    if len(prices) < period: return 0.0,0.0,0.0,50.0
+    window = prices[-period:]
+    sma = sum(window)/period
+    var = sum((p-sma)**2 for p in window)/period
+    std = math.sqrt(var)
+    upper = sma + std_dev*std
+    lower = sma - std_dev*std
+    pos = (prices[-1]-lower)/(upper-lower)*100 if upper!=lower else 50.0
+    return sma, upper, lower, max(0,min(100,pos))
 
 def calculate_adx(prices, period=14):
-    if len(prices) < period * 2 + 1: return 20.0
-    plus_dm, minus_dm, tr = [], [], []
-    for i in range(1, len(prices)):
-        up = prices[i] - prices[i-1]
-        down = prices[i-1] - prices[i]
-        plus_dm.append(max(up, 0) if up > down else 0)
-        minus_dm.append(max(down, 0) if down > up else 0)
-        tr.append(abs(prices[i] - prices[i-1]))
-    atr = sum(tr[-period:]) / period
-    plus_di = 100 * sum(plus_dm[-period:]) / period / atr if atr > 0 else 0
-    minus_di = 100 * sum(minus_dm[-period:]) / period / atr if atr > 0 else 0
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
-    return dx
+    if len(prices) < period*2: return 0.0
+    tr = [abs(prices[i]-prices[i-1]) for i in range(1, len(prices))]
+    plus_dm = [max(prices[i]-prices[i-1],0) for i in range(1,len(prices))]
+    minus_dm = [max(prices[i-1]-prices[i],0) for i in range(1,len(prices))]
+    atr = sum(tr[-period:])/period if len(tr)>=period else 0.0
+    if atr==0: return 0.0
+    plus_di = 100*sum(plus_dm[-period:])/period/atr
+    minus_di = 100*sum(minus_dm[-period:])/period/atr
+    return 100*abs(plus_di-minus_di)/(plus_di+minus_di+1e-10)
 
-# -------------------------------
-#  TREND & SENTIMENT
-# -------------------------------
-def get_trend_score(prices, tf_name):
-    if len(prices) < 60: return "NEUTRAL", 0
-    w = TIMEFRAME_WEIGHTS[tf_name]
-    ema9 = calculate_ema(prices, EMA_SHORT)
-    ema21 = calculate_ema(prices, EMA_MEDIUM)
-    ema50 = calculate_ema(prices, EMA_LONG)
-    price = prices[-1]
+def calculate_rsi_divergence(prices, rsi_values, lookback=5):
+    if len(prices)<lookback+2 or len(rsi_values)<lookback+2: return "NONE"
+    price_lows = prices[-lookback:]
+    rsi_lows = rsi_values[-lookback:]
+    if min(price_lows) < price_lows[0] and min(rsi_lows) > rsi_lows[0]: return "BULLISH"
+    price_highs = prices[-lookback:]
+    rsi_highs = rsi_values[-lookback:]
+    if max(price_highs) > price_highs[0] and max(rsi_highs) < rsi_highs[0]: return "BEARISH"
+    return "NONE"
 
-    if tf_name == "1min":
-        if ema9 > ema21 and price > ema9: return "BULLISH", w
-        if ema9 < ema21 and price < ema9: return "BEARISH", -w
-        return "NEUTRAL", 0
-    elif tf_name == "5min":
-        if ema9 > ema21 > ema50: return "BULLISH", w
-        if ema9 < ema21 < ema50: return "BEARISH", -w
-        if ema9 > ema21 and price > ema9: return "BULLISH", w - 10
-        if ema9 < ema21 and price < ema9: return "BEARISH", -(w - 10)
-        return "NEUTRAL", 0
+def get_nifty_pcr():
+    now = time.time()
+    if now - pcr_cache["time"] < 120: return pcr_cache["value"]
+    try:
+        # Use Angel One option chain? Simpler: fallback to cached
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            records = data.get("records",{}).get("data",[])
+            ce_oi = sum(x.get("CE",{}).get("openInterest",0) for x in records if "CE" in x)
+            pe_oi = sum(x.get("PE",{}).get("openInterest",0) for x in records if "PE" in x)
+            pcr = pe_oi/ce_oi if ce_oi else 1.0
+            pcr_cache["value"] = pcr
+            pcr_cache["time"] = now
+            return pcr
+    except:
+        pass
+    return pcr_cache["value"]
+
+def get_real_greeks(option_type="CE"):
+    spot = get_nifty_spot_cached() or 0
+    price = latest_ticks.get("ce_price" if option_type=="CE" else "pe_price", 0)
+    if spot==0 or ATM_STRIKE==0 or price==0:
+        return 0.0,0.0,0.0,0.0,0.20
+    moneyness = abs(spot - ATM_STRIKE)/spot
+    if option_type=="CE":
+        delta = 0.5 - moneyness
+        if spot > ATM_STRIKE: delta = 0.8 - moneyness
     else:
-        if len(prices) >= 20:
-            highs = [max(prices[-i-5:-i]) for i in range(0, 15, 5) if i+5 <= len(prices)]
-            lows  = [min(prices[-i-5:-i]) for i in range(0, 15, 5) if i+5 <= len(prices)]
-            if len(highs) >= 2 and len(lows) >= 2:
-                if highs[0] > highs[1] and lows[0] > lows[1]: return "BULLISH", w
-                if highs[0] < highs[1] and lows[0] < lows[1]: return "BEARISH", -w
-                if highs[0] > highs[1]: return "BULLISH", w - 10
-                if highs[0] < highs[1]: return "BEARISH", -(w - 10)
-        return "NEUTRAL", 0
+        delta = -(0.5 - moneyness)
+        if spot < ATM_STRIKE: delta = -0.8 + moneyness
+    delta = max(-1, min(1, delta))
+    gamma = 0.05 * (1 - moneyness*2) if moneyness < 0.5 else 0.01
+    theta = -price * 0.001 * CONFIG["DAYS_TO_EXPIRY"]
+    vega = price * 0.1
+    iv = 0.20 + moneyness * 0.1
+    return delta, gamma, theta, vega, iv
 
-def compute_sentiment(index_name):
-    prices = list(price_histories[index_name])
-    if len(prices) < 60:
-        market_sentiment[index_name]["score"] = 50
-        return 50
-    total = 0
-    for tf in TIMEFRAMES:
-        trend, score = get_trend_score(prices, tf)
-        market_sentiment[index_name][f"trend_{tf}"] = trend
-        total += score
-    sentiment = 50 + (total / 2)
-    sentiment = max(0, min(100, sentiment))
-    market_sentiment[index_name]["score"] = sentiment
-    for k, (low, high, label, action) in SENTIMENT_SCORES.items():
-        if low <= sentiment <= high:
-            market_sentiment[index_name]["label"] = label
-            break
-    return sentiment
+def analyze_timeframe_trend(history):
+    n = len(history)
+    if n < 2: return "SIDEWAYS", 0
+    prices = [h["price"] for h in history]
+    x = list(range(n))
+    x_mean = sum(x)/n
+    y_mean = sum(prices)/n
+    num = sum((x[i]-x_mean)*(prices[i]-y_mean) for i in range(n))
+    den = sum((x[i]-x_mean)**2 for i in range(n))
+    if den==0: return "SIDEWAYS",0
+    slope = num/den
+    if abs(slope) < 0.05: return "SIDEWAYS",0
+    return ("BULLISH" if slope>0 else "BEARISH"), abs(slope)*100
 
-def get_signal_from_sentiment(index_name, sentiment):
-    for k, (low, high, label, action) in SENTIMENT_SCORES.items():
-        if low <= sentiment <= high:
-            if "LOW" in action and market_sentiment[index_name]["trend_15m"] in ["BULLISH" if "PE" in action else "BEARISH"]:
-                return "NO_TRADE", label, sentiment
-            return action, label, sentiment
-    return "NO_TRADE", "UNKNOWN", sentiment
+def get_all_timeframe_trends():
+    return {tf: {"trend": analyze_timeframe_trend(list(hist))[0],
+                 "strength": round(analyze_timeframe_trend(list(hist))[1],2)}
+            for tf, hist in timeframe_history.items()}
 
-# -------------------------------
-#  AUTH & TOKEN FUNCTIONS
-# -------------------------------
+# ---------- Signal Engine (Full) ----------
+def run_signal_engine(ce_price, pe_price, ce_hist, pe_hist, ce_vol_hist, pe_vol_hist):
+    global market_signal, market_state, institutional_state, signal_state, portfolio_state
+
+    if len(ce_hist) < 30 or len(pe_hist) < 30:
+        return
+
+    spot = get_nifty_spot_cached() or 0
+    spread = ce_price - pe_price
+
+    combined_prices = [(c+p)/2 for c,p in zip(ce_hist, pe_hist)]
+    combined_volumes = [(c+p)/2 for c,p in zip(ce_vol_hist, pe_vol_hist)]
+
+    rsi = calculate_rsi(combined_prices, CONFIG["RSI_PERIOD"])
+    macd_line, macd_hist = calculate_macd(combined_prices, CONFIG["MACD_FAST"], CONFIG["MACD_SLOW"])
+    vwap = calculate_vwap(combined_prices, combined_volumes)
+    ema_fast = calculate_ema(combined_prices, CONFIG["EMA_FAST"])
+    ema_slow = calculate_ema(combined_prices, CONFIG["EMA_SLOW"])
+    atr = calculate_atr(combined_prices, CONFIG["ATR_PERIOD"])
+    pcr = get_nifty_pcr()
+    ce_delta, ce_gamma, ce_theta, ce_vega, ce_iv = get_real_greeks("CE")
+    pe_delta, pe_gamma, pe_theta, pe_vega, pe_iv = get_real_greeks("PE")
+    bb_sma, bb_upper, bb_lower, bb_pos = calculate_bollinger(combined_prices, CONFIG["BB_PERIOD"], CONFIG["BB_STD"])
+    adx = calculate_adx(combined_prices, CONFIG["ADX_PERIOD"])
+    rsi_vals = [calculate_rsi(combined_prices[:i+1], CONFIG["RSI_PERIOD"]) for i in range(CONFIG["RSI_PERIOD"], len(combined_prices))]
+    rsi_div = calculate_rsi_divergence(combined_prices, rsi_vals) if len(rsi_vals)>=5 else "NONE"
+    atr_pct = (atr/combined_prices[-1])*100 if combined_prices[-1]>0 else 0
+
+    # Volume trend
+    if len(combined_volumes) >= 20:
+        recent_vol = sum(combined_volumes[-10:])/10
+        older_vol = sum(combined_volumes[-20:-10])/10
+        vol_trend = "INCREASING" if recent_vol > older_vol*1.2 else "DECREASING" if recent_vol < older_vol*0.8 else "FLAT"
+    else:
+        vol_trend = "FLAT"
+
+    # OI change
+    if len(ce_oi_history)>=5:
+        ce_oi_change = (ce_oi_history[-1]-ce_oi_history[-5])/(ce_oi_history[-5]+1e-6)*100
+    else:
+        ce_oi_change = 0
+    if len(pe_oi_history)>=5:
+        pe_oi_change = (pe_oi_history[-1]-pe_oi_history[-5])/(pe_oi_history[-5]+1e-6)*100
+    else:
+        pe_oi_change = 0
+    ce_oi_change = max(-50, min(50, ce_oi_change))
+    pe_oi_change = max(-50, min(50, pe_oi_change))
+
+    # Spread %
+    ce_spread_pct = (latest_ticks["ce_ask"]-latest_ticks["ce_bid"])/(ce_price+1e-6)*100 if latest_ticks["ce_ask"]>0 else 0
+    pe_spread_pct = (latest_ticks["pe_ask"]-latest_ticks["pe_bid"])/(pe_price+1e-6)*100 if latest_ticks["pe_ask"]>0 else 0
+
+    # Regime
+    if adx > 30: regime = "TRENDING"
+    elif atr_pct > 1.5: regime = "VOLATILE"
+    elif bb_pos < 20 or bb_pos > 80: regime = "BREAKOUT"
+    elif adx < 20 and atr_pct < 0.5: regime = "CHOPPY"
+    else: regime = "RANGING"
+
+    session_phase = get_market_phase()
+    tf_trends = get_all_timeframe_trends()
+    bullish_tf = sum(1 for t in ["1min","5min","10min","15min","20min"] if tf_trends[t]["trend"]=="BULLISH")
+    bearish_tf = sum(1 for t in ["1min","5min","10min","15min","20min"] if tf_trends[t]["trend"]=="BEARISH")
+    tf_score_bull = bullish_tf * 10
+    tf_score_bear = bearish_tf * 10
+
+    tech_bull = tech_bear = 0
+    if 55 < rsi < 75: tech_bull += 10
+    elif 40 < rsi < 55: tech_bull += 5
+    if 25 < rsi < 45: tech_bear += 10
+    elif 45 < rsi < 60: tech_bear += 5
+
+    if macd_hist > 0 and macd_line > 0: tech_bull += 10
+    elif macd_hist > 0: tech_bull += 6
+    elif macd_hist < 0 and macd_line < 0: tech_bear += 10
+    elif macd_hist < 0: tech_bear += 6
+
+    if pcr < CONFIG["PCR_BULLISH"]: tech_bull += 10
+    elif pcr < 1.0: tech_bull += 7
+    elif pcr > CONFIG["PCR_BEARISH"]: tech_bear += 10
+    elif pcr > 1.2: tech_bear += 7
+
+    if vol_trend == "INCREASING":
+        if ema_fast > ema_slow: tech_bull += 10
+        else: tech_bear += 10
+
+    avg_price = (ce_price+pe_price)/2
+    if avg_price > vwap and avg_price > ema_slow: tech_bull += 10
+    elif avg_price > vwap or avg_price > ema_slow: tech_bull += 5
+    elif avg_price < vwap and avg_price < ema_slow: tech_bear += 10
+    elif avg_price < vwap or avg_price < ema_slow: tech_bear += 5
+
+    if bb_pos < 20: tech_bull += 8
+    elif bb_pos > 80: tech_bear += 8
+
+    if adx > 30:
+        if ema_fast > ema_slow: tech_bull += 5
+        else: tech_bear += 5
+
+    if rsi_div == "BULLISH" and ema_fast > ema_slow: tech_bull += 8
+    elif rsi_div == "BEARISH" and ema_fast < ema_slow: tech_bear += 8
+
+    if ce_oi_change > 10: tech_bull += 8
+    elif ce_oi_change > 5: tech_bull += 4
+    if pe_oi_change > 10: tech_bear += 8
+    elif pe_oi_change > 5: tech_bear += 4
+
+    total_bull = tf_score_bull + tech_bull
+    total_bear = tf_score_bear + tech_bear
+    raw_confidence = max(total_bull, total_bear)
+
+    # Liquidity filter
+    if ce_spread_pct > 2.0 or pe_spread_pct > 2.0:
+        raw_confidence = min(raw_confidence, 40)
+
+    # Multi‑timeframe confluence
+    if bullish_tf == 5: raw_confidence += 15
+    elif bearish_tf == 5: raw_confidence += 15
+    elif bullish_tf >= 4 or bearish_tf >= 4: raw_confidence += 8
+    elif bullish_tf <= 1 and bearish_tf <= 1: raw_confidence = max(raw_confidence-10, 0)
+
+    if regime == "CHOPPY":
+        raw_action = "HOLD"
+        signal_type = "NONE"
+        raw_confidence = 0
+    else:
+        if total_bull >= total_bear and total_bull >= CONFIG["CONSIDER_THRESHOLD"]:
+            if raw_confidence >= CONFIG["STRONG_BUY_THRESHOLD"]:
+                raw_action = "STRONG BUY CE"
+                signal_type = "TRENDING" if bullish_tf>=4 else "MOMENTUM"
+            elif raw_confidence >= CONFIG["BUY_THRESHOLD"]:
+                raw_action = "BUY CE"
+                signal_type = "MOMENTUM"
+            elif raw_confidence >= CONFIG["CONSIDER_THRESHOLD"]:
+                raw_action = "CONSIDER CE BUY"
+                signal_type = "MOMENTUM"
+            else:
+                raw_action = "HOLD"
+                signal_type = "NONE"
+        elif total_bear > total_bull and total_bear >= CONFIG["CONSIDER_THRESHOLD"]:
+            if raw_confidence >= CONFIG["STRONG_BUY_THRESHOLD"]:
+                raw_action = "STRONG BUY PE"
+                signal_type = "TRENDING" if bearish_tf>=4 else "MOMENTUM"
+            elif raw_confidence >= CONFIG["BUY_THRESHOLD"]:
+                raw_action = "BUY PE"
+                signal_type = "MOMENTUM"
+            elif raw_confidence >= CONFIG["CONSIDER_THRESHOLD"]:
+                raw_action = "CONSIDER PE BUY"
+                signal_type = "MOMENTUM"
+            else:
+                raw_action = "HOLD"
+                signal_type = "NONE"
+        else:
+            raw_action = "HOLD"
+            signal_type = "NONE"
+            raw_confidence = max(total_bull, total_bear)
+
+    # Confirmation logic
+    now_ts = time.time()
+    final_action = signal_state["current_action"]
+    final_signal_type = signal_state["current_signal_type"]
+
+    if raw_action != signal_state["current_action"]:
+        if now_ts < signal_state.get("cooldown_until", 0):
+            final_action = signal_state["current_action"]
+            final_signal_type = signal_state["current_signal_type"]
+        else:
+            if signal_state["pending_action"] != raw_action:
+                signal_state["pending_action"] = raw_action
+                signal_state["pending_signal_type"] = signal_type
+                signal_state["confirmation_count"] = 1
+                signal_state["signal_start_time"] = now_ts
+                logger.info(f"New pending: {raw_action} (1/{CONFIG['SIGNAL_CONFIRMATION_BARS']})")
+            else:
+                signal_state["confirmation_count"] += 1
+                logger.info(f"Confirmation {signal_state['confirmation_count']}/{CONFIG['SIGNAL_CONFIRMATION_BARS']} for {raw_action}")
+            if signal_state["confirmation_count"] >= CONFIG["SIGNAL_CONFIRMATION_BARS"]:
+                final_action = raw_action
+                final_signal_type = signal_type
+                signal_state["current_action"] = raw_action
+                signal_state["current_signal_type"] = signal_type
+                signal_state["cooldown_until"] = now_ts + CONFIG["COOLDOWN_AFTER_FLIP_SEC"]
+                signal_state["pending_action"] = None
+                signal_state["confirmation_count"] = 0
+                if signal_state["flip_window_start"] == 0 or (now_ts - signal_state["flip_window_start"]) > 3600:
+                    signal_state["flip_window_start"] = now_ts
+                    signal_state["flip_count_hour"] = 1
+                else:
+                    signal_state["flip_count_hour"] += 1
+                logger.info(f"SIGNAL CONFIRMED: {final_action} [{final_signal_type}]")
+            else:
+                final_action = signal_state["current_action"]
+                final_signal_type = signal_state["current_signal_type"]
+    else:
+        if signal_state["pending_action"] is not None:
+            signal_state["pending_action"] = None
+            signal_state["confirmation_count"] = 0
+        if signal_state["signal_start_time"] and (now_ts - signal_state["signal_start_time"]) > CONFIG["SIGNAL_MAX_AGE_SEC"]:
+            if final_action != "HOLD":
+                logger.info(f"Signal expired: {final_action}")
+                final_action = "HOLD"
+                final_signal_type = "NONE"
+                signal_state["current_action"] = "HOLD"
+                signal_state["current_signal_type"] = "NONE"
+                signal_state["signal_start_time"] = None
+
+    if signal_state["flip_count_hour"] >= CONFIG["MAX_FLIPS_PER_HOUR"]:
+        final_action = "HOLD"
+        final_signal_type = "NONE"
+
+    # Grade
+    grade = "D"
+    if final_action != "HOLD" and final_signal_type != "NONE":
+        if raw_confidence >= 90 and (bullish_tf>=4 or bearish_tf>=4):
+            grade = "A"
+        elif raw_confidence >= 80 or ((bullish_tf>=3 or bearish_tf>=3) and raw_confidence>=70):
+            grade = "B"
+        elif raw_confidence >= 65:
+            grade = "C"
+    signal_state["signal_grade"] = grade
+
+    # Position sizing & paper trading
+    position_pct = 0
+    rr = 0
+    entry = 0
+    stop = 0
+    target = 0
+
+    if final_action in ["STRONG BUY CE", "BUY CE", "CONSIDER CE BUY"]:
+        entry = ce_price
+        init_stop = entry - atr * CONFIG["STOP_LOSS_ATR_MULT"]
+        target = entry + atr * CONFIG["TARGET_ATR_MULT"]
+        if grade == "A": base = CONFIG["POSITION_SIZE_MAX_PCT"]
+        elif grade == "B": base = CONFIG["POSITION_SIZE_BASE_PCT"] * 1.5
+        elif grade == "C": base = CONFIG["POSITION_SIZE_BASE_PCT"]
+        else: base = 0
+        if regime == "VOLATILE": base *= 0.7
+        elif regime == "TRENDING": base *= 1.2
+        position_pct = min(CONFIG["POSITION_SIZE_MAX_PCT"], max(0, base))
+        if atr > 0:
+            risk = entry - init_stop
+            reward = target - entry
+            rr = reward/risk if risk>0 else 0
+        if position_pct > 0 and signal_state["entry_price"] == 0:
+            logger.info(f"*** PAPER TRADE: BUY {final_action} at {entry:.2f}, SL {init_stop:.2f}, TGT {target:.2f}, Size {position_pct}% ***")
+            signal_state["entry_price"] = entry
+            signal_state["stop_loss"] = init_stop
+            signal_state["target"] = target
+            signal_state["highest_price_since_entry"] = entry
+        elif signal_state["entry_price"] > 0:
+            if ce_price > signal_state["highest_price_since_entry"]:
+                signal_state["highest_price_since_entry"] = ce_price
+                profit_range = signal_state["highest_price_since_entry"] - signal_state["entry_price"]
+                if profit_range > 0:
+                    new_stop = signal_state["entry_price"] + profit_range * 0.5
+                    if new_stop > signal_state["stop_loss"]:
+                        signal_state["stop_loss"] = new_stop
+                        logger.info(f"Trailing stop raised to {signal_state['stop_loss']:.2f}")
+            if ce_price <= signal_state["stop_loss"]:
+                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {ce_price:.2f} ***")
+                signal_state["entry_price"] = 0
+                signal_state["stop_loss"] = 0
+                signal_state["target"] = 0
+                signal_state["highest_price_since_entry"] = 0
+            elif ce_price >= signal_state["target"]:
+                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {ce_price:.2f} ***")
+                signal_state["entry_price"] = 0
+                signal_state["stop_loss"] = 0
+                signal_state["target"] = 0
+                signal_state["highest_price_since_entry"] = 0
+
+    elif final_action in ["STRONG BUY PE", "BUY PE", "CONSIDER PE BUY"]:
+        entry = pe_price
+        init_stop = entry + atr * CONFIG["STOP_LOSS_ATR_MULT"]
+        target = entry - atr * CONFIG["TARGET_ATR_MULT"]
+        if grade == "A": base = CONFIG["POSITION_SIZE_MAX_PCT"]
+        elif grade == "B": base = CONFIG["POSITION_SIZE_BASE_PCT"] * 1.5
+        elif grade == "C": base = CONFIG["POSITION_SIZE_BASE_PCT"]
+        else: base = 0
+        if regime == "VOLATILE": base *= 0.7
+        elif regime == "TRENDING": base *= 1.2
+        position_pct = min(CONFIG["POSITION_SIZE_MAX_PCT"], max(0, base))
+        if atr > 0:
+            risk = init_stop - entry
+            reward = entry - target
+            rr = reward/risk if risk>0 else 0
+        if position_pct > 0 and signal_state["entry_price"] == 0:
+            logger.info(f"*** PAPER TRADE: BUY {final_action} at {entry:.2f}, SL {init_stop:.2f}, TGT {target:.2f}, Size {position_pct}% ***")
+            signal_state["entry_price"] = entry
+            signal_state["stop_loss"] = init_stop
+            signal_state["target"] = target
+            signal_state["lowest_price_since_entry"] = entry
+        elif signal_state["entry_price"] > 0:
+            if pe_price < signal_state["lowest_price_since_entry"]:
+                signal_state["lowest_price_since_entry"] = pe_price
+                profit_range = signal_state["entry_price"] - signal_state["lowest_price_since_entry"]
+                if profit_range > 0:
+                    new_stop = signal_state["entry_price"] - profit_range * 0.5
+                    if new_stop < signal_state["stop_loss"]:
+                        signal_state["stop_loss"] = new_stop
+                        logger.info(f"Trailing stop lowered to {signal_state['stop_loss']:.2f}")
+            if pe_price >= signal_state["stop_loss"]:
+                logger.info(f"*** PAPER EXIT: STOP LOSS for {final_action} at {pe_price:.2f} ***")
+                signal_state["entry_price"] = 0
+                signal_state["stop_loss"] = 0
+                signal_state["target"] = 0
+                signal_state["lowest_price_since_entry"] = float("inf")
+            elif pe_price <= signal_state["target"]:
+                logger.info(f"*** PAPER EXIT: TARGET for {final_action} at {pe_price:.2f} ***")
+                signal_state["entry_price"] = 0
+                signal_state["stop_loss"] = 0
+                signal_state["target"] = 0
+                signal_state["lowest_price_since_entry"] = float("inf")
+    else:
+        signal_state["entry_price"] = 0
+        signal_state["stop_loss"] = 0
+        signal_state["target"] = 0
+        signal_state["highest_price_since_entry"] = 0
+        signal_state["lowest_price_since_entry"] = float("inf")
+        position_pct = 0
+        rr = 0
+
+    signal_state["position_size_pct"] = position_pct
+    signal_state["risk_reward"] = rr
+    portfolio_state["total_exposure_pct"] = position_pct if signal_state["entry_price"]>0 else 0
+    portfolio_state["open_positions"] = 1 if signal_state["entry_price"]>0 else 0
+
+    # Update global dictionaries
+    market_state.update({
+        "rsi": round(rsi,2),
+        "momentum": "UPTREND" if ema_fast>ema_slow else "DOWNTREND" if ema_fast<ema_slow else "NEUTRAL",
+        "strength": "HIGH" if final_signal_type=="TRENDING" else "MODERATE" if final_signal_type=="MOMENTUM" else "LOW",
+        "trend": "BULLISH" if ema_fast>ema_slow else "BEARISH" if ema_fast<ema_slow else "SIDEWAYS",
+        "action": final_action,
+        "confidence": raw_confidence,
+        "volatility": "HIGH" if atr>15 else "NORMAL" if atr>5 else "LOW",
+        "alert": final_action,
+        "regime": regime,
+        "session_phase": session_phase,
+        "trend_1min": tf_trends["1min"]["trend"],
+        "trend_5min": tf_trends["5min"]["trend"],
+        "trend_10min": tf_trends["10min"]["trend"],
+        "trend_15min": tf_trends["15min"]["trend"],
+        "trend_20min": tf_trends["20min"]["trend"],
+        "timeframe_agreement": max(bullish_tf, bearish_tf),
+        "portfolio_heat": round(portfolio_state["total_exposure_pct"],2),
+    })
+
+    institutional_state.update({
+        "vwap": round(vwap,2),
+        "ema_fast": round(ema_fast,2),
+        "ema_slow": round(ema_slow,2),
+        "ema_signal": "BULLISH" if ema_fast>ema_slow else "BEARISH",
+        "atr": round(atr,2),
+        "oi_buildup": "BULLISH" if pcr<0.9 else "BEARISH" if pcr>1.2 else "NEUTRAL",
+        "iv_state": "HIGH" if ce_vega>2 else "NORMAL",
+        "candle_structure": "BULLISH" if ema_fast>ema_slow and rsi>55 else "BEARISH" if ema_fast<ema_slow and rsi<45 else "SIDEWAYS",
+        "market_breadth": "BULLISH" if bullish_tf>=3 else "BEARISH" if bearish_tf>=3 else "BALANCED",
+        "volume_profile": vol_trend,
+        "smart_money_flow": "BULLISH" if vwap>ema_slow and vol_trend=="INCREASING" else "BEARISH" if vwap<ema_slow and vol_trend=="INCREASING" else "NEUTRAL",
+        "delta": ce_delta, "gamma": ce_gamma, "theta": ce_theta, "vega": ce_vega, "iv": ce_iv,
+        "institutional_signal": final_action,
+        "institutional_confidence": raw_confidence,
+        "signal_grade": grade,
+        "position_size_pct": position_pct,
+        "risk_reward": round(rr,2),
+        "entry_price": round(entry,2) if entry else 0,
+        "stop_loss": round(stop,2) if stop else 0,
+        "target": round(target,2) if target else 0,
+        "ce_delta": ce_delta, "pe_delta": pe_delta,
+        "ce_iv": ce_iv, "pe_iv": pe_iv,
+        "ce_oi_change": round(ce_oi_change,1), "pe_oi_change": round(pe_oi_change,1)
+    })
+
+    market_signal.update({
+        "signal": "BULLISH" if final_action in ["STRONG BUY CE","BUY CE","CONSIDER CE BUY"] else "BEARISH" if final_action in ["STRONG BUY PE","BUY PE","CONSIDER PE BUY"] else "NEUTRAL",
+        "ce_price": ce_price, "pe_price": pe_price, "spread": round(spread,2),
+        "rsi": round(rsi,2), "macd": round(macd_hist,2), "pcr": round(pcr,2),
+        "vwap": round(vwap,2), "atr": round(atr,2), "atr_pct": round(atr_pct,2),
+        "ema_fast": round(ema_fast,2), "ema_slow": round(ema_slow,2),
+        "delta": ce_delta, "gamma": ce_gamma, "theta": ce_theta, "vega": ce_vega,
+        "volume": int(combined_volumes[-1]) if combined_volumes else 0,
+        "timestamp": datetime.now().isoformat(),
+        "adx": round(adx,2), "bb_position": round(bb_pos,2),
+        "rsi_divergence": rsi_div, "iv_rank": 50,
+        "signal_grade": grade, "regime": regime, "session_phase": session_phase,
+        "ce_spread_pct": round(ce_spread_pct,1), "pe_spread_pct": round(pe_spread_pct,1),
+        "ce_oi_change": round(ce_oi_change,1), "pe_oi_change": round(pe_oi_change,1)
+    })
+
+    if final_action != signal_state["last_logged_action"]:
+        logger.info(f"PRO SIGNAL: {final_action} [{final_signal_type}] Grade:{grade} Conf:{raw_confidence} "
+                    f"BullTF:{bullish_tf} BearTF:{bearish_tf} RSI:{rsi:.1f} ADX:{adx:.1f} PCR:{pcr:.2f} "
+                    f"PosSize:{position_pct}% RR:{rr:.1f}")
+        signal_state["last_logged_action"] = final_action
+
+# ---------- WebSocket Callbacks ----------
+def on_open(wsapp):
+    global sws
+    logger.info("WebSocket Opened")
+    if sws and CE_TOKEN and PE_TOKEN and NIFTY_TOKEN:
+        tokens = [
+            {"exchangeType": 2, "tokens": [CE_TOKEN, PE_TOKEN]},   # NFO options
+            {"exchangeType": 1, "tokens": [NIFTY_TOKEN]}            # NSE index
+        ]
+        sws.subscribe(
+    correlation_id="tradeguru",
+    mode=1,
+    token_list=tokens
+)
+        logger.info(f"Subscribed to CE={CE_TOKEN}, PE={PE_TOKEN}, NIFTY={NIFTY_TOKEN}")
+
+def on_data(wsapp, message):
+
+    global tick_counter
+    global last_tick_time
+
+    try:
+
+        logger.info(f"TICK RECEIVED: {message}")
+
+        if not message:
+            return
+
+        # SmartAPI sometimes gives dict directly
+        tick = message if isinstance(message, dict) else json.loads(message)
+
+        token = str(
+            tick.get("token")
+            or tick.get("tk")
+            or ""
+        )
+
+        ltp = (
+            tick.get("last_traded_price")
+            or tick.get("ltp")
+            or 0
+        )
+
+        # Angel sends paise
+        if ltp and ltp > 1000:
+            ltp = float(ltp) / 100
+
+        last_tick_time = time.time()
+
+        # -------------------------------------------------
+        # NIFTY SPOT
+        # -------------------------------------------------
+
+        if token == str(NIFTY_TOKEN):
+
+            latest_ticks["nifty_spot"] = ltp
+
+            spot_cache["value"] = ltp
+            spot_cache["timestamp"] = time.time()
+
+            logger.info(f"WS Spot Updated: {ltp}")
+
+            return
+
+        # -------------------------------------------------
+        # CE OPTION
+        # -------------------------------------------------
+
+        if token == str(CE_TOKEN):
+
+            latest_ticks["ce_price"] = ltp
+
+            ce_price_history.append(ltp)
+
+            tick_counter += 1
+
+            logger.info(f"CE => {ltp}")
+
+        # -------------------------------------------------
+        # PE OPTION
+        # -------------------------------------------------
+
+        elif token == str(PE_TOKEN):
+
+            latest_ticks["pe_price"] = ltp
+
+            pe_price_history.append(ltp)
+
+            tick_counter += 1
+
+            logger.info(f"PE => {ltp}")
+
+        # -------------------------------------------------
+        # RUN ENGINE
+        # -------------------------------------------------
+
+        ce = latest_ticks["ce_price"]
+        pe = latest_ticks["pe_price"]
+
+        if (
+            ce > 0
+            and pe > 0
+            and tick_counter % 5 == 0
+            and len(ce_price_history) >= 30
+            and len(pe_price_history) >= 30
+        ):
+
+            run_signal_engine(
+                ce,
+                pe,
+                list(ce_price_history),
+                list(pe_price_history),
+                list(ce_volume_history),
+                list(pe_volume_history)
+            )
+
+    except Exception as e:
+
+        logger.exception(f"Tick parse error: {e}")
+
+def on_error(wsapp, error):
+    global ws_running
+    logger.error(f"WebSocket error: {error}")
+    ws_running = False
+
+def on_close(wsapp, *args):
+    global ws_running
+    logger.warning(f"WebSocket closed: {args}")
+    ws_running = False
+
+# ---------- Authentication & WebSocket Manager ----------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
-_auth_lock = threading.Lock()
+AUTH_CACHE_TTL = 3600
 
 def get_auth_token():
-    with _auth_lock:
-        now = time.time()
-        if auth_cache["token"] and (now - auth_cache["timestamp"] < 3300):
-            return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
-        try:
-            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
-            obj = SmartConnect(api_key=ANGEL_API_KEY)
-            session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-            if not session.get("status"): return None, None, None
-            auth_token = session["data"]["jwtToken"]
-            feed_token = obj.getfeedToken()
-            auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
-            logger.info("Auth token refreshed successfully")
-            return auth_token, feed_token, obj
-        except Exception as e:
-            logger.error(f"Auth loop fail: {e}")
+    now = time.time()
+    if auth_cache["token"] and (now - auth_cache["timestamp"] < AUTH_CACHE_TTL):
+        return auth_cache["token"], auth_cache["feed_token"], auth_cache["obj"]
+    try:
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        obj = SmartConnect(api_key=ANGEL_API_KEY)
+        session = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+        if not session.get("status"):
+            logger.error("Auth failed")
             return None, None, None
-
-def safe_ltp(resp):
-    """Handle both old and new SmartAPI response formats"""
-    if not resp or not resp.get("status"):
-        return None
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        if "fetched" in data and data["fetched"]:
-            return float(data["fetched"][0].get("ltp", 0))
-        elif "ltp" in data:
-            return float(data["ltp"])
-    return None
-
-def get_index_spot(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config: return None
-    _, _, obj = get_auth_token()
-    if not obj: return None
-
-    if index_name == "SENSEX":
-        try:
-            resp = rate_limited_api_call(obj.searchScrip, "BSE", "SENSEX")
-            if resp and resp.get("status") and resp.get("data") and len(resp["data"]) > 0:
-                token = str(resp["data"][0].get("symboltoken"))
-                ltp_resp = rate_limited_api_call(obj.ltpData, "BSE", "SENSEX", token)
-                ltp = safe_ltp(ltp_resp)
-                if ltp is not None:
-                    if ltp > 100000: ltp /= 100
-                    return ltp
-        except Exception as e:
-            logger.error(f"SENSEX spot error: {e}")
-        return None
-
-    try:
-        resp = rate_limited_api_call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
-        ltp = safe_ltp(resp)
-        if ltp is not None:
-            if ltp > 100000: ltp /= 100
-            if index_name == "MIDCPNIFTY" and (ltp < 5000 or ltp > 25000):
-                search = rate_limited_api_call(obj.searchScrip, "NSE", "MIDCPNIFTY")
-                if search and search.get("status") and search.get("data") and len(search["data"]) > 0:
-                    token = str(search["data"][0].get("symboltoken"))
-                    ltp2 = safe_ltp(rate_limited_api_call(obj.ltpData, "NSE", "MIDCPNIFTY", token))
-                    if ltp2 is not None:
-                        if ltp2 > 100000: ltp2 /= 100
-                        ltp = ltp2
-            return ltp
+        auth_token = session["data"]["jwtToken"]
+        feed_token = obj.getfeedToken()
+        auth_cache.update({"token": auth_token, "feed_token": feed_token, "timestamp": now, "obj": obj})
+        logger.info("Angel Login Success")
+        return auth_token, feed_token, obj
     except Exception as e:
-        logger.error(f"Spot fetch {index_name}: {e}")
-    return None
+        logger.error(f"Login error: {e}")
+        return None, None, None
 
-def get_vix_value():
-    _, _, obj = get_auth_token()
-    if not obj: return 15.0
-    try:
-        resp = rate_limited_api_call(obj.ltpData, "NSE", "INDIAVIX", "99919017")
-        ltp = safe_ltp(resp)
-        if ltp is not None:
-            return ltp
-    except Exception:
-        pass
-    return 15.0
-
-_scrip_cache = {"data": None, "timestamp": 0}
-_scrip_lock = threading.Lock()
-
-def get_scrip_master():
-    with _scrip_lock:
-        now = time.time()
-        if _scrip_cache["data"] and (now - _scrip_cache["timestamp"] < 86400):
-            return _scrip_cache["data"]
-        try:
-            url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
-            data = requests.get(url, timeout=30).json()
-            _scrip_cache["data"] = data
-            _scrip_cache["timestamp"] = now
-            logger.info("Scrip Master refreshed")
-            return data
-        except Exception as e:
-            logger.error(f"Scrip Master failed: {e}")
-            return _scrip_cache["data"] or []
-
-def is_expiry_day(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config: return False
-    today = datetime.now()
-    weekday = today.weekday()
-    return weekday == config["expiry_weekday"]
-
-def get_current_atm_tokens(index_name):
-    config = INDEX_CONFIG.get(index_name)
-    if not config or not config.get("active"): return None, None
-    spot = get_index_spot(index_name)
-    if not spot or spot <= 0:
-        logger.warning(f"{index_name} spot unavailable")
-        return None, None
-    mult = config["atm_strike_multiple"]
-    atm = int(round(spot / mult) * mult)
-
-    today = datetime.now()
-    days = (config["expiry_weekday"] - today.weekday()) % 7
-    if days == 0: days = 7
-    expiry = (today + timedelta(days=days)).strftime("%d%b%Y").upper()
-
-    scrip = get_scrip_master()
-    if scrip:
-        df = pd.DataFrame(scrip)
-        opts = df[(df["name"] == config["symbol"]) &
-                  (df["instrumenttype"] == "OPTIDX") &
-                  (df["exch_seg"] == config["option_exchange"])].copy()
-        if not opts.empty:
-            opts["expiry_date"] = pd.to_datetime(opts["expiry"], format="%d%b%Y", errors="coerce")
-            opts = opts.dropna(subset=["expiry_date"])
-            opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
-            future = opts[opts["expiry_date"] >= today]
-            if not future.empty:
-                nearest = future["expiry_date"].min()
-                atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
-                if atm_opts.empty:
-                    same_exp = future[future["expiry_date"] == nearest]
-                    if not same_exp.empty:
-                        idx = (same_exp["strike"] - atm).abs().idxmin()
-                        atm_opts = same_exp.loc[[idx]]
-                ce = atm_opts[atm_opts["symbol"].str.contains("CE")]
-                pe = atm_opts[atm_opts["symbol"].str.contains("PE")]
-                if not ce.empty and not pe.empty:
-                    ce_token = str(ce.iloc[0]["token"])
-                    pe_token = str(pe.iloc[0]["token"])
-                    INDEX_TOKENS[index_name].update({
-                        "ce_token": ce_token, "pe_token": pe_token,
-                        "atm_strike": atm, "expiry": expiry,
-                        "ce_symbol": ce.iloc[0]["symbol"], "pe_symbol": pe.iloc[0]["symbol"]
-                    })
-                    logger.info(f"{index_name} tokens: CE={ce_token} PE={pe_token}")
-                    return ce_token, pe_token
-
-    _, _, obj = get_auth_token()
-    if obj:
-        ce_token = pe_token = None
-        try:
-            ce_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}CE")
-            if ce_resp and ce_resp.get("status") and ce_resp.get("data") and len(ce_resp["data"]) > 0:
-                ce_token = str(ce_resp["data"][0].get("symboltoken"))
-            pe_resp = rate_limited_api_call(obj.searchScrip, config["option_exchange"], f"{config['symbol']}{atm}PE")
-            if pe_resp and pe_resp.get("status") and pe_resp.get("data") and len(pe_resp["data"]) > 0:
-                pe_token = str(pe_resp["data"][0].get("symboltoken"))
-            if ce_token and pe_token:
-                INDEX_TOKENS[index_name].update({
-                    "ce_token": ce_token, "pe_token": pe_token,
-                    "atm_strike": atm, "expiry": expiry
-                })
-                logger.info(f"{index_name} tokens (search): CE={ce_token} PE={pe_token}")
-                return ce_token, pe_token
-        except Exception as e:
-            logger.error(f"Search fallback error {index_name}: {e}")
-    return None, None
-
-def refresh_all_tokens():
-    for idx in INDEX_CONFIG:
-        if INDEX_CONFIG[idx].get("active"):
-            get_current_atm_tokens(idx)
-
-# -------------------------------
-#  POSITION SIZING & RISK
-# -------------------------------
-def calculate_position_size(index_name, signal_strength, atr, vix):
-    config = INDEX_CONFIG[index_name]
-    base_risk = 1.0
-    if "STRONG" in signal_strength:
-        risk_pct = min(2.0, base_risk * 1.3)
-    elif "LOW" in signal_strength:
-        risk_pct = max(0.5, base_risk * 0.7)
-    else:
-        risk_pct = base_risk
-    if vix > 25: risk_pct *= 0.7
-    elif vix > 20: risk_pct *= 0.85
-
-    if is_expiry_day(index_name):
-        risk_pct *= 0.5
-        logger.info(f"{index_name}: Expiry day - position size halved")
-
-    risk_amount = portfolio_state[index_name]["equity"] * (risk_pct / 100)
-    stop_dist = atr * 1.5
-    if stop_dist > 0:
-        lots = int(risk_amount / (stop_dist * config["lot_size"]))
-        lots = max(1, min(5, lots))
-    else:
-        lots = 1
-    return lots, risk_pct
-
-def reset_signal_state(index_name, current_time):
-    signal_state[index_name].update({
-        "action": "HOLD", "entry_price": 0, "stop_loss": 0, "target": 0,
-        "lots": 1, "cooldown": current_time + 60, "confidence": 0, "highest": 0, "entry_time": 0
-    })
-    portfolio_state[index_name]["open_positions"] = 0
-
-def save_portfolio_equity(index_name):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""INSERT OR REPLACE INTO portfolio_equity (index_name, equity, last_updated)
-                       VALUES (?, ?, ?)""",
-                  (index_name, portfolio_state[index_name]["equity"], time.time()))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Failed to save equity for {index_name}: {e}")
-
-def send_telegram_alert(msg):
-    if not TELEGRAM_AVAILABLE or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=3)
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
-
-# -------------------------------
-#  MAIN SIGNAL ENGINE (per index)
-# -------------------------------
-def run_signal_engine_for_index(index_name):
-    if not INDEX_CONFIG[index_name].get("active"): return
-
-    with _signal_lock:
-        prices = list(price_histories[index_name])
-        if len(prices) < 30:
-            market_signal[index_name]["alert_message"] = f"Collecting data ({len(prices)}/30)"
-            return
-
-        now = time.time()
-        spot = prices[-1]
-        sentiment = compute_sentiment(index_name)
-        action, label, conf = get_signal_from_sentiment(index_name, sentiment)
-
-        rsi = calculate_rsi(prices)
-        _, _, macd_hist = calculate_macd(prices)
-        atr = calculate_atr(prices)
-        vix = latest_ticks["VIX"]["vix"]
-
-        # Circuit breaker check
-        if safety_state[index_name]["circuit_breaker"]:
-            if now < safety_state[index_name]["circuit_breaker_until"]:
-                market_signal[index_name]["alert_message"] = "Circuit breaker active"
-                market_signal[index_name]["signal"] = "CIRCUIT_BREAKER"
-                return
-            else:
-                safety_state[index_name]["circuit_breaker"] = False
-                safety_state[index_name]["consecutive_sl"] = 0
-                logger.info(f"{index_name}: Circuit breaker released")
-
-        # EXIT CHECKS
-        if signal_state[index_name]["action"] != "HOLD":
-            active = signal_state[index_name]["action"]
-            prem = latest_ticks[index_name]["ce_price"] if "CE" in active else latest_ticks[index_name]["pe_price"]
-            if prem > 0:
-                pnl = prem - signal_state[index_name]["entry_price"]
-                if prem > signal_state[index_name].get("highest", 0):
-                    signal_state[index_name]["highest"] = prem
-                    new_sl = prem - (atr * 1.8)
-                    if new_sl > signal_state[index_name]["stop_loss"]:
-                        signal_state[index_name]["stop_loss"] = new_sl
-                if prem <= signal_state[index_name]["stop_loss"]:
-                    pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                    with _portfolio_lock:
-                        portfolio_state[index_name]["equity"] += pnl_total
-                        save_portfolio_equity(index_name)
-                    safety_state[index_name]["consecutive_sl"] += 1
-                    if safety_state[index_name]["consecutive_sl"] >= 3:
-                        safety_state[index_name]["circuit_breaker"] = True
-                        safety_state[index_name]["circuit_breaker_until"] = now + 1800
-                        send_telegram_alert(f"🛑 CIRCUIT BREAKER {index_name} | 3 consecutive SLs. Trading paused 30 min.")
-                    daily_trade_count[index_name] += 1
-                    send_telegram_alert(f"⚠️ EXIT {index_name} | SL | PnL: {pnl:.2f} pts")
-                    reset_signal_state(index_name, now)
-                    return
-                if prem >= signal_state[index_name]["target"]:
-                    pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                    with _portfolio_lock:
-                        portfolio_state[index_name]["equity"] += pnl_total
-                        save_portfolio_equity(index_name)
-                    safety_state[index_name]["consecutive_sl"] = 0
-                    daily_trade_count[index_name] += 1
-                    send_telegram_alert(f"🎯 TARGET {index_name} | PnL: {pnl:.2f} pts")
-                    reset_signal_state(index_name, now)
-                    return
-                entry_time = signal_state[index_name].get("entry_time", 0)
-                if entry_time > 0 and (now - entry_time) / 60 >= 45:
-                    pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                    with _portfolio_lock:
-                        portfolio_state[index_name]["equity"] += pnl_total
-                        save_portfolio_equity(index_name)
-                    daily_trade_count[index_name] += 1
-                    send_telegram_alert(f"⏰ TIME EXIT {index_name} | PnL: {pnl:.2f} pts")
-                    reset_signal_state(index_name, now)
-                    return
-            market_signal[index_name]["alert_message"] = f"ACTIVE {active} {index_name}"
-            market_signal[index_name]["signal"] = "ACTIVE"
-        else:
-            # ENTRY CHECKS
-            if now < signal_state[index_name]["cooldown"]:
-                market_signal[index_name]["alert_message"] = f"Cooldown {int(signal_state[index_name]['cooldown']-now)}s"
-                return
-            today = datetime.now().strftime("%Y-%m-%d")
-            if last_trade_date[index_name] != today:
-                daily_trade_count[index_name] = 0
-                last_trade_date[index_name] = today
-            if daily_trade_count[index_name] >= 20:
-                market_signal[index_name]["alert_message"] = "Max daily trades reached"
-                return
-            prem = latest_ticks[index_name]["ce_price"] if "CE" in action else latest_ticks[index_name]["pe_price"] if "PE" in action else 0
-            min_prem = INDEX_CONFIG[index_name].get("min_premium", 10)
-            if prem <= 0 or prem < min_prem:
-                market_signal[index_name]["alert_message"] = f"Premium invalid ₹{prem}"
-                return
-
-            # Signal building ticks
-            buf = signal_buffer[index_name]
-            if "CE" in action:
-                buf["ce_count"] += 1
-                buf["pe_count"] = 0
-                if buf["ce_count"] < 2:
-                    market_signal[index_name]["alert_message"] = f"Building CE ({buf['ce_count']}/2)"
-                    return
-            elif "PE" in action:
-                buf["pe_count"] += 1
-                buf["ce_count"] = 0
-                if buf["pe_count"] < 2:
-                    market_signal[index_name]["alert_message"] = f"Building PE ({buf['pe_count']}/2)"
-                    return
-            else:
-                buf["ce_count"] = buf["pe_count"] = 0
-
-            # Enter trade
-            lots, risk = calculate_position_size(index_name, action, atr, vix)
-            sl_pct = 0.3 if "LOW" in action else 0.45
-            sl = max(prem * (1 - sl_pct), prem - (atr * 1.5))
-            target = prem + (atr * 3.5)
-            if "LOW" in action:
-                target = prem + (atr * 2.5)
-
-            signal_state[index_name].update({
-                "action": action, "entry_price": prem, "stop_loss": sl, "target": target,
-                "lots": lots, "entry_time": now, "highest": prem, "confidence": conf
-            })
-            portfolio_state[index_name]["open_positions"] = 1
-            buf["ce_count"] = 0
-            buf["pe_count"] = 0
-
-            if "CE" in action:
-                buf["consecutive_ce"] += 1
-                buf["consecutive_pe"] = 0
-            else:
-                buf["consecutive_pe"] += 1
-                buf["consecutive_ce"] = 0
-            daily_trade_count[index_name] += 1
-            emoji = "🟢" if "STRONG" in action and "CE" in action else "🔴" if "STRONG" in action and "PE" in action else "🟡" if "LOW" in action else "⚪"
-            msg = f"{emoji} {action} {index_name}\nSpot: {spot:.2f} | Prem: ₹{prem:.2f}\nSL: {sl:.2f} Tgt: {target:.2f}\nSentiment: {sentiment:.1f} ({label})\nLots: {lots}"
-            send_telegram_alert(msg)
-            logger.info(f"ENTRY {index_name} {action}")
-
-        market_signal[index_name].update({
-            "spot_price": spot, "ce_price": latest_ticks[index_name]["ce_price"], "pe_price": latest_ticks[index_name]["pe_price"],
-            "sentiment_score": sentiment, "sentiment": label, "signal": signal_state[index_name]["action"],
-            "confidence": conf, "trend_1m": market_sentiment[index_name]["trend_1m"],
-            "trend_5m": market_sentiment[index_name]["trend_5m"], "trend_15m": market_sentiment[index_name]["trend_15m"],
-            "timestamp": datetime.now().isoformat()
-        })
-
-def run_all_signals():
-    for idx in INDEX_CONFIG:
-        if INDEX_CONFIG[idx].get("active"):
-            run_signal_engine_for_index(idx)
-
-# -------------------------------
-#  WEBSOCKET HANDLERS (V6 WORKING PATTERN - binary + dict fallback)
-# -------------------------------
-def on_ws_open(wsapp):
-    global sws
-    logger.info("WebSocket opened successfully")
-    tokens_by_exchange = {1: [], 2: [], 3: [], 4: []}
-    for idx, cfg in INDEX_CONFIG.items():
-        if cfg.get("active"):
-            idx_ws_type = cfg.get("ws_exchange_type", 1)
-            opt_ws_type = cfg.get("option_ws_exchange_type", 2)
-            if cfg.get("token"):
-                tokens_by_exchange[idx_ws_type].append(cfg["token"])
-            if INDEX_TOKENS[idx].get("ce_token"):
-                tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["ce_token"])
-            if INDEX_TOKENS[idx].get("pe_token"):
-                tokens_by_exchange[opt_ws_type].append(INDEX_TOKENS[idx]["pe_token"])
-    tokens_by_exchange[1].append("99919017")
-
-    if sws:
-        total_subs = 0
-        for etype, toks in tokens_by_exchange.items():
-            toks = list(set([t for t in toks if t]))
-            if toks:
-                try:
-                    sws.subscribe("tradeguru_001", 1, [{"exchangeType": etype, "tokens": toks}])
-                    logger.info(f"Subscribed {len(toks)} tokens on exchangeType {etype}")
-                    total_subs += len(toks)
-                except Exception as e:
-                    logger.error(f"Subscription failed for exchangeType {etype}: {e}")
-        logger.info(f"Total subscriptions: {total_subs} tokens")
-
-def on_ws_error(wsapp, error):
-    logger.error(f"WebSocket Error: {error}")
-
-def on_ws_close(wsapp, close_status_code=None, close_msg=None):
-    global ws_running
-    ws_running = False
-    logger.warning(f"WebSocket closed: {close_status_code} {close_msg}")
-
-def on_ws_data(wsapp, message):
-    global tick_counter, last_tick_time
-    last_tick_time = time.time()
-    try:
-        ticks = []
-        # V6 WORKING PATTERN: Handle bytes via _parse_binary_data (library internal)
-        # AND dict fallback for when library already parsed it
-        if isinstance(message, bytes):
-            if sws is not None and hasattr(sws, '_parse_binary_data'):
-                try:
-                    parsed = sws._parse_binary_data(message)
-                    if parsed and isinstance(parsed, dict):
-                        ticks = [parsed]
-                except Exception as e:
-                    logger.debug(f"Binary parse failed: {e}")
-                    return
-            else:
-                return
-        elif isinstance(message, str):
-            try:
-                data = json.loads(message)
-                ticks = data if isinstance(data, list) else [data]
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse JSON: {message[:100]}")
-                return
-        elif isinstance(message, dict):
-            ticks = [message]
-        elif isinstance(message, list):
-            ticks = message
-        else:
-            logger.debug(f"Unexpected message type: {type(message)}")
-            return
-
-        for tick in ticks:
-            if not isinstance(tick, dict): continue
-            token = str(tick.get("token") or tick.get("tk") or "")
-            ltp = tick.get("last_traded_price") or tick.get("ltp") or tick.get("lp") or 0
-            if isinstance(ltp, str):
-                try: ltp = float(ltp)
-                except: ltp = 0
-            if isinstance(ltp, (int, float)) and ltp > 100000:
-                ltp /= 100
-            vol = tick.get("volume") or tick.get("v") or 0
-            oi = tick.get("open_interest") or tick.get("oi") or 0
-
-            # Match token to index
-            idx = None
-            for i, cfg in INDEX_CONFIG.items():
-                if cfg.get("token") == token:
-                    idx = i
-                    break
-            if not idx:
-                for i, t in INDEX_TOKENS.items():
-                    if t.get("ce_token") == token or t.get("pe_token") == token:
-                        idx = i
-                        break
-            if idx:
-                if token == INDEX_CONFIG[idx]["token"]:
-                    if ltp > 0:
-                        latest_ticks[idx]["spot_price"] = ltp
-                        price_histories[idx].append(ltp)
-                        tick_counter += 1
-                elif token == INDEX_TOKENS[idx].get("ce_token"):
-                    # V6 PATTERN: DISABLED - WebSocket CE token often gives wrong data
-                    # Use REST API as primary source for option prices
-                    pass
-                elif token == INDEX_TOKENS[idx].get("pe_token"):
-                    # V6 PATTERN: DISABLED - WebSocket PE token often gives wrong data
-                    # Use REST API as primary source for option prices
-                    pass
-            elif token == "99919017":
-                if ltp > 0:
-                    latest_ticks["VIX"]["vix"] = ltp
-                    vix_history.append(ltp)
-
-        # V6 PATTERN: Run signal engine every 3 ticks (not every tick)
-        if tick_counter % 3 == 0:
-            run_all_signals()
-
-    except Exception as e:
-        logger.error(f"WS data error: {e}")
-
-def start_angel_websocket():
-    global sws, ws_running
-    logger.info("="*60)
-    logger.info("WEBSOCKET THREAD STARTED")
-    logger.info(f"Current IST time: {(datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Market open check: {is_market_open()}")
-    logger.info("="*60)
-
-    refresh_all_tokens()
-    while True:
+def start_websocket():
+    global ws_running, sws, CE_TOKEN, PE_TOKEN, NIFTY_TOKEN
+    retry_delay = 30
+    while engine_active:
         try:
             if not is_market_open():
-                time.sleep(30)
+                logger.info("Market closed. Sleeping 5 minutes...")
+                time.sleep(300)
                 continue
+
+            # Get NIFTY index token (once)
+            if NIFTY_TOKEN is None:
+                NIFTY_TOKEN = get_nifty_index_token()
+
+            # Get fresh ATM tokens
+            get_current_atm_tokens()
+            if not CE_TOKEN or not PE_TOKEN:
+                logger.error("No tokens available. Retrying...")
+                time.sleep(60)
+                continue
+
             auth_token, feed_token, obj = get_auth_token()
-            if not feed_token:
-                time.sleep(10)
-                continue
-            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
-            sws.on_open = on_ws_open
-            sws.on_data = on_ws_data
-            sws.on_error = on_ws_error
-            sws.on_close = on_ws_close
-            ws_running = True
-            sws.connect()
-        except Exception as e:
-            logger.error(f"WebSocket thread error: {e}")
-            ws_running = False
-            sws = None
-            time.sleep(10)
-
-# -------------------------------
-#  REST API POLLER (V6 WORKING PATTERN - PRIMARY DATA SOURCE)
-# -------------------------------
-def is_market_open():
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    return now_ist.weekday() < 5 and dt_time(9,15) <= now_ist.time() <= dt_time(15,30)
-
-def start_rest_api_poller():
-    """PRIMARY DATA SOURCE using REST API LTP calls - WS option tokens often give wrong data."""
-    logger.info("REST API poller started - PRIMARY DATA SOURCE")
-    auth_obj = None
-    auth_time = 0
-    spot_cache = {idx: {"price": 0, "time": 0} for idx in INDEX_CONFIG}
-    spot_cache_ttl = 5
-
-    while True:
-        try:
-            if not is_market_open():
+            if not auth_token:
                 time.sleep(30)
                 continue
 
-            now = time.time()
-            if not auth_obj or (now - auth_time > 3000):
-                _, _, auth_obj = get_auth_token()
-                auth_time = now
-            if not auth_obj:
-                time.sleep(10)
-                continue
-
-            # Fetch spot with caching
-            for idx in INDEX_CONFIG:
-                if now - spot_cache[idx]["time"] > spot_cache_ttl:
-                    spot = get_index_spot(idx)
-                    if spot and spot > 0:
-                        # V6 VALIDATION: Nifty spot should be in valid range
-                        if idx == "NIFTY" and not (15000 < spot < 30000):
-                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
-                            continue
-                        if idx == "BANKNIFTY" and not (30000 < spot < 70000):
-                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
-                            continue
-                        if idx == "FINNIFTY" and not (15000 < spot < 30000):
-                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
-                            continue
-                        if idx == "MIDCPNIFTY" and not (8000 < spot < 18000):
-                            logger.warning(f"REST POLLER: Spot price {spot} out of valid range for {idx}, skipping")
-                            continue
-                        price_histories[idx].append(spot)
-                        latest_ticks[idx]["spot_price"] = spot
-                        spot_cache[idx] = {"price": spot, "time": now}
-                        logger.info(f"REST POLLER: {idx} spot fetched: {spot}")
-
-            # VIX - fetch every 30s
-            if int(now) % 30 < 10:
-                vix = get_vix_value()
-                if vix:
-                    latest_ticks["VIX"]["vix"] = vix
-                    vix_history.append(vix)
-
-            # Option prices via REST (PRIMARY source - WS tokens unreliable)
-            for idx, tokens in INDEX_TOKENS.items():
-                if tokens.get("ce_token") and tokens.get("pe_token") and tokens.get("ce_symbol") and tokens.get("pe_symbol"):
-                    try:
-                        spot = latest_ticks[idx]["spot_price"]
-                        # CE via REST
-                        ce_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["ce_symbol"], tokens["ce_token"])
-                        ce = safe_ltp(ce_resp)
-                        if ce is not None:
-                            if ce > 100000: ce /= 100
-                            # V6 VALIDATION: Option premium should be < 10000 and valid % of spot
-                            if ce > 0 and ce < 10000:
-                                if is_valid_option_premium(ce, spot, "CE"):
-                                    ce_price_histories[idx].append(ce)
-                                    latest_ticks[idx]["ce_price"] = ce
-                                    logger.info(f"REST POLLER: {idx} CE fetched: {ce}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} CE price {ce} invalid for spot {spot}")
-                            else:
-                                logger.warning(f"REST POLLER: {idx} CE price {ce} out of range")
-
-                        # PE via REST
-                        pe_resp = auth_obj.ltpData(INDEX_CONFIG[idx]["option_exchange"], tokens["pe_symbol"], tokens["pe_token"])
-                        pe = safe_ltp(pe_resp)
-                        if pe is not None:
-                            if pe > 100000: pe /= 100
-                            if pe > 0 and pe < 10000:
-                                if is_valid_option_premium(pe, spot, "PE"):
-                                    pe_price_histories[idx].append(pe)
-                                    latest_ticks[idx]["pe_price"] = pe
-                                    logger.info(f"REST POLLER: {idx} PE fetched: {pe}")
-                                else:
-                                    logger.warning(f"REST POLLER: {idx} PE price {pe} invalid for spot {spot}")
-                            else:
-                                logger.warning(f"REST POLLER: {idx} PE price {pe} out of range")
-                    except Exception as e:
-                        logger.debug(f"REST {idx} option fetch error: {e}")
-
-            run_all_signals()
-            time.sleep(10)
+            sws = SmartWebSocketV2(auth_token, ANGEL_API_KEY, ANGEL_CLIENT_ID, feed_token)
+            sws.on_open = on_open
+            sws.on_data = on_data
+            sws.on_error = on_error
+            sws.on_close = on_close
+            ws_running = True
+            logger.info("Connecting WebSocket")
+            sws.connect()
+            while ws_running and engine_active:
+                time.sleep(1)
+                if time.time() - last_tick_time > 90:
+                    logger.warning("No ticks for 90s, forcing reconnect")
+                    break
+            logger.warning("WebSocket loop ended, reconnecting...")
+            if sws:
+                try:
+                    sws.close()
+                except:
+                    pass
+                sws = None
+            ws_running = False
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
         except Exception as e:
-            logger.error(f"REST poller error: {e}")
-            auth_obj = None
-            time.sleep(10)
+            logger.error(f"WS engine error: {e}")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
 
-# -------------------------------
-#  BACKGROUND THREADS
-# -------------------------------
-_init_completed = False
-_init_lock = threading.Lock()
-
-def _start_background_threads():
-    global _init_completed
-    with _init_lock:
-        if not _init_completed:
-            threading.Thread(target=start_angel_websocket, daemon=True).start()
-            threading.Thread(target=start_rest_api_poller, daemon=True).start()
-            _init_completed = True
-            logger.info("Background threads started")
-
-@app.before_request
-def start_backgrounds():
-    _start_background_threads()
-
-# -------------------------------
-#  FLASK ROUTES
-# -------------------------------
-@app.route("/", methods=["GET"])
+# ---------- Flask Routes ----------
+@app.route("/")
 def home():
     return jsonify({
-        "status": "healthy",
-        "engine": "Multi-Index Options Bot v10.2 (V6 Logic Merged)",
-        "indices": list(INDEX_CONFIG.keys()),
+        "status": "online",
+        "message": "TradeGuru Ultimate Signal Engine (Auto-Tokens + Live NIFTY Spot)",
+        "worker_type": "WebSocket",
         "market_open": is_market_open(),
-        "timestamp": time.time()
+        "trading_mode": "PAPER",
+        "version": "7.0"
     })
 
-@app.route("/api/live-signals", methods=["GET"])
+@app.route("/api/live-signals")
 def live_signals():
+    spot = get_nifty_spot_cached()
     return jsonify({
-        "timestamp": datetime.now().isoformat(),
-        "signals": market_signal,
-        "sentiment": {idx: {"score": market_sentiment[idx]["score"], "label": market_sentiment[idx]["label"],
-                            "trend_1m": market_sentiment[idx]["trend_1m"], "trend_5m": market_sentiment[idx]["trend_5m"],
-                            "trend_15m": market_sentiment[idx]["trend_15m"]} for idx in INDEX_CONFIG},
-        "portfolios": portfolio_state,
-        "safety": safety_state,
-        "tokens": INDEX_TOKENS,
-        "debug": {"ws_running": ws_running, "ticks": tick_counter}
+        "status": "active",
+        "data": market_signal,
+        "market": market_state,
+        "institutional": institutional_state,
+        "spot_price": spot if spot else 0,
+        "signal_state": {
+            "current_action": signal_state["current_action"],
+            "pending_action": signal_state["pending_action"] or "NONE",
+            "signal_type": signal_state["current_signal_type"],
+            "confirmation_count": signal_state["confirmation_count"],
+            "required_confirmations": CONFIG["SIGNAL_CONFIRMATION_BARS"],
+            "grade": signal_state["signal_grade"],
+            "position_size_pct": signal_state["position_size_pct"],
+            "risk_reward": signal_state["risk_reward"],
+            "entry_price": signal_state["entry_price"],
+            "stop_loss": signal_state["stop_loss"],
+            "target": signal_state["target"]
+        },
+        "portfolio": {
+            "equity": portfolio_state["equity"],
+            "total_exposure_pct": round(portfolio_state["total_exposure_pct"], 2),
+            "open_positions": portfolio_state["open_positions"]
+        }
     })
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "OK", "ws_running": ws_running, "ticks_received": tick_counter})
+    return jsonify({
+        "status": "ok",
+        "ws_running": ws_running,
+        "ce_token": CE_TOKEN,
+        "pe_token": PE_TOKEN,
+        "nifty_token": NIFTY_TOKEN,
+        "latest_ce": latest_ticks["ce_price"],
+        "latest_pe": latest_ticks["pe_price"],
+        "latest_nifty": latest_ticks["nifty_spot"],
+        "ce_history_len": len(ce_price_history),
+        "pe_history_len": len(pe_price_history),
+        "last_tick_age": round(time.time() - last_tick_time, 1),
+        "timestamp": datetime.now().isoformat()
+    })
+
+# ---------- Start Engine ----------
+engine_started = False
+def start_background_engine():
+    global engine_started
+    if not engine_started:
+        thread = threading.Thread(target=start_websocket, daemon=True)
+        thread.start()
+        engine_started = True
+        logger.info("Ultimate Signal Engine v7.0 Started (Auto-Token, Live Spot)")
+
+start_background_engine()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    _start_background_threads()
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, threaded=True)
