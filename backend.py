@@ -1584,6 +1584,7 @@ def send_telegram_alert(msg):
 def apply_transaction_cost(pnl, lots, lot_size):
     cost_per_lot = 50
     return pnl - cost_per_lot * lots
+
 def update_live_pnl_for_index(index_name, current_price):
     """Update live PnL for the given index based on current_price (raw)."""
     cfg = INDEX_CONFIG.get(index_name)
@@ -2886,23 +2887,21 @@ def start_rest_only_mode():
                         try:
                             spot = result.get("spot")
                             if spot and spot > 0:
-with _latest_ticks_lock:
-    if INDEX_CONFIG[idx].get("is_commodity"):
-        latest_ticks[idx]["price"] = spot
-    else:
-        latest_ticks[idx]["spot_price"] = spot
-with _price_histories_lock:
-    price_histories[idx].append(spot)
-update_candle(idx, spot, 0, time.time())
-with _latest_ticks_lock:
-    last_known_prices[idx]["spot"] = spot
-    last_known_prices[idx]["timestamp"] = time.time()
-    
-    # 🔥 ADD THIS LINE
-    update_live_pnl_for_index(idx, spot)   # spot is raw price
-    
-    last_tick_timestamp = time.time()
-    logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+                                with _latest_ticks_lock:
+                                    if INDEX_CONFIG[idx].get("is_commodity"):
+                                        latest_ticks[idx]["price"] = spot
+                                    else:
+                                        latest_ticks[idx]["spot_price"] = spot
+                                with _price_histories_lock:
+                                    price_histories[idx].append(spot)
+                                update_candle(idx, spot, 0, time.time())
+                                with _latest_ticks_lock:
+                                    last_known_prices[idx]["spot"] = spot
+                                    last_known_prices[idx]["timestamp"] = time.time()
+                                    # 🔥 ADD THIS LINE – update live PnL for MCX
+                                    update_live_pnl_for_index(idx, spot)   # spot is raw price
+                                    last_tick_timestamp = time.time()
+                                    logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
                             if not INDEX_CONFIG[idx].get("is_commodity"):
                                 ce = result.get("ce")
