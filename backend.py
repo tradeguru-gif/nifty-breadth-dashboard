@@ -1,4 +1,4 @@
-# === HYBRID v15.20 – Added /api/signals endpoint, final MCX PnL ===
+# === HYBRID v15.21 – Fixed PnL & Equity signals for MCX and Equity ===
 import sys
 import logging
 import os
@@ -1068,7 +1068,9 @@ def is_market_open():
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 30)
-    return now_ist.weekday() < 5 and open_time <= current <= close_time
+    is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
+    logger.debug(f"Market open status: {is_open}")
+    return is_open
 
 def is_mcx_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
@@ -1079,7 +1081,9 @@ def is_mcx_open():
         return False
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
-    return open_time <= current <= close_time
+    is_open = open_time <= current <= close_time
+    logger.debug(f"MCX open status: {is_open}")
+    return is_open
 
 def get_market_status_label():
     equity_open = is_market_open()
@@ -1514,6 +1518,13 @@ def load_portfolio_state():
                         last_trade_date[idx] = row[8]
                     if len(row) >= 10 and row[9] is not None:
                         daily_trade_count[idx] = int(row[9])
+                    logger.info(f"Loaded portfolio state for {idx}: equity={portfolio_state[idx]['equity']}, action={signal_state[idx]['action']}")
+                else:
+                    # Initialize with defaults if no row found
+                    portfolio_state[idx] = {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0}
+                    signal_state[idx] = {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""}
+                    daily_trade_count[idx] = 0
+                    last_trade_date[idx] = ""
         finally:
             conn.close()
         logger.info(f"Persistent state loaded from {db_path}")
@@ -1536,6 +1547,7 @@ def save_portfolio_state(idx):
              daily_trade_count.get(idx, 0))
         )
         conn.commit()
+        logger.debug(f"Saved portfolio state for {idx}: equity={portfolio_state[idx]['equity']}")
     finally:
         conn.close()
 
@@ -1705,6 +1717,7 @@ def get_option_quote(index_name, option_type):
 # MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback
 # ============================================================
 def run_all_signals():
+    logger.info("🔄 run_all_signals called")
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
             logger.info(f"🔄 run_all_signals: checking {idx}")
@@ -1739,6 +1752,7 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity:
             tokens = INDEX_TOKENS.get(index_name, {})
             if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                logger.warning(f"{index_name} option tokens missing, cannot run signal")
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = "Option tokens not loaded"
                     market_signal[index_name]["signal"] = "WAITING"
@@ -1946,18 +1960,13 @@ def run_signal_engine_for_index(index_name):
             active = current_action
             if is_commodity:
                 raw_current = latest_ticks[index_name].get("price", 0.0) or 0.0
-                # Display spot is raw * multiplier, but we need raw for PnL
-                # We stored raw in latest_ticks[idx]["price"]? No, we stored spot there.
-                # Actually we store raw in latest_ticks[idx]["price"] inside on_ws_data.
-                # Wait: in on_ws_data for commodities, we set latest_ticks[idx]["price"] = ltp (raw).
-                # Then in this function, we compute spot = raw * multiplier for display.
-                # So we need raw from latest_ticks[idx]["price"].
-                raw_price = latest_ticks[idx].get("price", 0.0) or 0.0
-                prem = raw_price  # use raw for PnL
+                prem = raw_current  # use raw for PnL
                 pnl = prem - signal_state[index_name]["entry_price"]  # entry_price is raw
+                pnl_points = pnl  # for commodity, pnl is already points difference
             else:
                 prem = ce_prem if "CE" in active else pe_prem
                 pnl = prem - signal_state[index_name]["entry_price"]
+                pnl_points = pnl
 
             if prem <= 0:
                 prem = last_known_prices[index_name].get("ce" if "CE" in active else "pe", 0) or 0.0
@@ -1994,7 +2003,7 @@ def run_signal_engine_for_index(index_name):
                     target_val = signal_state[index_name].get("target")
 
                     if stop_loss_val is not None and prem <= stop_loss_val:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] if is_commodity else pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         if is_commodity:
                             pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -2021,7 +2030,7 @@ def run_signal_engine_for_index(index_name):
                         return
 
                     if target_val is not None and prem >= target_val:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] if is_commodity else pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         if is_commodity:
                             pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -2050,7 +2059,7 @@ def run_signal_engine_for_index(index_name):
                         side = "CE" if "CE" in active else "PE"
                         time_limit = get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data)
                         if elapsed_min >= time_limit:
-                            pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] if is_commodity else pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                            pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                             if is_commodity:
                                 pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                             pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -2075,7 +2084,7 @@ def run_signal_engine_for_index(index_name):
                         prices_spot = list(price_histories[index_name])
                     should_exit, exit_reason = should_exit_market_analysis(index_name, active, prices_spot, ce_prem, pe_prem, greeks_data)
                     if should_exit:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"] if is_commodity else pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         if is_commodity:
                             pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
@@ -2676,6 +2685,7 @@ def on_ws_data(wsapp, message):
                                     lot_size = cfg.get("lot_size", 1)
                                     with _portfolio_state_lock:
                                         portfolio_state[idx]["live_pnl"] = points_diff * multiplier * lot_size * lots
+                                    logger.debug(f"MCX live PnL updated for {idx}: {portfolio_state[idx]['live_pnl']}")
                                 # ---- END LIVE MCX PNL UPDATE ----
 
                             else:
@@ -3149,12 +3159,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.20 – Added /api/signals endpoint, final MCX PnL",
+        "engine": "Hybrid v15.21 – Fixed PnL & Equity signals",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.20-mcx-final"
+        "version": "15.21-pnl-fix"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3185,18 +3195,24 @@ def live_signals():
                 if candle_len >= 10:
                     run_signal_engine_for_index(idx)
 
-    with _market_signal_lock, _portfolio_state_lock:
+    with _market_signal_lock, _portfolio_state_lock, _signal_state_lock, _latest_ticks_lock:
         portfolio_with_trades = {}
         for idx, port in portfolio_state.items():
+            cfg = INDEX_CONFIG.get(idx, {})
+            if not cfg.get("active"):
+                continue
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
             # Add current price info for commodities
-            if INDEX_CONFIG[idx].get("is_commodity"):
-                with _latest_ticks_lock:
-                    raw_price = latest_ticks[idx].get("price", 0.0)
-                    multiplier = INDEX_CONFIG[idx].get("mkt_multiple", 1.0)
-                    portfolio_with_trades[idx]["current_price"] = raw_price * multiplier  # display spot
-                    portfolio_with_trades[idx]["raw_price"] = raw_price
+            if cfg.get("is_commodity"):
+                raw_price = latest_ticks[idx].get("price", 0.0)
+                multiplier = cfg.get("mkt_multiple", 1.0)
+                portfolio_with_trades[idx]["current_price"] = raw_price * multiplier  # display spot
+                portfolio_with_trades[idx]["raw_price"] = raw_price
+            else:
+                portfolio_with_trades[idx]["spot_price"] = latest_ticks[idx].get("spot_price", 0.0)
+                portfolio_with_trades[idx]["ce_price"] = latest_ticks[idx].get("ce_price", 0.0)
+                portfolio_with_trades[idx]["pe_price"] = latest_ticks[idx].get("pe_price", 0.0)
 
         equity_open = is_market_open()
         mcx_open = is_mcx_open()
@@ -3216,7 +3232,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.20-mcx-final"
+            "version": "15.21-pnl-fix"
         })
 
 # ============================================================
@@ -3433,6 +3449,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.20-mcx-final)...")
+    logger.info("🚀 Starting Flask API Server (v15.21-pnl-fix)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
