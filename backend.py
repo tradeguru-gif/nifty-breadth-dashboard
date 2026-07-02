@@ -1474,13 +1474,8 @@ def compute_signal_quality(index_name):
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
     cfg = INDEX_CONFIG.get(index_name, {})
-    if cfg.get("is_commodity"):
-        val = last_known_prices[index_name].get("spot", 0)
-        logger.debug(f"has_complete_data {index_name}: spot={val}")
-        return val > 0
-    return (last_known_prices[index_name].get("spot", 0) > 0 and
-            (last_known_prices[index_name].get("ce", 0) > 0 or
-             last_known_prices[index_name].get("pe", 0) > 0))
+    # For both equity and commodity, only spot is needed to build candles
+    return last_known_prices[index_name].get("spot", 0) > 0
 
 # ----------------------------------------------------------------------
 # PERSISTENCE (unchanged)
