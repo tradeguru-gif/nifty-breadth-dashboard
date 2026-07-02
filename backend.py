@@ -1473,8 +1473,10 @@ def compute_signal_quality(index_name):
 # DATA READINESS CHECK – with debug log
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
-    cfg = INDEX_CONFIG.get(index_name, {})
-    # For both equity and commodity, only spot is needed to build candles
+    """Check if we have enough data to run the signal engine.
+    For both equity and commodity, only spot price is required to build candles.
+    Option prices are only needed for actual trade entry, which is checked later.
+    """
     return last_known_prices[index_name].get("spot", 0) > 0
 
 # ----------------------------------------------------------------------
@@ -1582,6 +1584,32 @@ def send_telegram_alert(msg):
 def apply_transaction_cost(pnl, lots, lot_size):
     cost_per_lot = 50
     return pnl - cost_per_lot * lots
+def update_live_pnl_for_index(index_name, current_price):
+    """Update live PnL for the given index based on current_price (raw)."""
+    cfg = INDEX_CONFIG.get(index_name)
+    if not cfg:
+        return
+    with _signal_state_lock:
+        action = signal_state[index_name]["action"]
+        entry_price = signal_state[index_name]["entry_price"]
+        lots = signal_state[index_name]["lots"]
+    if action == "HOLD" or entry_price <= 0 or lots <= 0:
+        return
+    is_commodity = cfg.get("is_commodity", False)
+    if is_commodity:
+        if "CE" in action or "BUY" in action:
+            points_diff = current_price - entry_price
+        else:
+            points_diff = entry_price - current_price
+        multiplier = cfg.get("mkt_multiple", 1.0)
+        lot_size = cfg.get("lot_size", 1)
+        live_pnl = points_diff * multiplier * lot_size * lots
+    else:
+        # For equity, we need separate ce/pe prices – this function is only for commodities
+        return
+    with _portfolio_state_lock:
+        portfolio_state[index_name]["live_pnl"] = live_pnl
+    logger.debug(f"Updated live_pnl for {index_name}: {live_pnl}")
 
 def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status, grade, atr, vix, exit_reason):
     db_path = get_db_path()
@@ -2858,19 +2886,23 @@ def start_rest_only_mode():
                         try:
                             spot = result.get("spot")
                             if spot and spot > 0:
-                                with _latest_ticks_lock:
-                                    if INDEX_CONFIG[idx].get("is_commodity"):
-                                        latest_ticks[idx]["price"] = spot
-                                    else:
-                                        latest_ticks[idx]["spot_price"] = spot
-                                with _price_histories_lock:
-                                    price_histories[idx].append(spot)
-                                update_candle(idx, spot, 0, time.time())
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["spot"] = spot
-                                    last_known_prices[idx]["timestamp"] = time.time()
-                                last_tick_timestamp = time.time()
-                                logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+with _latest_ticks_lock:
+    if INDEX_CONFIG[idx].get("is_commodity"):
+        latest_ticks[idx]["price"] = spot
+    else:
+        latest_ticks[idx]["spot_price"] = spot
+with _price_histories_lock:
+    price_histories[idx].append(spot)
+update_candle(idx, spot, 0, time.time())
+with _latest_ticks_lock:
+    last_known_prices[idx]["spot"] = spot
+    last_known_prices[idx]["timestamp"] = time.time()
+    
+    # 🔥 ADD THIS LINE
+    update_live_pnl_for_index(idx, spot)   # spot is raw price
+    
+    last_tick_timestamp = time.time()
+    logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
                             if not INDEX_CONFIG[idx].get("is_commodity"):
                                 ce = result.get("ce")
