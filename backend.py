@@ -1,4 +1,4 @@
-# === HYBRID v15.22 – Signal confidence visible every tick, full logging ===
+# === HYBRID v15.12 – MCX REST PRICE OVERRIDE + EXTENDED SYMBOLS ===
 import sys
 import logging
 import os
@@ -63,7 +63,7 @@ DB_PATH = "trading_data.db"
 PAPER_DB_PATH = "paper_trading_data.db" if PAPER_MODE else DB_PATH
 
 # ----------------------------------------------------------------------
-# DATABASE (unchanged)
+# DATABASE
 # ----------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -109,7 +109,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================
-# MONKEY PATCHES – fix SmartAPI WS bugs (unchanged)
+# MONKEY PATCHES – fix SmartAPI WS bugs
 # ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
@@ -164,47 +164,97 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – with correct lot sizes and multipliers
+# INDEX CONFIGURATION – Equity (Indices + Stocks) + MCX
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
+    # ---------- Existing Equity Indices ----------
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"  # new key
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "NIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY", "lot_size": 40, "expiry_weekday": 1, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "MIDCPNIFTY", "lot_size": 75, "expiry_weekday": 3, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
         "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5, "is_commodity": False,
+        "option_instrument_type": "OPTIDX"
     },
-    # ---- MCX Commodities with correct lot sizes ----
+
+    # ---------- NEW Equity Stocks (Options) ----------
+    "RELIANCE": {
+        "token": None,  # spot token fetched later
+        "exchange": "NSE", "symbol": "RELIANCE", "lot_size": 250, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "TCS": {
+        "token": None, "exchange": "NSE", "symbol": "TCS", "lot_size": 25, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "INFY": {
+        "token": None, "exchange": "NSE", "symbol": "INFY", "lot_size": 150, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "HDFC": {
+        "token": None, "exchange": "NSE", "symbol": "HDFC", "lot_size": 100, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+    "ICICIBANK": {
+        "token": None, "exchange": "NSE", "symbol": "ICICIBANK", "lot_size": 25, "expiry_weekday": 4, "active": True,
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
+        "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": False,
+        "option_instrument_type": "OPTSTK"
+    },
+
+    # ---------- Existing MCX Commodities ----------
     "GOLD": {
-        "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 100, "expiry_weekday": None, "active": True,
+        "token": None, "exchange": "MCX", "symbol": "GOLD", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "SILVER", "greeks_enabled": False, "pcr_enabled": False,
@@ -212,7 +262,7 @@ INDEX_CONFIG = {
         "mkt_multiple": 1.0
     },
     "SILVER": {
-        "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 30, "expiry_weekday": None, "active": True,
+        "token": None, "exchange": "MCX", "symbol": "SILVER", "lot_size": 1, "expiry_weekday": None, "active": True,
         "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": "GOLD", "greeks_enabled": False, "pcr_enabled": False,
@@ -225,7 +275,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 100.0
+        "mkt_multiple": 1.0
     },
     "NATURALGAS": {
         "token": None, "exchange": "MCX", "symbol": "NATURALGAS", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -233,7 +283,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.7, "is_commodity": True,
-        "mkt_multiple": 1250.0
+        "mkt_multiple": 1.0
     },
     "COPPER": {
         "token": None, "exchange": "MCX", "symbol": "COPPER", "lot_size": 1, "expiry_weekday": None, "active": True,
@@ -241,16 +291,59 @@ INDEX_CONFIG = {
         "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
-        "mkt_multiple": 100.0
+        "mkt_multiple": 1.0
+    },
+
+    # ---------- NEW MCX Commodities ----------
+    "ZINC": {
+        "token": None, "exchange": "MCX", "symbol": "ZINC", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "LEAD": {
+        "token": None, "exchange": "MCX", "symbol": "LEAD", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "ALUMINIUM": {
+        "token": None, "exchange": "MCX", "symbol": "ALUMINIUM", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "NICKEL": {
+        "token": None, "exchange": "MCX", "symbol": "NICKEL", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
+    },
+    "MENTHAOIL": {
+        "token": None, "exchange": "MCX", "symbol": "MENTHAOIL", "lot_size": 1, "expiry_weekday": None, "active": True,
+        "min_premium": 0, "max_premium": 0, "atm_strike_multiple": 0, "option_exchange": None,
+        "ws_exchange_type": 5, "option_ws_exchange_type": 0, "max_daily_drawdown_pct": 4.0,
+        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
+        "regime_adx_threshold": 25, "regime_atr_threshold": 0.6, "is_commodity": True,
+        "mkt_multiple": 1.0
     }
 }
 
+# Compute token sets (will be updated later)
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
 EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
 INDEX_NAMES = list(INDEX_CONFIG.keys())
 
 # ----------------------------------------------------------------------
-# GLOBAL STATE (unchanged)
+# GLOBAL STATE
 # ----------------------------------------------------------------------
 _latest_ticks_lock = threading.Lock()
 _market_signal_lock = threading.Lock()
@@ -271,7 +364,7 @@ price_histories = {idx: deque(maxlen=5000) for idx in INDEX_NAMES}
 portfolio_state = {idx: {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0} for idx in INDEX_NAMES}
 signal_state = {idx: {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""} for idx in INDEX_NAMES}
 
-market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": "", "action": "HOLD", "confidence": 0} for idx in INDEX_NAMES}
+market_signal = {idx: {"sentiment_score": 50, "signal": "WAITING", "alert_message": "", "entry_price": 0, "stop_loss": 0, "target": 0, "exit_reason": "", "quality_score": 0, "strike_price": 0, "trading_symbol": ""} for idx in INDEX_NAMES}
 
 ce_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
 pe_price_histories = {idx: deque(maxlen=2000) for idx in INDEX_NAMES}
@@ -312,7 +405,7 @@ _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# TIMEFRAME DEFINITIONS (unchanged)
+# TIMEFRAME DEFINITIONS
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min", "8min", "10min", "15min", "20min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300, "8min":480, "10min":600, "15min":900, "20min":1200}
@@ -324,7 +417,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS (unchanged – same as before)
+# INDICATORS
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -441,7 +534,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS (unchanged)
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -631,7 +724,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -835,7 +928,7 @@ def get_scrip_master():
             return _scrip_cache["data"] or []
 
 # ================================================================
-# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with aliases) – ONLY ONE BLOCK
+# ENHANCED MCX FUTURES TOKEN RETRIEVAL (with filtering)
 # ================================================================
 def get_mcx_futures_tokens():
     scrip = get_scrip_master()
@@ -858,14 +951,9 @@ def get_mcx_futures_tokens():
                        f"{df[df['exch_seg']=='MCX']['instrumenttype'].unique()}")
         return
 
-    # Filter out sub-contracts (MINI, PETAL, MICRO, etc.)
-    for excl in ['GUINEA', 'PETAL', 'MINI', 'MICRO', '1000', 'TEN']:
-        mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains(excl, case=False, na=False)]
-
-    # Debug: show COPPER symbols
-    copper_debug = mcx_fut[mcx_fut['symbol'].str.contains('COPPER', case=False, na=False)]
-    logger.info(f"🔍 COPPER symbols found: {copper_debug['symbol'].tolist()}")
-    logger.info(f"🔍 First 10 MCX symbols: {mcx_fut['symbol'].head(10).tolist()}")
+    # Filter out mini/petal/micro contracts by symbol pattern
+    exclude_patterns = ['MINI', 'PETAL', 'MICRO']
+    mcx_fut = mcx_fut[~mcx_fut['symbol'].str.contains('|'.join(exclude_patterns), case=False, na=False)]
 
     mcx_fut = mcx_fut.copy()
     mcx_fut["expiry_date"] = mcx_fut["expiry"].apply(parse_expiry_date)
@@ -875,40 +963,17 @@ def get_mcx_futures_tokens():
         return
 
     today = datetime.now()
-
-    # Alias mapping
-    symbol_aliases = {
-        "GOLD":     ["GOLDM", "GOLD"],
-        "SILVER":   ["SILVERM", "SILVER"],
-        "CRUDEOIL": ["CRUDEOIL", "CRUDEOILM"],
-        "NATURALGAS": ["NATURALGAS", "NATURALGASM"],
-        "COPPER":   ["COPPERM", "COPPER", "COPPERMIC", "COPPERMINI", "COPPER1000", "COPPER25"],
-    }
-
     for idx, cfg in INDEX_CONFIG.items():
         if not cfg.get("active") or not cfg.get("is_commodity"):
             continue
         symbol = cfg["symbol"]
-
-        # Exact match first
+        # Match exact symbol (case-insensitive)
         matching = mcx_fut[mcx_fut["symbol"].str.upper() == symbol.upper()]
-
-        # Try aliases
-        if matching.empty and symbol in symbol_aliases:
-            for alias in symbol_aliases[symbol]:
-                matching = mcx_fut[mcx_fut["symbol"].str.upper() == alias.upper()]
-                if not matching.empty:
-                    logger.info(f"MCX {symbol} matched via alias: {alias}")
-                    break
-
-        # Fallback: startswith or regex
         if matching.empty:
+            # Fallback to startswith
             matching = mcx_fut[mcx_fut["symbol"].str.startswith(symbol, na=False)]
         if matching.empty:
-            matching = mcx_fut[mcx_fut["symbol"].str.contains(f"^{symbol}[A-Z]*$", case=False, na=False, regex=True)]
-
-        if matching.empty:
-            logger.warning(f"MCX symbol '{symbol}' not found after alias/fallback")
+            logger.warning(f"MCX symbol '{symbol}' not found after filtering")
             continue
 
         future_sorted = matching.sort_values("expiry_date")
@@ -921,6 +986,40 @@ def get_mcx_futures_tokens():
     INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
     EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
     logger.info(f"Updated token sets: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
+
+# ================================================================
+# NEW: Fetch equity spot token for stock symbols
+# ================================================================
+def get_equity_spot_tokens():
+    """Fetch spot tokens for all equity (non-commodity) symbols that have token=None."""
+    scrip = get_scrip_master()
+    if not scrip:
+        logger.warning("Scrip master not available for equity spot token fetch")
+        return
+    df = pd.DataFrame(scrip)
+    for idx, cfg in INDEX_CONFIG.items():
+        if cfg.get("is_commodity") or not cfg.get("active"):
+            continue
+        if cfg.get("token") is not None:
+            continue  # already have token
+        symbol = cfg["symbol"]
+        exchange = cfg["exchange"]
+        # Find equity segment for the same symbol
+        equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"] == "EQ")]
+        if equity_rows.empty:
+            # try with different instrumenttype
+            equity_rows = df[(df["symbol"] == symbol) & (df["exch_seg"] == exchange) & (df["instrumenttype"].str.contains("EQ", case=False))]
+        if equity_rows.empty:
+            logger.warning(f"Equity spot token not found for {symbol}")
+            continue
+        token = str(equity_rows.iloc[0]["token"])
+        cfg["token"] = token
+        logger.info(f"Equity spot token for {symbol}: {token}")
+    # Update token sets
+    global INDEX_TOKEN_SET, EQUITY_TOKEN_SET
+    INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
+    EQUITY_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if not cfg.get("is_commodity") and cfg.get("token")}
+    logger.info(f"Updated token sets after equity fetch: INDEX={INDEX_TOKEN_SET}, EQUITY={EQUITY_TOKEN_SET}")
 
 # ================================================================
 
@@ -940,7 +1039,7 @@ def get_next_expiry_date(index_name):
     return today + timedelta(days=days_ahead)
 
 # ================================================================
-# get_current_atm_tokens with strike format detection
+# FIXED: get_current_atm_tokens with support for OPTIDX and OPTSTK
 # ================================================================
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
@@ -971,20 +1070,22 @@ def get_current_atm_tokens(index_name):
 
     try:
         df = pd.DataFrame(scrip)
+        # Determine instrument type: "OPTIDX" or "OPTSTK"
+        instr_type = config.get("option_instrument_type", "OPTIDX")
         opts = df[
             (df["name"] == config["symbol"]) &
-            (df["instrumenttype"] == "OPTIDX") &
+            (df["instrumenttype"] == instr_type) &
             (df["exch_seg"] == config["option_exchange"])
         ]
         if opts.empty:
-            logger.warning(f"{index_name}: No OPTIDX found")
+            logger.warning(f"{index_name}: No {instr_type} found for {config['symbol']}")
             INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
             return None, None
 
         opts = opts.copy()
         opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
         opts = opts.dropna(subset=["expiry_date"])
-        # Detect strike format
+        # Detect strike format: if values are > 10000, they are likely in paise; else in rupees.
         sample_strikes = opts["strike"].dropna().astype(float).head(10).tolist()
         logger.info(f"🔍 {index_name} sample strikes: {sample_strikes}")
         if sample_strikes and max(sample_strikes) > 10000:
@@ -1045,16 +1146,20 @@ def get_current_atm_tokens(index_name):
         return None, None
 
 # ================================================================
-# refresh_all_tokens
+# refresh_all_tokens now calls get_mcx_futures_tokens() and get_equity_spot_tokens()
 # ================================================================
 def refresh_all_tokens():
+    # First fetch equity spot tokens for stocks (and other equity) that need them
+    get_equity_spot_tokens()
+    # Then fetch option tokens
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
             if INDEX_CONFIG[idx].get("is_commodity"):
                 continue
             get_current_atm_tokens(idx)
+    # Finally fetch MCX futures tokens
     get_mcx_futures_tokens()
-    logger.info("All tokens refreshed (equity options + MCX futures)")
+    logger.info("All tokens refreshed (equity spot, equity options, MCX futures)")
 
 # ============================================================
 # MARKET HOURS
@@ -1068,9 +1173,7 @@ def is_market_open():
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 30)
-    is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
-    logger.debug(f"Market open status: {is_open}")
-    return is_open
+    return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_mcx_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
@@ -1081,9 +1184,7 @@ def is_mcx_open():
         return False
     open_time = dt_time(10, 0)
     close_time = dt_time(23, 30)
-    is_open = open_time <= current <= close_time
-    logger.debug(f"MCX open status: {is_open}")
-    return is_open
+    return open_time <= current <= close_time
 
 def get_market_status_label():
     equity_open = is_market_open()
@@ -1102,7 +1203,7 @@ def is_index_market_open(idx):
     return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ============================================================
-# CANDLE UPDATE (unchanged)
+# CANDLE UPDATE
 # ============================================================
 def update_candle(idx, price, cumulative_volume, timestamp):
     if price <= 0:
@@ -1142,7 +1243,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["volume"] += tick_vol
 
 # ============================================================
-# SENTIMENT, REGIME, CONFIRMATION (unchanged)
+# SENTIMENT, REGIME, CONFIRMATION
 # ============================================================
 def compute_sentiment(index_name):
     with _candle_histories_lock:
@@ -1331,7 +1432,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ============================================================
-# get_signal_from_sentiment (unchanged)
+# get_signal_from_sentiment
 # ============================================================
 def get_signal_from_sentiment(index_name, sentiment, adx=None):
     logger.info(f"📢 get_signal_from_sentiment called for {index_name}, sentiment={sentiment}")
@@ -1441,7 +1542,7 @@ def get_trend_for_timeframe(index_name, tf):
     return "NEUTRAL"
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE (unchanged)
+# SIGNAL QUALITY SCORE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1470,17 +1571,18 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK – with debug log
+# DATA READINESS CHECK
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
-    """Check if we have enough data to run the signal engine.
-    For both equity and commodity, only spot price is required to build candles.
-    Option prices are only needed for actual trade entry, which is checked later.
-    """
-    return last_known_prices[index_name].get("spot", 0) > 0
+    cfg = INDEX_CONFIG.get(index_name, {})
+    if cfg.get("is_commodity"):
+        return last_known_prices[index_name].get("spot", 0) > 0
+    return (last_known_prices[index_name].get("spot", 0) > 0 and
+            (last_known_prices[index_name].get("ce", 0) > 0 or
+             last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE (unchanged)
+# PERSISTENCE
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1515,13 +1617,6 @@ def load_portfolio_state():
                         last_trade_date[idx] = row[8]
                     if len(row) >= 10 and row[9] is not None:
                         daily_trade_count[idx] = int(row[9])
-                    logger.info(f"Loaded portfolio state for {idx}: equity={portfolio_state[idx]['equity']}, action={signal_state[idx]['action']}")
-                else:
-                    # Initialize with defaults if no row found
-                    portfolio_state[idx] = {"equity": 100000.0, "open_positions": 0, "daily_pnl": 0.0, "total_pnl": 0.0, "live_pnl": 0.0}
-                    signal_state[idx] = {"action": "HOLD", "entry_price": 0.0, "stop_loss": 0.0, "target": 0.0, "lots": 0, "entry_time": 0.0, "highest": 0.0, "cooldown": 0, "confidence": 0, "exit_reason": ""}
-                    daily_trade_count[idx] = 0
-                    last_trade_date[idx] = ""
         finally:
             conn.close()
         logger.info(f"Persistent state loaded from {db_path}")
@@ -1544,7 +1639,6 @@ def save_portfolio_state(idx):
              daily_trade_count.get(idx, 0))
         )
         conn.commit()
-        logger.debug(f"Saved portfolio state for {idx}: equity={portfolio_state[idx]['equity']}")
     finally:
         conn.close()
 
@@ -1585,33 +1679,6 @@ def apply_transaction_cost(pnl, lots, lot_size):
     cost_per_lot = 50
     return pnl - cost_per_lot * lots
 
-def update_live_pnl_for_index(index_name, current_price):
-    """Update live PnL for the given index based on current_price (raw)."""
-    cfg = INDEX_CONFIG.get(index_name)
-    if not cfg:
-        return
-    with _signal_state_lock:
-        action = signal_state[index_name]["action"]
-        entry_price = signal_state[index_name]["entry_price"]
-        lots = signal_state[index_name]["lots"]
-    if action == "HOLD" or entry_price <= 0 or lots <= 0:
-        return
-    is_commodity = cfg.get("is_commodity", False)
-    if is_commodity:
-        if "CE" in action or "BUY" in action:
-            points_diff = current_price - entry_price
-        else:
-            points_diff = entry_price - current_price
-        multiplier = cfg.get("mkt_multiple", 1.0)
-        lot_size = cfg.get("lot_size", 1)
-        live_pnl = points_diff * multiplier * lot_size * lots
-    else:
-        # For equity, we need separate ce/pe prices – this function is only for commodities
-        return
-    with _portfolio_state_lock:
-        portfolio_state[index_name]["live_pnl"] = live_pnl
-    logger.debug(f"Updated live_pnl for {index_name}: {live_pnl}")
-
 def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status, grade, atr, vix, exit_reason):
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -1626,7 +1693,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1687,7 +1754,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ----------------------------------------------------------------------
-# REST HELPER FUNCTIONS (unchanged)
+# REST HELPER FUNCTIONS
 # ----------------------------------------------------------------------
 def get_vix_ltp():
     return None
@@ -1738,18 +1805,8 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – with MCX multiplier + ATR fallback
+# MAIN SIGNAL ENGINE – with MCX REST price override
 # ============================================================
-def run_all_signals():
-    logger.info("🔄 run_all_signals called")
-    for idx in INDEX_NAMES:
-        if INDEX_CONFIG[idx].get("active"):
-            logger.info(f"🔄 run_all_signals: checking {idx}")
-            try:
-                run_signal_engine_for_index(idx)
-            except Exception as e:
-                logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
-
 def run_signal_engine_for_index(index_name):
     logger.info(f"🔍 ENGINE RUNNING for {index_name}")
     try:
@@ -1776,7 +1833,6 @@ def run_signal_engine_for_index(index_name):
         if not is_commodity:
             tokens = INDEX_TOKENS.get(index_name, {})
             if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                logger.warning(f"{index_name} option tokens missing, cannot run signal")
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = "Option tokens not loaded"
                     market_signal[index_name]["signal"] = "WAITING"
@@ -1786,26 +1842,7 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        min_candles = 3 if is_commodity else 10
-        if candle_len < min_candles and is_commodity:
-            # Fallback: try to fetch price via REST and manually add candle
-            logger.info(f"🔄 {index_name} candle count low ({candle_len}), attempting REST fallback...")
-            rest_spot = get_index_spot(index_name)
-            if rest_spot and rest_spot > 0:
-                now = time.time()
-                with _latest_ticks_lock:
-                    latest_ticks[index_name]["price"] = rest_spot
-                    last_known_prices[index_name]["spot"] = rest_spot
-                    last_known_prices[index_name]["timestamp"] = now
-                with _price_histories_lock:
-                    price_histories[index_name].append(rest_spot)
-                update_candle(index_name, rest_spot, 0, now)
-                with _candle_histories_lock:
-                    candle_len = len(candle_histories[index_name]["1min"])
-                logger.info(f"✅ {index_name} after REST fallback: candle_len={candle_len}")
-            else:
-                logger.warning(f"⚠️ {index_name} REST fallback failed, still waiting for ticks.")
-
+        min_candles = 5 if is_commodity else 10
         if candle_len < min_candles:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/{min_candles})"
@@ -1823,21 +1860,28 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
 
-        # ---- Get latest price with MCX multiplier ----
+        # ---- Get spot price ----
         with _latest_ticks_lock:
             if index_name not in latest_ticks:
                 latest_ticks[index_name] = {}
 
             if is_commodity:
-                raw_ws_price = latest_ticks[index_name].get("price", 0.0) or 0.0
-                multiplier = config.get("mkt_multiple", 1.0)
-                # Display spot is raw * multiplier (for reference)
-                spot = raw_ws_price * multiplier
-                logger.info(f"📈 {index_name} raw WS price = {raw_ws_price}, multiplier = {multiplier}, display spot = {spot}")
-                latest_ticks[index_name]["price"] = spot
-                # For commodities, prem is the raw price (rupees) for entry and live PnL
-                ce_prem = raw_ws_price
-                pe_prem = raw_ws_price
+                # Use REST API to get correct LTP for commodities
+                rest_spot = get_index_spot(index_name)
+                if rest_spot and rest_spot > 0:
+                    spot = rest_spot
+                    # Update latest_ticks with correct price
+                    with _latest_ticks_lock:
+                        latest_ticks[index_name]["price"] = spot
+                    logger.info(f"📈 {index_name} spot (REST) = {spot}")
+                else:
+                    # Fallback to WebSocket price
+                    spot = latest_ticks[index_name].get("price", 0.0) or 0.0
+                    logger.info(f"📈 {index_name} spot (WS fallback) = {spot}")
+
+                # Set other variables
+                ce_prem = spot
+                pe_prem = spot
                 ce_vol = latest_ticks[index_name].get("volume", 0) or 0
                 pe_vol = ce_vol
                 ce_oi = 0
@@ -1866,7 +1910,7 @@ def run_signal_engine_for_index(index_name):
             return
 
         if is_commodity:
-            prem = raw_ws_price   # entry price in rupees (raw)
+            prem = spot
             if prem <= 0.0:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Invalid commodity price {prem}"
@@ -1885,7 +1929,7 @@ def run_signal_engine_for_index(index_name):
                 logger.info(f"📢 SET SPREAD BLOCK for {index_name}")
                 return
 
-        # ---- Volume profile ----
+        # Rest of the engine (VP, correlation, greeks, sentiment, etc.) unchanged...
         vp_engine = volume_profile_engines[index_name]
         if is_commodity:
             vp_engine.update(spot, ce_vol, option_type=None)
@@ -1894,7 +1938,6 @@ def run_signal_engine_for_index(index_name):
             vp_engine.update(ce_prem, ce_vol, option_type="CE")
             vp_engine.update(pe_prem, pe_vol, option_type="PE")
 
-        # ---- Correlation ----
         if index_name == "NIFTY":
             nifty_price_series.append(spot)
         elif index_name == "BANKNIFTY":
@@ -1902,23 +1945,18 @@ def run_signal_engine_for_index(index_name):
         if len(nifty_price_series) > 0 and len(banknifty_price_series) > 0:
             correlation_filter.update(list(nifty_price_series)[-1], list(banknifty_price_series)[-1])
 
-        # ---- Greeks ----
         greeks_data = None
         if not is_commodity and INDEX_CONFIG[index_name].get("greeks_enabled"):
             greeks_data = get_option_greeks(index_name)
 
-        # ---- Sentiment & signal ----
         sentiment = compute_sentiment(index_name)
         adx = get_current_adx(index_name)
         action, confidence = get_signal_from_sentiment(index_name, sentiment, adx)
         logger.info(f"🎯 {index_name} sentiment={sentiment}, action={action}, confidence={confidence}")
         sentiment_label = get_sentiment_label(sentiment)
 
-        # Always update market_signal with current sentiment and action/confidence
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
-            market_signal[index_name]["action"] = action
-            market_signal[index_name]["confidence"] = confidence
 
         regime = detect_regime(index_name)
         if regime == "RANGING" and not is_commodity:
@@ -1928,7 +1966,7 @@ def run_signal_engine_for_index(index_name):
             logger.info(f"📢 SET RANGING for {index_name}")
             return
 
-        # ---- Drawdown & safety ----
+        # Drawdown and safety checks (unchanged)
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1952,8 +1990,6 @@ def run_signal_engine_for_index(index_name):
                         if exit_prem > 0:
                             pnl = exit_prem - signal_state[index_name]["entry_price"]
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            if is_commodity:
-                                pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
                             pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1979,37 +2015,23 @@ def run_signal_engine_for_index(index_name):
                 safety_state[index_name]["circuit_breaker"] = False
                 safety_state[index_name]["consecutive_sl"] = 0
 
-        # ---- Existing position management ----
+        # Existing position management (unchanged)
         with _signal_state_lock:
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
             active = current_action
             if is_commodity:
-                raw_current = latest_ticks[index_name].get("price", 0.0) or 0.0
-                prem = raw_current  # use raw for PnL
-                pnl = prem - signal_state[index_name]["entry_price"]  # entry_price is raw
-                pnl_points = pnl
+                prem = spot
             else:
                 prem = ce_prem if "CE" in active else pe_prem
-                pnl = prem - signal_state[index_name]["entry_price"]
-                pnl_points = pnl
-
             if prem <= 0:
                 prem = last_known_prices[index_name].get("ce" if "CE" in active else "pe", 0) or 0.0
             if prem > 0:
                 with _signal_state_lock:
-                    if is_commodity:
-                        if "CE" in active or "BUY" in active:
-                            pnl_points = prem - signal_state[index_name]["entry_price"]
-                        else:
-                            pnl_points = signal_state[index_name]["entry_price"] - prem
-                        live_pnl = pnl_points * config.get("mkt_multiple", 1.0) * config.get("lot_size", 1) * signal_state[index_name]["lots"]
-                    else:
-                        live_pnl = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                    pnl = prem - signal_state[index_name]["entry_price"]
                     with _portfolio_state_lock:
-                        portfolio_state[index_name]["live_pnl"] = live_pnl
+                        portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
-                    # Trailing stop
                     if prem > signal_state[index_name].get("highest", 0):
                         signal_state[index_name]["highest"] = prem
                         with _candle_histories_lock:
@@ -2027,9 +2049,7 @@ def run_signal_engine_for_index(index_name):
                     target_val = signal_state[index_name].get("target")
 
                     if stop_loss_val is not None and prem <= stop_loss_val:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        if is_commodity:
-                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -2039,7 +2059,7 @@ def run_signal_engine_for_index(index_name):
                         save_portfolio_state(index_name)
                         entry_price = signal_state[index_name]["entry_price"]
                         if entry_price > 0:
-                            pnl_pct = (prem - entry_price) / entry_price if not is_commodity else pnl_points / entry_price
+                            pnl_pct = pnl / entry_price
                             kelly_trackers[index_name].update(pnl_pct)
                         safety_state[index_name]["consecutive_sl"] += 1
                         if safety_state[index_name]["consecutive_sl"] >= 3:
@@ -2054,9 +2074,7 @@ def run_signal_engine_for_index(index_name):
                         return
 
                     if target_val is not None and prem >= target_val:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        if is_commodity:
-                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -2066,7 +2084,7 @@ def run_signal_engine_for_index(index_name):
                         save_portfolio_state(index_name)
                         entry_price = signal_state[index_name]["entry_price"]
                         if entry_price > 0:
-                            pnl_pct = (prem - entry_price) / entry_price if not is_commodity else pnl_points / entry_price
+                            pnl_pct = pnl / entry_price
                             kelly_trackers[index_name].update(pnl_pct)
                         safety_state[index_name]["consecutive_sl"] = 0
                         log_trade(index_name, active, signal_state[index_name]["entry_price"], prem, pnl_total,
@@ -2083,9 +2101,7 @@ def run_signal_engine_for_index(index_name):
                         side = "CE" if "CE" in active else "PE"
                         time_limit = get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data)
                         if elapsed_min >= time_limit:
-                            pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            if is_commodity:
-                                pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
+                            pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                             pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                             with _portfolio_state_lock:
                                 portfolio_state[index_name]["equity"] += pnl_total
@@ -2095,8 +2111,7 @@ def run_signal_engine_for_index(index_name):
                             save_portfolio_state(index_name)
                             entry_price = signal_state[index_name]["entry_price"]
                             if entry_price > 0:
-                                pnl_pct = (prem - entry_price) / entry_price if not is_commodity else pnl_points / entry_price
-                                kelly_trackers[index_name].update(pnl_pct)
+                                kelly_trackers[index_name].update(pnl / entry_price)
                             log_trade(index_name, active, signal_state[index_name]["entry_price"], prem, pnl_total,
                                       pnl_total / portfolio_state[index_name]["equity"] * 100, "TIME_EXIT",
                                       active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], f"TIME_EXIT_{time_limit}m")
@@ -2108,9 +2123,7 @@ def run_signal_engine_for_index(index_name):
                         prices_spot = list(price_histories[index_name])
                     should_exit, exit_reason = should_exit_market_analysis(index_name, active, prices_spot, ce_prem, pe_prem, greeks_data)
                     if should_exit:
-                        pnl_total = pnl_points * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        if is_commodity:
-                            pnl_total = pnl_total * config.get("mkt_multiple", 1.0)
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
                         pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
@@ -2120,8 +2133,7 @@ def run_signal_engine_for_index(index_name):
                         save_portfolio_state(index_name)
                         entry_price = signal_state[index_name]["entry_price"]
                         if entry_price > 0:
-                            pnl_pct = (prem - entry_price) / entry_price if not is_commodity else pnl_points / entry_price
-                            kelly_trackers[index_name].update(pnl_pct)
+                            kelly_trackers[index_name].update(pnl / entry_price)
                         log_trade(index_name, active, signal_state[index_name]["entry_price"], prem, pnl_total,
                                   pnl_total / portfolio_state[index_name]["equity"] * 100, "MARKET_EXIT",
                                   active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], exit_reason)
@@ -2196,7 +2208,7 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "ACTIVE"
             return
 
-        # ---- New entry logic ----
+        # --- New entry logic ---
         with _signal_state_lock:
             if now < signal_state[index_name]["cooldown"]:
                 remaining = int(signal_state[index_name]["cooldown"] - now)
@@ -2243,7 +2255,7 @@ def run_signal_engine_for_index(index_name):
             return
 
         if is_commodity:
-            prem = raw_ws_price  # entry price in rupees
+            prem = spot
         else:
             prem = ce_prem if side == "CE" else pe_prem
 
@@ -2324,7 +2336,7 @@ def run_signal_engine_for_index(index_name):
                     logger.info(f"📢 SET EXTREME PCR for {index_name}")
                     return
 
-        # ==== beta_adj ====
+        # ==== beta_adj defined here ====
         beta_adj = 1.0
         if not is_commodity:
             pair = INDEX_CONFIG[index_name].get("correlation_pair")
@@ -2431,12 +2443,6 @@ def run_signal_engine_for_index(index_name):
             lows = [c["low"] for c in candles]
             closes = [c["close"] for c in candles]
         atr = calculate_atr(highs, lows, closes, 14)
-
-        # === FIX: If ATR is zero or very small, use a default based on price ===
-        if atr <= 0.01 and prem > 0:
-            atr = prem * 0.005  # 0.5% of price as fallback ATR
-            logger.warning(f"{index_name}: ATR was zero, using fallback {atr:.2f}")
-
         if "STRONG" in action:
             sl_pct = 0.45
             target_mult = 3.5
@@ -2464,10 +2470,6 @@ def run_signal_engine_for_index(index_name):
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
         lots = max(1, min(5, lots))
 
-        # ---- DEBUG MCX ENTRY ----
-        if is_commodity:
-            logger.info(f"MCX ENTRY {index_name}: raw_ws_price={raw_ws_price}, multiplier={multiplier}, spot={spot}, prem={prem}")
-
         with _signal_state_lock:
             signal_state[index_name].update({
                 "action": action,
@@ -2477,8 +2479,7 @@ def run_signal_engine_for_index(index_name):
                 "lots": lots,
                 "entry_time": now,
                 "highest": prem,
-                "cooldown": 0,
-                "confidence": confidence
+                "cooldown": 0
             })
             daily_trade_count[index_name] += 1
 
@@ -2510,17 +2511,23 @@ def run_signal_engine_for_index(index_name):
                 "exit_reason": "",
                 "quality_score": compute_signal_quality(index_name),
                 "strike_price": atm_strike,
-                "trading_symbol": trading_symbol,
-                "action": action,
-                "confidence": confidence
+                "trading_symbol": trading_symbol
             })
         logger.info(f"📢 SET SIGNAL for {index_name}: action={action}")
 
     except Exception as e:
         logger.error(f"Signal error {index_name}: {e}\n{traceback.format_exc()}")
 
+def run_all_signals():
+    for idx in INDEX_NAMES:
+        if INDEX_CONFIG[idx].get("active"):
+            try:
+                run_signal_engine_for_index(idx)
+            except Exception as e:
+                logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
+
 # ============================================================
-# WEBSOCKET + WATCHDOGS – with live MCX PnL update on each tick
+# WEBSOCKET + WATCHDOGS – extended to include stock spot tokens
 # ============================================================
 ws_running = False
 sws = None
@@ -2538,20 +2545,19 @@ def on_ws_open(wsapp):
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
     token_list = []
-    # MCX subscription check
+    # Subscribe to spot tokens for all equity (indices and stocks)
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active") and not cfg.get("is_commodity"):
             exch_type = int(cfg["ws_exchange_type"])
-            token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
-        if cfg.get("active") and cfg.get("is_commodity"):
             token = cfg.get("token")
             if token:
-                exch_type = int(cfg["ws_exchange_type"])
                 token_list.append({"exchangeType": exch_type, "tokens": [token]})
-                logger.info(f"WS Subscribe: {idx} token={token}")
-            else:
-                logger.warning(f"WS Skip: {idx} has no token yet")
+        # For commodities, also subscribe to their futures tokens
+        if cfg.get("active") and cfg.get("is_commodity") and cfg.get("token"):
+            exch_type = int(cfg["ws_exchange_type"])
+            token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
 
+    # Subscribe to option tokens for all non-commodity symbols
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active") or INDEX_CONFIG[idx].get("is_commodity"):
             continue
@@ -2562,20 +2568,21 @@ def on_ws_open(wsapp):
                 "tokens": [tokens["ce_token"], tokens["pe_token"]]
             })
 
+    # VIX token
     token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
     logger.info(f"Subscribing to token_list: {token_list}")
     if token_list and sws:
         try:
-            correlation_id = "hybrid_bot_v2"
-            mode = 2  # SnapQuote for continuous updates
+            correlation_id = "hybrid_bot"
+            mode = 1
             response = sws.subscribe(correlation_id, mode, token_list)
             logger.info(f"Subscription response: {response}")
             if response and isinstance(response, dict) and not response.get("status", True):
                 logger.error(f"Subscription failed: {response}")
             else:
                 total = sum(len(g["tokens"]) for g in token_list)
-                logger.info(f"Successfully subscribed to {total} tokens with mode={mode}")
+                logger.info(f"Successfully subscribed to {total} tokens")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
 
@@ -2652,10 +2659,10 @@ def on_ws_data(wsapp, message):
                 if ltp > 10000 and token in EQUITY_TOKEN_SET:
                     ltp = ltp / 100.0
 
-                # MCX: divide by 100 (paise to rupees) – will be multiplied later in engine
+                # MCX: divide by 100 (paise to rupees) but note that we will override with REST later
                 is_mcx = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    if cfg.get("is_commodity") and cfg.get("token") and str(cfg["token"]) == token:
+                    if cfg.get("is_commodity") and cfg.get("token") == token:
                         is_mcx = True
                         break
                 if is_mcx and ltp > 0:
@@ -2669,50 +2676,24 @@ def on_ws_data(wsapp, message):
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-                # ---- Spot matching with enhanced debug ----
+                # ---- Spot matching ----
                 spot_matched = False
                 for idx, cfg in INDEX_CONFIG.items():
-                    config_token = cfg.get("token")
-                    if config_token is None:
-                        continue
-                    if str(config_token) == token:
+                    if cfg.get("token") == token:
                         if ltp > 0:
-                            logger.debug(f"✅ Spot match: {idx} token={config_token}, ltp={ltp}")
                             if cfg.get("is_commodity"):
                                 with _latest_ticks_lock:
-                                    # store raw ltp (in rupees) in price field for signal engine to use
                                     latest_ticks[idx]["price"] = ltp
                                     latest_ticks[idx]["volume"] = vol
                                     latest_ticks[idx]["bid"] = bid
                                     latest_ticks[idx]["ask"] = ask
                                 with _price_histories_lock:
                                     price_histories[idx].append(ltp)
-                                # update candles with raw price (not multiplied)
                                 update_candle(idx, ltp, vol, time.time())
                                 last_tick_timestamp = time.time()
-                                # ---- DEBUG MCX TICK ----
-                                logger.info(f"MCX TICK {idx}: raw_ltp={ltp}, spot_after_multiplier={ltp * cfg.get('mkt_multiple', 1.0)}")
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = ltp
                                     last_known_prices[idx]["timestamp"] = time.time()
-
-                                # ---- LIVE MCX PNL UPDATE ON EACH TICK ----
-                                with _signal_state_lock:
-                                    current_action = signal_state[idx]["action"]
-                                    entry_price = signal_state[idx]["entry_price"]
-                                    lots = signal_state[idx]["lots"]
-                                if current_action != "HOLD" and entry_price > 0:
-                                    if "CE" in current_action or "BUY" in current_action:
-                                        points_diff = ltp - entry_price
-                                    else:
-                                        points_diff = entry_price - ltp
-                                    multiplier = cfg.get("mkt_multiple", 1.0)
-                                    lot_size = cfg.get("lot_size", 1)
-                                    with _portfolio_state_lock:
-                                        portfolio_state[idx]["live_pnl"] = points_diff * multiplier * lot_size * lots
-                                    logger.debug(f"MCX live PnL updated for {idx}: {portfolio_state[idx]['live_pnl']}")
-                                # ---- END LIVE MCX PNL UPDATE ----
-
                             else:
                                 with _latest_ticks_lock:
                                     latest_ticks[idx]["spot_price"] = ltp
@@ -2790,19 +2771,33 @@ def on_ws_data(wsapp, message):
     except Exception as e:
         logger.error(f"Unhandled exception in on_ws_data: {e}")
 
-# ---- Watchdog: only logs, does not force reconnect ----
 def tick_watchdog():
     global ws_running, tick_counter, last_tick_timestamp, sws
     last_count = 0
     while True:
         time.sleep(10)
         if ws_running:
-            if time.time() - last_tick_timestamp > 120:
-                logger.warning("No ticks for 120s – but not forcing reconnect (let WS handle it).")
+            if time.time() - last_tick_timestamp > 60:
+                logger.warning("No ticks for 60s - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
+            elif tick_counter == last_count and tick_counter > 0 and time.time() - last_tick_timestamp > 45:
+                logger.warning("Tick counter stalled - forcing reconnect")
+                with _ws_connect_lock:
+                    ws_running = False
+                if sws:
+                    try:
+                        sws.close_connection()
+                    except:
+                        pass
             else:
                 last_count = tick_counter
 
-# ---- WS watchdog: checks heartbeats and data age ----
 def ws_watchdog():
     global ws_running, last_heartbeat, last_tick_timestamp, sws
     while True:
@@ -2811,8 +2806,8 @@ def ws_watchdog():
         with _ws_connect_lock:
             is_running = ws_running
         if is_running:
-            if (now - last_heartbeat > 30) or (now - last_tick_timestamp > 120):
-                logger.warning(f"Data stall – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s – closing WS")
+            if (now - last_heartbeat > 25) or (now - last_tick_timestamp > 60):
+                logger.warning(f"Data starvation – heartbeat={now-last_heartbeat:.1f}s, last_tick={now-last_tick_timestamp:.1f}s - forcing reconnect")
                 with _ws_connect_lock:
                     ws_running = False
                 if sws:
@@ -2821,155 +2816,6 @@ def ws_watchdog():
                     except Exception:
                         pass
 
-# ----------------------------------------------------------------------
-# REST FALLBACK – now based on tick age
-# ----------------------------------------------------------------------
-def fetch_asset_data(idx):
-    results = {"index": idx, "spot": None, "ce": None, "pe": None}
-    try:
-        spot = get_index_spot(idx)
-        if spot:
-            results["spot"] = spot
-            if not INDEX_CONFIG[idx].get("is_commodity"):
-                tokens = INDEX_TOKENS.get(idx, {})
-                if tokens.get("ce_token"):
-                    results["ce"] = get_option_quote(idx, "CE")
-                if tokens.get("pe_token"):
-                    results["pe"] = get_option_quote(idx, "PE")
-    except Exception as e:
-        logger.error(f"Fetch error {idx}: {e}")
-    return results
-
-def start_rest_only_mode():
-    global last_rest_fetch, last_tick_timestamp
-    logger.info("Starting REST fallback (concurrent fetch mode)")
-    cycle_count = 0
-    while True:
-        try:
-            # If we have recent ticks, sleep longer
-            with _ws_connect_lock:
-                if ws_running and (time.time() - last_tick_timestamp < 15):
-                    logger.debug(f"REST cycle {cycle_count}: WS is alive and recent tick, sleeping 30s")
-                    time.sleep(30)
-                    continue
-
-            cycle_count += 1
-            try:
-                assets_to_fetch = []
-                for idx in INDEX_NAMES:
-                    cfg = INDEX_CONFIG[idx]
-                    if not cfg.get("active"):
-                        continue
-                    is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
-                    if is_open:
-                        assets_to_fetch.append(idx)
-
-                if not assets_to_fetch:
-                    logger.debug("REST: No markets open, sleeping 30s")
-                    time.sleep(30)
-                    continue
-
-                for idx in assets_to_fetch:
-                    if not INDEX_CONFIG[idx].get("is_commodity"):
-                        tokens = INDEX_TOKENS.get(idx, {})
-                        if not tokens.get("ce_token") or not tokens.get("pe_token"):
-                            logger.warning(f"Tokens missing for {idx}, retrying...")
-                            get_current_atm_tokens(idx)
-
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
-                    for future in as_completed(futures):
-                        try:
-                            result = future.result()
-                        except Exception as e:
-                            logger.error(f"Future for {futures[future]} failed: {e}")
-                            continue
-                        idx = result["index"]
-                        try:
-                            spot = result.get("spot")
-                            if spot and spot > 0:
-                                with _latest_ticks_lock:
-                                    if INDEX_CONFIG[idx].get("is_commodity"):
-                                        latest_ticks[idx]["price"] = spot
-                                    else:
-                                        latest_ticks[idx]["spot_price"] = spot
-                                with _price_histories_lock:
-                                    price_histories[idx].append(spot)
-                                update_candle(idx, spot, 0, time.time())
-                                with _latest_ticks_lock:
-                                    last_known_prices[idx]["spot"] = spot
-                                    last_known_prices[idx]["timestamp"] = time.time()
-                                    # 🔥 ADD THIS LINE – update live PnL for MCX
-                                    update_live_pnl_for_index(idx, spot)   # spot is raw price
-                                    last_tick_timestamp = time.time()
-                                    logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
-
-                            if not INDEX_CONFIG[idx].get("is_commodity"):
-                                ce = result.get("ce")
-                                pe = result.get("pe")
-                                if ce:
-                                    with _latest_ticks_lock:
-                                        latest_ticks[idx]["ce_price"] = ce["ltp"]
-                                        latest_ticks[idx]["ce_volume"] = ce["volume"]
-                                        latest_ticks[idx]["ce_oi"] = ce["oi"]
-                                        latest_ticks[idx]["ce_bid"] = ce["bid"]
-                                        latest_ticks[idx]["ce_ask"] = ce["ask"]
-                                    with _latest_ticks_lock:
-                                        last_known_prices[idx]["ce"] = ce["ltp"]
-                                    with _ce_price_histories_lock:
-                                        ce_price_histories[idx].append(ce["ltp"])
-                                    last_tick_timestamp = time.time()
-                                    logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
-                                else:
-                                    logger.warning(f"REST: {idx} CE quote fetch FAILED")
-                                if pe:
-                                    with _latest_ticks_lock:
-                                        latest_ticks[idx]["pe_price"] = pe["ltp"]
-                                        latest_ticks[idx]["pe_volume"] = pe["volume"]
-                                        latest_ticks[idx]["pe_oi"] = pe["oi"]
-                                        latest_ticks[idx]["pe_bid"] = pe["bid"]
-                                        latest_ticks[idx]["pe_ask"] = pe["ask"]
-                                    with _latest_ticks_lock:
-                                        last_known_prices[idx]["pe"] = pe["ltp"]
-                                    with _pe_price_histories_lock:
-                                        pe_price_histories[idx].append(pe["ltp"])
-                                    last_tick_timestamp = time.time()
-                                    logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
-                                else:
-                                    logger.warning(f"REST: {idx} PE quote fetch FAILED")
-                        except Exception as e:
-                            logger.error(f"Error processing REST result for {idx}: {e}")
-
-                try:
-                    vix = get_vix_ltp()
-                    if vix:
-                        with _latest_ticks_lock:
-                            latest_ticks["VIX"]["vix"] = vix
-                        vix_history.append(vix)
-                except Exception as e:
-                    logger.debug(f"VIX REST fetch error: {e}")
-
-                last_rest_fetch = time.time()
-
-                ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
-                if ready_indices:
-                    run_all_signals()
-
-                # Short sleep before next cycle if WS is still not delivering ticks
-                time.sleep(5)
-
-            except Exception as e:
-                logger.error(f"REST cycle error: {e}\n{traceback.format_exc()}")
-                last_rest_fetch = time.time()
-                time.sleep(10)
-
-        except Exception as e:
-            logger.error(f"REST fallback outer error: {e}\n{traceback.format_exc()}")
-            time.sleep(10)
-
-# ----------------------------------------------------------------------
-# WEBSOCKET MAIN LOOP (start_angel_websocket_improved)
-# ----------------------------------------------------------------------
 def start_angel_websocket_improved():
     global sws, ws_running, last_heartbeat
     retry_delay = 5
@@ -3084,6 +2930,156 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
+# ENHANCED REST FALLBACK
+# ----------------------------------------------------------------------
+def fetch_asset_data(idx):
+    results = {"index": idx, "spot": None, "ce": None, "pe": None}
+    try:
+        spot = get_index_spot(idx)
+        if spot:
+            results["spot"] = spot
+            if not INDEX_CONFIG[idx].get("is_commodity"):
+                tokens = INDEX_TOKENS.get(idx, {})
+                if tokens.get("ce_token"):
+                    results["ce"] = get_option_quote(idx, "CE")
+                if tokens.get("pe_token"):
+                    results["pe"] = get_option_quote(idx, "PE")
+    except Exception as e:
+        logger.error(f"Fetch error {idx}: {e}")
+    return results
+
+def start_rest_only_mode():
+    global last_rest_fetch, last_tick_timestamp
+    logger.info("Starting REST fallback (concurrent fetch mode)")
+    cycle_count = 0
+    while True:
+        try:
+            with _ws_connect_lock:
+                if ws_running:
+                    logger.debug(f"REST cycle {cycle_count}: WS is running, sleeping 30s")
+                    time.sleep(30)
+                    continue
+
+            cycle_count += 1
+            try:
+                assets_to_fetch = []
+                for idx in INDEX_NAMES:
+                    cfg = INDEX_CONFIG[idx]
+                    if not cfg.get("active"):
+                        continue
+                    is_open = is_mcx_open() if cfg.get("is_commodity") else is_market_open()
+                    if is_open:
+                        assets_to_fetch.append(idx)
+
+                if not assets_to_fetch:
+                    logger.debug("REST: No markets open, sleeping 30s")
+                    time.sleep(30)
+                    continue
+
+                for idx in assets_to_fetch:
+                    if not INDEX_CONFIG[idx].get("is_commodity"):
+                        tokens = INDEX_TOKENS.get(idx, {})
+                        if not tokens.get("ce_token") or not tokens.get("pe_token"):
+                            logger.warning(f"Tokens missing for {idx}, retrying...")
+                            get_current_atm_tokens(idx)
+
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            logger.error(f"Future for {futures[future]} failed: {e}")
+                            continue
+                        idx = result["index"]
+                        try:
+                            spot = result.get("spot")
+                            if spot and spot > 0:
+                                with _latest_ticks_lock:
+                                    if INDEX_CONFIG[idx].get("is_commodity"):
+                                        latest_ticks[idx]["price"] = spot
+                                    else:
+                                        latest_ticks[idx]["spot_price"] = spot
+                                with _price_histories_lock:
+                                    price_histories[idx].append(spot)
+                                update_candle(idx, spot, 0, time.time())
+                                with _latest_ticks_lock:
+                                    last_known_prices[idx]["spot"] = spot
+                                    last_known_prices[idx]["timestamp"] = time.time()
+                                last_tick_timestamp = time.time()
+                                logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
+
+                            if not INDEX_CONFIG[idx].get("is_commodity"):
+                                ce = result.get("ce")
+                                pe = result.get("pe")
+                                if ce:
+                                    with _latest_ticks_lock:
+                                        latest_ticks[idx]["ce_price"] = ce["ltp"]
+                                        latest_ticks[idx]["ce_volume"] = ce["volume"]
+                                        latest_ticks[idx]["ce_oi"] = ce["oi"]
+                                        latest_ticks[idx]["ce_bid"] = ce["bid"]
+                                        latest_ticks[idx]["ce_ask"] = ce["ask"]
+                                    with _latest_ticks_lock:
+                                        last_known_prices[idx]["ce"] = ce["ltp"]
+                                    with _ce_price_histories_lock:
+                                        ce_price_histories[idx].append(ce["ltp"])
+                                    last_tick_timestamp = time.time()
+                                    logger.debug(f"REST: {idx} CE={ce['ltp']} (tick time updated)")
+                                else:
+                                    logger.warning(f"REST: {idx} CE quote fetch FAILED")
+                                if pe:
+                                    with _latest_ticks_lock:
+                                        latest_ticks[idx]["pe_price"] = pe["ltp"]
+                                        latest_ticks[idx]["pe_volume"] = pe["volume"]
+                                        latest_ticks[idx]["pe_oi"] = pe["oi"]
+                                        latest_ticks[idx]["pe_bid"] = pe["bid"]
+                                        latest_ticks[idx]["pe_ask"] = pe["ask"]
+                                    with _latest_ticks_lock:
+                                        last_known_prices[idx]["pe"] = pe["ltp"]
+                                    with _pe_price_histories_lock:
+                                        pe_price_histories[idx].append(pe["ltp"])
+                                    last_tick_timestamp = time.time()
+                                    logger.debug(f"REST: {idx} PE={pe['ltp']} (tick time updated)")
+                                else:
+                                    logger.warning(f"REST: {idx} PE quote fetch FAILED")
+                        except Exception as e:
+                            logger.error(f"Error processing REST result for {idx}: {e}")
+
+                try:
+                    vix = get_vix_ltp()
+                    if vix:
+                        with _latest_ticks_lock:
+                            latest_ticks["VIX"]["vix"] = vix
+                        vix_history.append(vix)
+                except Exception as e:
+                    logger.debug(f"VIX REST fetch error: {e}")
+
+                last_rest_fetch = time.time()
+
+                ready_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active") and has_complete_data(idx)]
+                if ready_indices:
+                    run_all_signals()
+
+                cycle_interval = int(os.getenv("REST_CYCLE_INTERVAL", "10"))
+                for _ in range(cycle_interval):
+                    time.sleep(1)
+                    with _ws_connect_lock:
+                        if ws_running:
+                            logger.debug("REST cycle interrupted: WS reconnected")
+                            break
+
+                logger.debug(f"REST cycle {cycle_count} complete.")
+
+            except Exception as e:
+                logger.error(f"REST cycle error: {e}\n{traceback.format_exc()}")
+                last_rest_fetch = time.time()
+                time.sleep(10)
+
+        except Exception as e:
+            logger.error(f"REST fallback outer error: {e}\n{traceback.format_exc()}")
+            time.sleep(10)
+
+# ----------------------------------------------------------------------
 # CONNECTION MANAGER
 # ----------------------------------------------------------------------
 class ConnectionManager:
@@ -3136,7 +3132,7 @@ def _start_background_threads():
                             ready += 1
                     else:
                         tokens = INDEX_TOKENS.get(idx, {})
-                        if tokens.get("ce_token") and tokens.get("pe_token"):
+                        if tokens.get("ce_token") and tokens.get("pe_token") and cfg.get("token"):
                             ready += 1
                 total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
                 for idx in INDEX_NAMES:
@@ -3186,12 +3182,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.22 – Signal confidence visible every tick",
+        "engine": "Hybrid v15.12 – MCX REST Price Override + Extended Symbols",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.22-confidence"
+        "version": "15.12-MCX-REST-EXT"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3222,23 +3218,11 @@ def live_signals():
                 if candle_len >= 10:
                     run_signal_engine_for_index(idx)
 
-    with _market_signal_lock, _portfolio_state_lock, _signal_state_lock, _latest_ticks_lock:
+    with _market_signal_lock, _portfolio_state_lock:
         portfolio_with_trades = {}
         for idx, port in portfolio_state.items():
-            cfg = INDEX_CONFIG.get(idx, {})
-            if not cfg.get("active"):
-                continue
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
-            if cfg.get("is_commodity"):
-                raw_price = latest_ticks[idx].get("price", 0.0)
-                multiplier = cfg.get("mkt_multiple", 1.0)
-                portfolio_with_trades[idx]["current_price"] = raw_price * multiplier
-                portfolio_with_trades[idx]["raw_price"] = raw_price
-            else:
-                portfolio_with_trades[idx]["spot_price"] = latest_ticks[idx].get("spot_price", 0.0)
-                portfolio_with_trades[idx]["ce_price"] = latest_ticks[idx].get("ce_price", 0.0)
-                portfolio_with_trades[idx]["pe_price"] = latest_ticks[idx].get("pe_price", 0.0)
 
         equity_open = is_market_open()
         mcx_open = is_mcx_open()
@@ -3258,47 +3242,9 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.22-confidence"
+            "version": "15.12-MCX-REST-EXT"
         })
 
-# ============================================================
-# NEW: /api/signals endpoint for frontend compatibility
-# ============================================================
-@app.route("/api/signals", methods=["GET"])
-def get_signals():
-    signals = []
-    with _market_signal_lock, _latest_ticks_lock, _portfolio_state_lock, _signal_state_lock:
-        for idx in INDEX_NAMES:
-            cfg = INDEX_CONFIG[idx]
-            if not cfg.get("active"):
-                continue
-
-            if cfg.get("is_commodity"):
-                current_price = latest_ticks[idx].get("price", 0.0)
-                ce_display_price = current_price
-                pe_display_price = current_price
-            else:
-                ce_display_price = latest_ticks[idx].get("ce_price", 0.0)
-                pe_display_price = latest_ticks[idx].get("pe_price", 0.0)
-
-            signals.append({
-                "index": idx,
-                "is_commodity": cfg.get("is_commodity", False),
-                "signal": market_signal[idx].get("signal", "WAITING"),
-                "sentiment_score": market_signal[idx].get("sentiment_score", 50),
-                "buy_ce_price": ce_display_price,
-                "buy_pe_price": pe_display_price,
-                "live_pnl": portfolio_state[idx].get("live_pnl", 0.0),
-                "daily_pnl": portfolio_state[idx].get("daily_pnl", 0.0),
-                "total_pnl": portfolio_state[idx].get("total_pnl", 0.0),
-                "action": signal_state[idx].get("action", "HOLD"),
-                "confidence": market_signal[idx].get("confidence", 0)
-            })
-    return jsonify({"signals": signals, "count": len(signals)})
-
-# ----------------------------------------------------------------------
-# (Rest of the endpoints remain unchanged)
-# ----------------------------------------------------------------------
 @app.route("/api/signal-audio", methods=["GET"])
 def signal_audio():
     latest_action = "NO_TRADE"
@@ -3397,83 +3343,16 @@ def backtest_signal(index_name):
     return jsonify({"signals": signals, "count": len(signals)})
 
 # ----------------------------------------------------------------------
-# Portfolio PnL Endpoint (MCX & Equity)
-# ----------------------------------------------------------------------
-@app.route("/api/portfolio-pnl", methods=["GET"])
-def get_portfolio_pnl():
-    total_live_pnl = 0.0
-    total_daily_pnl = 0.0
-    total_realized_pnl = 0.0
-
-    breakdown = {}
-
-    with _portfolio_state_lock, _signal_state_lock:
-        for idx in INDEX_NAMES:
-            cfg = INDEX_CONFIG[idx]
-            is_active = cfg.get("active", False)
-            if not is_active:
-                continue
-
-            live = portfolio_state[idx].get("live_pnl", 0.0)
-            daily = portfolio_state[idx].get("daily_pnl", 0.0)
-            total = portfolio_state[idx].get("total_pnl", 0.0)
-
-            total_live_pnl += live
-            total_daily_pnl += daily
-            total_realized_pnl += total
-
-            breakdown[idx] = {
-                "is_commodity": cfg.get("is_commodity", False),
-                "active_position": signal_state[idx]["action"],
-                "entry_price": signal_state[idx]["entry_price"],
-                "lots": signal_state[idx]["lots"],
-                "live_pnl": round(live, 2),
-                "daily_pnl": round(daily, 2),
-                "total_pnl": round(total, 2)
-            }
-
-    return jsonify({
-        "summary": {
-            "net_live_pnl": round(total_live_pnl, 2),
-            "net_daily_pnl": round(total_daily_pnl, 2),
-            "net_total_pnl": round(total_realized_pnl, 2)
-        },
-        "breakdown": breakdown
-    })
-
-# ----------------------------------------------------------------------
-# BONUS: Token status debug endpoint
-# ----------------------------------------------------------------------
-@app.route("/api/token-status", methods=["GET"])
-def token_status():
-    status = {}
-    for idx, cfg in INDEX_CONFIG.items():
-        if not cfg.get("active"):
-            continue
-        is_commodity = cfg.get("is_commodity", False)
-        status[idx] = {
-            "token": cfg.get("token"),
-            "latest_price": latest_ticks.get(idx, {}).get(
-                "price" if is_commodity else "spot_price", 0),
-            "candles_1min": len(candle_histories.get(idx, {}).get("1min", [])),
-            "last_update_ago": round(time.time() - last_known_prices.get(idx, {}).get("timestamp", 0), 1) if last_known_prices.get(idx, {}).get("timestamp") else None
-        }
-    return jsonify({
-        "tokens": status,
-        "ws_running": ws_running,
-        "total_ticks": tick_counter,
-        "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
-    })
-
-# ----------------------------------------------------------------------
 # RUN FLASK
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
     load_portfolio_state()
+    # Ensure tokens are fetched before starting
     get_mcx_futures_tokens()
+    get_equity_spot_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.22-confidence)...")
+    logger.info("🚀 Starting Flask API Server (v15.12 Extended)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
