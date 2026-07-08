@@ -1,4 +1,4 @@
-# === HYBRID v15.23 – Lowered min_candles for MCX, fixed REST loop logging ===
+# === HYBRID v15.22 – Signal confidence visible every tick, full logging ===
 import sys
 import logging
 import os
@@ -324,7 +324,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ============================================================
-# INDICATORS (unchanged)
+# INDICATORS (unchanged – same as before)
 # ============================================================
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -1102,11 +1102,10 @@ def is_index_market_open(idx):
     return is_mcx_open() if cfg.get("is_commodity") else is_market_open()
 
 # ============================================================
-# CANDLE UPDATE – with enhanced logging
+# CANDLE UPDATE (unchanged)
 # ============================================================
 def update_candle(idx, price, cumulative_volume, timestamp):
     if price <= 0:
-        logger.debug(f"update_candle: {idx} price<=0, skipping")
         return
     with _prev_volume_lock:
         prev = _prev_volume.get(idx, 0)
@@ -1128,7 +1127,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                 if _current_candle[idx][tf] is not None:
                     with _candle_histories_lock:
                         candle_histories[idx][tf].append(_current_candle[idx][tf])
-                        logger.info(f"📊 Appended {tf} candle for {idx}, new length={len(candle_histories[idx][tf])}")
+                        if tf == "1min":
+                            logger.info(f"📊 New 1min candle appended for {idx} (len={len(candle_histories[idx]['1min'])})")
                 _current_candle[idx][tf] = {
                     "open": price, "high": price, "low": price, "close": price,
                     "volume": tick_vol, "timestamp": candle_start
@@ -1786,10 +1786,7 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
         logger.info(f"🕯️ {index_name} candle_len={candle_len}")
 
-        # --- FIX: Lower min_candles for commodities to 1 ---
-        min_candles = 1 if is_commodity else 10
-        # --- END FIX ---
-
+        min_candles = 3 if is_commodity else 10
         if candle_len < min_candles and is_commodity:
             # Fallback: try to fetch price via REST and manually add candle
             logger.info(f"🔄 {index_name} candle count low ({candle_len}), attempting REST fallback...")
@@ -2857,7 +2854,6 @@ def start_rest_only_mode():
                     continue
 
             cycle_count += 1
-            logger.info(f"🔁 REST cycle {cycle_count} starting...")
             try:
                 assets_to_fetch = []
                 for idx in INDEX_NAMES:
@@ -2903,8 +2899,8 @@ def start_rest_only_mode():
                                 with _latest_ticks_lock:
                                     last_known_prices[idx]["spot"] = spot
                                     last_known_prices[idx]["timestamp"] = time.time()
-                                    # 🔥 UPDATE LIVE PNL FOR MCX
-                                    update_live_pnl_for_index(idx, spot)
+                                    # 🔥 ADD THIS LINE – update live PnL for MCX
+                                    update_live_pnl_for_index(idx, spot)   # spot is raw price
                                     last_tick_timestamp = time.time()
                                     logger.debug(f"REST: {idx} spot={spot} (tick time updated)")
 
@@ -2959,7 +2955,7 @@ def start_rest_only_mode():
                 if ready_indices:
                     run_all_signals()
 
-                # Short sleep before next cycle
+                # Short sleep before next cycle if WS is still not delivering ticks
                 time.sleep(5)
 
             except Exception as e:
@@ -3190,12 +3186,12 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Hybrid v15.23 – Lowered min_candles for MCX, fixed REST loop logging",
+        "engine": "Hybrid v15.22 – Signal confidence visible every tick",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "equity_open": is_market_open(),
         "mcx_open": is_mcx_open(),
         "market_status": get_market_status_label(),
-        "version": "15.23-mcx-quick"
+        "version": "15.22-confidence"
     })
 
 @app.route("/api/live-signals", methods=["GET"])
@@ -3262,7 +3258,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "15.23-mcx-quick"
+            "version": "15.22-confidence"
         })
 
 # ============================================================
@@ -3478,6 +3474,6 @@ if __name__ == "__main__":
     get_mcx_futures_tokens()
     refresh_all_tokens()
     _start_background_threads()
-    logger.info("🚀 Starting Flask API Server (v15.23-mcx-quick)...")
+    logger.info("🚀 Starting Flask API Server (v15.22-confidence)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
