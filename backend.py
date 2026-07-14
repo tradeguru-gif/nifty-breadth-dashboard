@@ -207,7 +207,7 @@ INDEX_CONFIG = {
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.8
     },
 
-    # ----- ALL OTHERS INACTIVE FOR NOW -----
+    # ----- ALL OTHER INDICES INACTIVE (to be re‑enabled later) -----
     "MIDCPNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 75, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "PSUBNIFTY": { "token": "99926025", "exchange": "NSE", "symbol": "Nifty PSU Bank", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "MIDSELNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
@@ -221,7 +221,7 @@ INDEX_CONFIG = {
     "NIFTYREALTY": { "token": "99926022", "exchange": "NSE", "symbol": "NIFTYREALTY", "lot_size": 25, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "NIFTYMETAL": { "token": "99926024", "exchange": "NSE", "symbol": "NIFTYMETAL", "lot_size": 25, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "NIFTYENERGY": { "token": "99926026", "exchange": "NSE", "symbol": "NIFTYENERGY", "lot_size": 25, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
-}    
+}
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
 INDEX_NAMES = list(INDEX_CONFIG.keys())
