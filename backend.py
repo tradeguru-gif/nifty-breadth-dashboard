@@ -205,77 +205,7 @@ INDEX_CONFIG = {
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "NIFTYNEXT50": {
-        "token": "99926078", "exchange": "NSE", "symbol": "NIFTYNEXT50", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": "NIFTY", "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "SENSEXNEXT": {
-        "token": "99919001", "exchange": "BSE", "symbol": "SENSEXNEXT", "lot_size": 15, "expiry_weekday": 4, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "BFO",
-        "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": "SENSEX", "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "BANKEX": {
-        "token": "99919005", "exchange": "BSE", "symbol": "BANKEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
-        "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.8
-    },
-    "PSUBNIFTY": {
-        "token": "99926055", "exchange": "NSE", "symbol": "PSUBNIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "PRIVATENIFTY": {
-        "token": "99926056", "exchange": "NSE", "symbol": "PRIVATENIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "MIDSELNIFTY": {
-        "token": "99926058", "exchange": "NSE", "symbol": "MIDSELNIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "NIFTYIT": {
-        "token": "99926019", "exchange": "NSE", "symbol": "NIFTYIT", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "NIFTYPHARMA": {
-        "token": "99926027", "exchange": "NSE", "symbol": "NIFTYPHARMA", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "NIFTYFMCG": {
-        "token": "99926021", "exchange": "NSE", "symbol": "NIFTYFMCG", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
-    "NIFTYAUTO": {
-        "token": "99926020", "exchange": "NSE", "symbol": "NIFTYAUTO", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
-        "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
-        "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
-        "regime_adx_threshold": 25, "regime_atr_threshold": 0.5
-    },
+    }  
 }
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
