@@ -37,7 +37,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5000",
     "https://kame.nifty-options.workers.dev"
 ]
-CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
+CORS(app, origins="*", supports_credentials=False)
 
 API_KEY = os.getenv("API_KEY", "")
 application = app
