@@ -2575,30 +2575,45 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            logger.info("Pre-fetching option tokens...")
-            max_retries = 5
-            for attempt in range(max_retries):
-                refresh_all_tokens()
-                ready = 0
-                for idx, cfg in INDEX_CONFIG.items():
-                    if not cfg.get("active"):
-                        continue
-                    tokens = INDEX_TOKENS.get(idx, {})
-                    if tokens.get("ce_token") and tokens.get("pe_token"):
-                        ready += 1
-                total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
-                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
-                if ready == total_active:
-                    break
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-            conn_manager = ConnectionManager()
-            conn_manager.start()
-            _init_completed = True
-            logger.info("Background threads started with connection manager")
+            logger.info("Starting background token prefetch (non-blocking)...")
+            
+            def prefetch_loop():
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        refresh_all_tokens()
+                        ready = 0
+                        total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
+                        for idx, cfg in INDEX_CONFIG.items():
+                            if not cfg.get("active"):
+                                continue
+                            tokens = INDEX_TOKENS.get(idx, {})
+                            if tokens.get("ce_token") and tokens.get("pe_token"):
+                                ready += 1
+                        logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
+                        if ready == total_active:
+                            break
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2
+                            logger.warning(f"Waiting {wait_time} seconds before retry...")
+                            time.sleep(wait_time)
+                    except Exception as e:
+                        logger.error(f"Token prefetch error: {e}")
+                
+                # Start WebSocket/REST after tokens are prefetched (or timeout)
+                try:
+                    conn_manager = ConnectionManager()
+                    conn_manager.start()
+                except Exception as e:
+                    logger.error(f"Failed to start connection manager: {e}")
+                
+                global _init_completed
+                _init_completed = True
+                logger.info("Background threads started with connection manager")
 
+            # Start the prefetch in a separate daemon thread
+            threading.Thread(target=prefetch_loop, daemon=True).start()
+            logger.info("✅ Non-blocking token prefetch started in background. API is LIVE.")
 _background_started = False
 _background_start_lock = threading.Lock()
 
