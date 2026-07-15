@@ -940,14 +940,15 @@ def get_current_atm_tokens(index_name):
 def refresh_all_tokens():
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
-            # Retry up to 3 times for each index
-            for attempt in range(3):
+            success = False
+            for attempt in range(5):  # 5 retries
                 ce, pe = get_current_atm_tokens(idx)
                 if ce and pe:
+                    success = True
                     break
-                time.sleep(1)
-            else:
-                logger.warning(f"⚠️ Failed to load tokens for {idx} after 3 attempts")
+                time.sleep(2)  # wait 2 seconds between retries
+            if not success:
+                logger.warning(f"⚠️ Failed to load tokens for {idx} after 5 attempts")
 
 # ----------------------------------------------------------------------
 # MARKET HOURS (Equity only)
@@ -2012,12 +2013,24 @@ def run_signal_engine_for_index(index_name):
         sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
         target = prem + atr * target_mult
 
-        stop_dist = prem - sl
+             stop_dist = prem - sl
+        
+        # ---- FIX: Handle invalid stop distance ----
         if stop_dist <= 0:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Invalid stop distance"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            return
+            # If premium is too small, use a percentage-based SL as fallback
+            fallback_sl_pct = 0.15  # 15% SL for very small premiums
+            sl = prem * (1 - fallback_sl_pct)
+            stop_dist = prem - sl
+            
+            if stop_dist <= 0 or prem < 5:
+                # If still invalid or premium is microscopic, block the trade
+                with _market_signal_lock:
+                    market_signal[index_name]["alert_message"] = f"Premium too small ({prem:.2f}) - cannot set SL"
+                    market_signal[index_name]["signal"] = "BLOCKED"
+                logger.warning(f"⚠️ {index_name}: Premium {prem:.2f} too small, blocking trade")
+                return
+            else:
+                logger.info(f"🔄 {index_name}: Used fallback SL ({sl:.2f}) due to invalid ATR-based SL")
 
         risk_amount = portfolio_state[index_name]["equity"] * (risk_pct / 100)
         lots = int(risk_amount / (stop_dist * INDEX_CONFIG[index_name]["lot_size"]))
