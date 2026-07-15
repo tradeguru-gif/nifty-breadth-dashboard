@@ -907,6 +907,145 @@ def get_current_atm_tokens(index_name):
                 (df["exch_seg"] == config["option_exchange"])
             ]
             if not candidate.empty:
+                opts = candidate.copy()  # Make a copy
+                used_variant = variant
+                logger.info(f"{index_name}: Found options using exact name match '{variant}'")
+                break
+
+        # 2. If exact fails, try partial (non-regex) match
+        if opts is None or opts.empty:
+            for variant in variants:
+                candidate = df[
+                    (df["name"].str.upper().str.contains(variant.upper(), regex=False, na=False)) &
+                    (df["instrumenttype"] == "OPTIDX") &
+                    (df["exch_seg"] == config["option_exchange"])
+                ]
+                if not candidate.empty:
+                    opts = candidate.copy()
+                    used_variant = variant
+                    logger.info(f"{index_name}: Found options using partial name match '{variant}'")
+                    break
+
+        if opts is None or opts.empty:
+            logger.warning(f"{index_name}: No options found for any variant. Available names containing '{symbol}':")
+            matching_names = df[df["name"].str.upper().str.contains(symbol.upper().replace(" ", ".*"), regex=False, na=False)]["name"].unique().tolist()
+            logger.warning(f"  {matching_names[:10]}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        # --- Ensure strike is numeric ---
+        opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100.0
+        opts = opts.dropna(subset=["strike"])
+
+        # --- Filter by expiry ---
+        # First try exact expiry string match
+        future = opts[opts["expiry"].str.upper() == expiry]
+
+        if future.empty:
+            # Fallback: nearest future expiry (date comparison)
+            opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
+            opts = opts.dropna(subset=["expiry_date"])
+            today = date.today()
+            opts["expiry_date_only"] = opts["expiry_date"].apply(lambda x: x.date() if pd.notna(x) else date.min)
+            future = opts[opts["expiry_date_only"] >= today]
+            if future.empty:
+                future = opts.copy()  # Use all as last resort
+                logger.warning(f"{index_name}: No future-dated options, using all available")
+
+        if future.empty:
+            logger.warning(f"{index_name}: No options found for expiry {expiry}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        # --- Get nearest expiry date (for logging) ---
+        if "expiry_date" in future.columns and not future["expiry_date"].isna().all():
+            nearest = future["expiry_date"].min()
+        else:
+            # Try to parse from string
+            nearest = None
+            for _, row in future.iterrows():
+                exp_date = parse_expiry_date(row["expiry"])
+                if exp_date:
+                    nearest = exp_date
+                    break
+
+        # --- Find ATM strike ---
+        atm_opts = future[future["strike"] == atm]
+        if atm_opts.empty:
+            # Find the closest strike
+            diff = (future["strike"] - atm).abs()
+            if not diff.empty and diff.notna().any():
+                min_idx = diff.idxmin()
+                if min_idx in future.index:
+                    atm_opts = future.loc[[min_idx]]
+
+        if atm_opts.empty:
+            logger.warning(f"{index_name}: No options near ATM strike {atm}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+
+        if ce.empty or pe.empty:
+            logger.warning(f"{index_name}: Missing CE or PE for strike {atm}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce_token = str(ce.iloc[0]["token"])
+        pe_token = str(pe.iloc[0]["token"])
+        ce_symbol = str(ce.iloc[0]["symbol"])
+        pe_symbol = str(pe.iloc[0]["symbol"])
+        actual_strike = int(ce.iloc[0]["strike"])
+
+        if actual_strike != atm:
+            logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
+        else:
+            logger.info(f"{index_name} ATM strike {atm} selected")
+
+        INDEX_TOKENS[index_name].update({
+            "ce_token": ce_token,
+            "pe_token": pe_token,
+            "atm_strike": actual_strike,
+            "expiry": expiry,
+            "expiry_date": nearest,
+            "ce_symbol": ce_symbol,
+            "pe_symbol": pe_symbol
+        })
+        return ce_token, pe_token
+
+    except Exception as e:
+        logger.error(f"{index_name} token fetch error: {e}")
+        INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+        return None, None
+    try:
+        df = pd.DataFrame(scrip)
+
+        # Build list of possible name variants
+        symbol = config["symbol"]
+        variants = [
+            symbol,
+            symbol.upper(),
+            symbol.replace(" ", ""),
+            symbol.upper().replace(" ", ""),
+            index_name,
+            index_name.upper(),
+            index_name.replace(" ", ""),
+            index_name.upper().replace(" ", ""),
+        ]
+        variants = list(dict.fromkeys([v for v in variants if v]))
+
+        opts = None
+        used_variant = None
+
+        # 1. Try exact match (case-insensitive)
+        for variant in variants:
+            candidate = df[
+                (df["name"].str.upper() == variant.upper()) &
+                (df["instrumenttype"] == "OPTIDX") &
+                (df["exch_seg"] == config["option_exchange"])
+            ]
+            if not candidate.empty:
                 opts = candidate
                 used_variant = variant
                 logger.info(f"{index_name}: Found options using exact name match '{variant}'")
