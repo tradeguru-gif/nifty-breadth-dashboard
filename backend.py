@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16 – 1m/2m/3m/5m (No Telegram, No Commodity) ===
+# === EQUITY-ONLY SCALPING v16.1 – FIXED LTP PARSING (No Telegram, No Commodity) ===
 import sys
 import logging
 import os
@@ -1068,7 +1068,7 @@ def get_signal_from_sentiment(sentiment):
     if sentiment >= 85: return "STRONG_BUY_CE"
     elif sentiment >= 65: return "BUY_CE"          # was 70
     elif sentiment >= 50: return "LOW_BUY_CE"      # was 55
-    elif sentiment >= 40: return "NO_TRADE"        # was 45 (narrower neutral)
+    elif sentiment >= 40: return "NO_TRADE"        # was 45
     elif sentiment >= 25: return "LOW_BUY_PE"      # was 30
     elif sentiment >= 10: return "BUY_PE"          # was 15
     else: return "STRONG_BUY_PE"
@@ -1142,10 +1142,8 @@ def confirm_signal_with_candles(index_name, side, spot):
         return False
     last_3_closes = [c["close"] for c in candles[-3:]]
     if side == "CE":
-        # require at least 2 out of 3 closes above EMA9
         return sum(1 for c in last_3_closes if c > ema9) >= 2
     else:
-        # require at least 2 out of 3 closes below EMA9
         return sum(1 for c in last_3_closes if c < ema9) >= 2
 
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
@@ -1293,7 +1291,6 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
             "exit_reason": exit_reason
         })
 
-# Remove send_telegram_alert function entirely – we'll just log instead
 def log_alert(msg):
     logger.info(msg)
 
@@ -1485,7 +1482,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
-        # Use mid if available
         if ce_bid > 0 and ce_ask > 0:
             ce_prem = (ce_bid + ce_ask) / 2
         if pe_bid > 0 and pe_ask > 0:
@@ -1589,7 +1585,6 @@ def run_signal_engine_for_index(index_name):
                     with _portfolio_state_lock:
                         portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
-                    # Trailing stop using 5min ATR
                     if prem > signal_state[index_name].get("highest", 0):
                         signal_state[index_name]["highest"] = prem
                         with _candle_histories_lock:
@@ -1745,7 +1740,6 @@ def run_signal_engine_for_index(index_name):
                             reset_signal_state(index_name, now, "VWAP_EXIT")
                             return
 
-                # Update market_signal with strike info for ACTIVE trade
                 token_info = INDEX_TOKENS.get(index_name, {})
                 atm_strike = token_info.get("atm_strike", 0)
                 if "CE" in active:
@@ -1778,7 +1772,6 @@ def run_signal_engine_for_index(index_name):
                     market_signal[index_name]["signal"] = "COOLDOWN"
                 return
 
-            # Reset daily counters if new day
             now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
             today = now_ist.strftime("%Y-%m-%d")
             if last_trade_date[index_name] != today:
@@ -1827,13 +1820,13 @@ def run_signal_engine_for_index(index_name):
         # ---------- RELAXED VWAP FILTER ----------
         spot_vwap = vp_engine.analyze(spot, ce_vol + pe_vol, option_type=None)["vwap"]
         if spot_vwap > 0:
-            if side == "CE" and spot > spot_vwap * 1.01:   # was 1.003
+            if side == "CE" and spot > spot_vwap * 1.01:
                 if "STRONG" not in action:
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = "Spot above VWAP, extended"
                         market_signal[index_name]["signal"] = "BLOCKED"
                     return
-            elif side == "PE" and spot < spot_vwap * 0.99:   # was 0.997
+            elif side == "PE" and spot < spot_vwap * 0.99:
                 if "STRONG" not in action:
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = "Spot below VWAP, extended"
@@ -1852,8 +1845,7 @@ def run_signal_engine_for_index(index_name):
             hist = list(vol_hist[index_name])
             if len(hist) >= 20:
                 avg_vol = sum(hist[-20:]) / 20
-                # ---------- RELAXED VOLUME REQUIREMENT ----------
-                if vol < avg_vol * 0.3:   # was 0.5
+                if vol < avg_vol * 0.3:
                     with _market_signal_lock:
                         market_signal[index_name]["alert_message"] = f"Low volume: {vol} vs avg {avg_vol:.0f}"
                         market_signal[index_name]["signal"] = "BLOCKED"
@@ -1928,8 +1920,7 @@ def run_signal_engine_for_index(index_name):
                 vix = 15.0
 
         ml_prob = compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment)
-        # ---------- RELAXED ML THRESHOLD ----------
-        if ml_prob < 0.3 and "STRONG" not in action:   # was 0.4
+        if ml_prob < 0.3 and "STRONG" not in action:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = f"ML filter: prob {ml_prob:.2f}"
                 market_signal[index_name]["signal"] = "BLOCKED"
@@ -2059,7 +2050,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (unchanged)
+# WEBSOCKET + WATCHDOGS – FIXED LTP NORMALISATION
 # ============================================================
 ws_running = False
 sws = None
@@ -2174,8 +2165,15 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                if ltp > 10000 and token in INDEX_TOKEN_SET:
+                # ----- FIX: Normalise LTP (remove double-division) -----
+                # The monkey-patch already divides by 100 to get rupees.
+                # But if ltp is still huge (e.g., > 1000 in rupees), it might be in paise.
+                if ltp > 100000:          # > 1000 rupees, likely still in paise
                     ltp = ltp / 100.0
+
+                # Do NOT divide again based on token set – that was the bug!
+                # The old code had: if ltp > 10000 and token in INDEX_TOKEN_SET: ltp /= 100
+                # That caused option premiums to be seen as 10x their actual value.
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
@@ -2208,6 +2206,8 @@ def on_ws_data(wsapp, message):
                         continue
                     if token == tokens.get("ce_token"):
                         if ltp > 0:
+                            # ---- DEBUG LOG ----
+                            logger.info(f"🔔 CE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
                                 latest_ticks[idx]["ce_volume"] = vol
@@ -2224,6 +2224,8 @@ def on_ws_data(wsapp, message):
                             break
                     elif token == tokens.get("pe_token"):
                         if ltp > 0:
+                            # ---- DEBUG LOG ----
+                            logger.info(f"🔔 PE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
                                 latest_ticks[idx]["pe_volume"] = vol
@@ -2617,7 +2619,6 @@ def _start_background_threads():
                 _init_completed = True
                 logger.info("Background threads started with connection manager")
 
-            # Start the prefetch in a separate daemon thread
             threading.Thread(target=prefetch_loop, daemon=True).start()
             logger.info("✅ Non-blocking token prefetch started in background. API is LIVE.")
 _background_started = False
@@ -2649,7 +2650,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16 – 1m/2m/3m/5m (No Telegram, No Commodity)",
+        "engine": "Equity-Only Scalping v16.1 – LTP Fix",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2701,7 +2702,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16-equity-scalping-relaxed"
+            "version": "16.1-ltp-fix"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
