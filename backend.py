@@ -1027,7 +1027,7 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 60:
+        if len(closes) < 30:
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -1101,7 +1101,7 @@ def detect_regime(index_name):
     atr_threshold = config.get("regime_atr_threshold", 0.4)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
-    if len(candles) < 30:
+    if len(candles) < 15:
         return "NORMAL"
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
@@ -1454,13 +1454,13 @@ def run_signal_engine_for_index(index_name):
             candle_len = len(candle_histories[index_name]["1min"])
 
         with _market_signal_lock:
-            if candle_len < 10:
+            if candle_len < 5:
                 market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/10)"
                 market_signal[index_name]["signal"] = "WAITING"
             else:
                 market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
 
-        if candle_len < 10:
+        if candle_len < 5:
             return
 
         with _market_signal_lock:
