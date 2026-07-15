@@ -940,7 +940,14 @@ def get_current_atm_tokens(index_name):
 def refresh_all_tokens():
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
-            get_current_atm_tokens(idx)
+            # Retry up to 3 times for each index
+            for attempt in range(3):
+                ce, pe = get_current_atm_tokens(idx)
+                if ce and pe:
+                    break
+                time.sleep(1)
+            else:
+                logger.warning(f"⚠️ Failed to load tokens for {idx} after 3 attempts")
 
 # ----------------------------------------------------------------------
 # MARKET HOURS (Equity only)
@@ -1475,6 +1482,26 @@ def run_signal_engine_for_index(index_name):
             ce_ask = latest_ticks[index_name].get("ce_ask", 0.0) or 0.0
             pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
             pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
+
+        # =============================================================
+        # SAFETY FALLBACK: Normalise premiums if they came in as paise
+        # =============================================================
+        if ce_prem > 1000:
+            ce_prem = ce_prem / 100.0
+            logger.info(f"🔄 run_signal: Normalised CE premium for {index_name} to {ce_prem}")
+        if pe_prem > 1000:
+            pe_prem = pe_prem / 100.0
+            logger.info(f"🔄 run_signal: Normalised PE premium for {index_name} to {pe_prem}")
+        # Also normalise bid/ask just in case
+        if ce_bid > 1000:
+            ce_bid = ce_bid / 100.0
+        if ce_ask > 1000:
+            ce_ask = ce_ask / 100.0
+        if pe_bid > 1000:
+            pe_bid = pe_bid / 100.0
+        if pe_ask > 1000:
+            pe_ask = pe_ask / 100.0
+        # =============================================================
 
         if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
             with _market_signal_lock:
@@ -2168,8 +2195,9 @@ def on_ws_data(wsapp, message):
                 # ----- FIX: Normalise LTP (remove double-division) -----
                 # The monkey-patch already divides by 100 to get rupees.
                 # But if ltp is still huge (e.g., > 1000 in rupees), it might be in paise.
-                if ltp > 100000:          # > 1000 rupees, likely still in paise
+                if ltp > 1000:          # > 1000 rupees, likely still in paise
                     ltp = ltp / 100.0
+                    logger.info(f"🔄 Normalised LTP from paise to rupees: {ltp}")
 
                 # Do NOT divide again based on token set – that was the bug!
                 # The old code had: if ltp > 10000 and token in INDEX_TOKEN_SET: ltp /= 100
@@ -2179,6 +2207,20 @@ def on_ws_data(wsapp, message):
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
+
+                # =============================================================
+                # FIX: Normalise LTP, Bid, and Ask from paise to rupees
+                # Angel One WebSocket often sends these values multiplied by 100.
+                # =============================================================
+                if ltp > 1000:
+                    ltp = ltp / 100.0
+                    logger.info(f"🔄 Normalised LTP: {ltp}")
+
+                if bid > 1000:
+                    bid = bid / 100.0
+                if ask > 1000:
+                    ask = ask / 100.0
+                # =============================================================
 
                 # ---- Spot matching ----
                 spot_matched = False
