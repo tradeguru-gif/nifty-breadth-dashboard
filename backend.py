@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16.1 – FIXED LTP PARSING (No Telegram, No Commodity) ===
+# === EQUITY-ONLY SCALPING v16.2 – FINAL FIXED (No Telegram, No Commodity) ===
 import sys
 import logging
 import os
@@ -346,7 +346,7 @@ _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300}
-TIMEFRAME_WEIGHTS = {"1min":8, "2min":10, "3min":12, "5min":16}  # adjusted for scalping
+TIMEFRAME_WEIGHTS = {"1min":8, "2min":10, "3min":12, "5min":16}
 
 candle_histories = {idx: {tf: deque(maxlen=500) for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _last_candle_time = {idx: {tf: 0 for tf in TIMEFRAMES} for idx in INDEX_NAMES}
@@ -354,7 +354,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# INDICATORS (same as before, unchanged)
+# INDICATORS
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -474,7 +474,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS – unchanged
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -661,7 +661,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -767,7 +767,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
+# AUTHENTICATION & TOKEN MANAGEMENT
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -941,12 +941,12 @@ def refresh_all_tokens():
     for idx in INDEX_NAMES:
         if INDEX_CONFIG[idx].get("active"):
             success = False
-            for attempt in range(5):  # 5 retries
+            for attempt in range(5):
                 ce, pe = get_current_atm_tokens(idx)
                 if ce and pe:
                     success = True
                     break
-                time.sleep(2)  # wait 2 seconds between retries
+                time.sleep(2)
             if not success:
                 logger.warning(f"⚠️ Failed to load tokens for {idx} after 5 attempts")
 
@@ -969,7 +969,7 @@ def is_index_market_open(idx):
     return is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (unchanged)
+# CANDLE UPDATE
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
     with _prev_volume_lock:
@@ -1071,14 +1071,13 @@ def get_sentiment_label(sentiment):
     elif sentiment >= 15: return "BEARISH"
     else: return "STRONG BEARISH"
 
-# ---------- RELAXED SENTIMENT THRESHOLDS ----------
 def get_signal_from_sentiment(sentiment):
     if sentiment >= 85: return "STRONG_BUY_CE"
-    elif sentiment >= 65: return "BUY_CE"          # was 70
-    elif sentiment >= 50: return "LOW_BUY_CE"      # was 55
-    elif sentiment >= 40: return "NO_TRADE"        # was 45
-    elif sentiment >= 25: return "LOW_BUY_PE"      # was 30
-    elif sentiment >= 10: return "BUY_PE"          # was 15
+    elif sentiment >= 65: return "BUY_CE"
+    elif sentiment >= 50: return "LOW_BUY_CE"
+    elif sentiment >= 40: return "NO_TRADE"
+    elif sentiment >= 25: return "LOW_BUY_PE"
+    elif sentiment >= 10: return "BUY_PE"
     else: return "STRONG_BUY_PE"
 
 def get_trend_for_timeframe(index_name, tf):
@@ -1138,7 +1137,6 @@ def detect_regime(index_name):
         return confirmed
     return new_regime
 
-# ---------- RELAXED CANDLE CONFIRMATION ----------
 def confirm_signal_with_candles(index_name, side, spot):
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])
@@ -1188,7 +1186,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE (unchanged)
+# SIGNAL QUALITY SCORE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1222,7 +1220,7 @@ def has_complete_data(index_name):
              last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE (unchanged)
+# PERSISTENCE
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1320,7 +1318,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ============================================================
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ============================================================
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1381,7 +1379,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ============================================================
-# REST HELPER FUNCTIONS (unchanged)
+# REST HELPER FUNCTIONS
 # ============================================================
 def get_vix_ltp():
     return None
@@ -1432,7 +1430,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – RELAXED PARAMETERS INSIDE
+# MAIN SIGNAL ENGINE – RELAXED PARAMETERS
 # ============================================================
 def run_signal_engine_for_index(index_name):
     try:
@@ -1493,7 +1491,6 @@ def run_signal_engine_for_index(index_name):
         if pe_prem > 1000:
             pe_prem = pe_prem / 100.0
             logger.info(f"🔄 run_signal: Normalised PE premium for {index_name} to {pe_prem}")
-        # Also normalise bid/ask just in case
         if ce_bid > 1000:
             ce_bid = ce_bid / 100.0
         if ce_ask > 1000:
@@ -2206,34 +2203,20 @@ def on_ws_data(wsapp, message):
                         ltp = 0
 
                 # ----- FIX: Normalise LTP (remove double-division) -----
-                # The monkey-patch already divides by 100 to get rupees.
-                # But if ltp is still huge (e.g., > 1000 in rupees), it might be in paise.
-                if ltp > 1000:          # > 1000 rupees, likely still in paise
+                if ltp > 1000:
                     ltp = ltp / 100.0
                     logger.info(f"🔄 Normalised LTP from paise to rupees: {ltp}")
-
-                # Do NOT divide again based on token set – that was the bug!
-                # The old code had: if ltp > 10000 and token in INDEX_TOKEN_SET: ltp /= 100
-                # That caused option premiums to be seen as 10x their actual value.
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-                # =============================================================
-                # FIX: Normalise LTP, Bid, and Ask from paise to rupees
-                # Angel One WebSocket often sends these values multiplied by 100.
-                # =============================================================
-                if ltp > 1000:
-                    ltp = ltp / 100.0
-                    logger.info(f"🔄 Normalised LTP: {ltp}")
-
+                # Normalise bid/ask
                 if bid > 1000:
                     bid = bid / 100.0
                 if ask > 1000:
                     ask = ask / 100.0
-                # =============================================================
 
                 # ---- Spot matching ----
                 spot_matched = False
@@ -2261,7 +2244,6 @@ def on_ws_data(wsapp, message):
                         continue
                     if token == tokens.get("ce_token"):
                         if ltp > 0:
-                            # ---- DEBUG LOG ----
                             logger.info(f"🔔 CE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
@@ -2279,7 +2261,6 @@ def on_ws_data(wsapp, message):
                             break
                     elif token == tokens.get("pe_token"):
                         if ltp > 0:
-                            # ---- DEBUG LOG ----
                             logger.info(f"🔔 PE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
@@ -2477,7 +2458,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (unchanged)
+# ENHANCED REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2629,7 +2610,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS – NON-BLOCKING PREFETCH
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2692,7 +2673,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (unchanged)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -2705,7 +2686,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16.1 – LTP Fix",
+        "engine": "Equity-Only Scalping v16.2 – Final",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2757,7 +2738,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.1-ltp-fix"
+            "version": "16.2-final"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
