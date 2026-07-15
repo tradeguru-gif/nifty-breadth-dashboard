@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16.7 – ALL FIXES APPLIED ===
+# === EQUITY-ONLY SCALPING v16.8 – CRITICAL FIXES APPLIED ===
 import sys
 import logging
 import os
@@ -37,7 +37,8 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5000",
     "https://kame.nifty-options.workers.dev"
 ]
-CORS(app, origins="*", supports_credentials=False)
+# FIX: Use the allowed origins list instead of wildcard
+CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
 
 API_KEY = os.getenv("API_KEY", "")
 application = app
@@ -103,7 +104,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================
-# MONKEY PATCHES – fix SmartAPI WS bugs
+# MONKEY PATCHES – fix SmartAPI WS bugs (CRITICAL FIX: fresh result dict)
 # ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
@@ -112,7 +113,10 @@ def _patched_parse(self, binary_data):
         if result and result.get('token'):
             return result
     except Exception:
-        result = {}
+        pass  # Fall through to fallback parser
+
+    # Fresh dict only for fallback – do NOT reuse previous result
+    result = {}
     try:
         if len(binary_data) >= 10:
             token_int = int.from_bytes(binary_data[2:10], byteorder='little')
@@ -315,7 +319,6 @@ latest_ticks["VIX"] = {"vix": 15.0}
 
 daily_drawdown = {idx: {"peak_equity": 0.0, "current_drawdown": 0.0, "dd_warning_sent": False} for idx in INDEX_NAMES}
 safety_state = {idx: {"consecutive_sl": 0, "circuit_breaker": False, "circuit_breaker_until": 0} for idx in INDEX_NAMES}
-signal_buffer = {idx: {"ce_count": 0, "pe_count": 0} for idx in INDEX_NAMES}
 daily_trade_count = {idx: 0 for idx in INDEX_NAMES}
 last_trade_date = {idx: "" for idx in INDEX_NAMES}
 
@@ -570,7 +573,9 @@ def get_option_greeks(index_name):
     tokens = INDEX_TOKENS.get(index_name)
     if not tokens or not tokens.get("ce_token") or not tokens.get("pe_token"):
         return _estimate_greeks_fallback(index_name)
-    _, _, obj = get_auth_token()
+    auth_token, _, obj = get_auth_token()
+    if not auth_token:
+        return _estimate_greeks_fallback(index_name)
     if obj:
         try:
             expiry_str = tokens.get("expiry", "")
@@ -581,7 +586,6 @@ def get_option_greeks(index_name):
                     local_ip = socket.gethostbyname(socket.gethostname())
                 except Exception:
                     local_ip = "127.0.0.1"
-                auth_token, _, _ = get_auth_token()
                 headers = {
                     "Authorization": f"Bearer {auth_token}", "Content-Type": "application/json",
                     "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
@@ -851,7 +855,7 @@ def get_next_expiry_date(index_name):
         days_ahead += 7
     return today + timedelta(days=days_ahead)
 
-# ---------- get_current_atm_tokens – FIXED expiry format and nearest None ----------
+# ---------- get_current_atm_tokens – FIXED expiry format and nearest selection ----------
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"):
@@ -957,16 +961,16 @@ def get_current_atm_tokens(index_name):
             INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
             return None, None
 
-        # Get nearest expiry date – ensure we have one
+        # ---- FIX: Collect all valid expiry dates and take the nearest ----
         if "expiry_date" in future.columns and not future["expiry_date"].isna().all():
             nearest = future["expiry_date"].min()
         else:
-            nearest = None
+            valid_dates = []
             for _, row in future.iterrows():
                 exp_date = parse_expiry_date(row["expiry"])
                 if exp_date:
-                    nearest = exp_date
-                    break
+                    valid_dates.append(exp_date)
+            nearest = min(valid_dates) if valid_dates else None
 
         # If still None, return None
         if nearest is None:
@@ -1460,11 +1464,12 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS – FIXED spread_ok to require both bid and ask > 0
 # ============================================================
 def spread_ok(bid, ask, prem):
+    # Require both bid and ask to be valid (>0)
     if bid <= 0 or ask <= 0:
-        return True
+        return False
     spread = ask - bid
     if prem > 0 and spread / prem > 0.05:
         return False
@@ -2399,6 +2404,8 @@ def on_ws_data(wsapp, message):
                         with _latest_ticks_lock:
                             latest_ticks["VIX"]["vix"] = ltp
                         vix_history.append(ltp)
+                        # Update last_tick_timestamp so watchdog sees activity
+                        last_tick_timestamp = time.time()
                 else:
                     logger.debug(f"Unknown token: {token}")
 
@@ -2806,7 +2813,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16.7 – All Fixes",
+        "engine": "Equity-Only Scalping v16.8 – Critical Fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2858,7 +2865,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.7-final"
+            "version": "16.8-critical-fixes"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
