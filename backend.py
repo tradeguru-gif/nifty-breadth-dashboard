@@ -2011,9 +2011,10 @@ def run_signal_engine_for_index(index_name):
             sl_pct *= 0.7
             target_mult *= 0.8
         sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
+
         target = prem + atr * target_mult
 
-             stop_dist = prem - sl
+        stop_dist = prem - sl
         
         # ---- FIX: Handle invalid stop distance ----
         if stop_dist <= 0:
@@ -2023,7 +2024,6 @@ def run_signal_engine_for_index(index_name):
             stop_dist = prem - sl
             
             if stop_dist <= 0 or prem < 5:
-                # If still invalid or premium is microscopic, block the trade
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Premium too small ({prem:.2f}) - cannot set SL"
                     market_signal[index_name]["signal"] = "BLOCKED"
