@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16.6 – WS STARTS IMMEDIATELY ===
+# === EQUITY-ONLY SCALPING v16.7 – ALL FIXES APPLIED ===
 import sys
 import logging
 import os
@@ -158,7 +158,7 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – ALL 15 EQUITY INDICES (same as before)
+# INDEX CONFIGURATION – ALL 15 EQUITY INDICES
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -851,7 +851,7 @@ def get_next_expiry_date(index_name):
         days_ahead += 7
     return today + timedelta(days=days_ahead)
 
-# ---------- get_current_atm_tokens (fixed) ----------
+# ---------- get_current_atm_tokens – FIXED expiry format and nearest None ----------
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"):
@@ -872,7 +872,9 @@ def get_current_atm_tokens(index_name):
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
 
-    expiry = next_expiry.strftime("%d%b%Y").upper()
+    expiry_4digit = next_expiry.strftime("%d%b%Y").upper()   # "17JUL2026"
+    expiry_2digit = next_expiry.strftime("%d%b%y").upper()    # "17JUL26"
+
     scrip = get_scrip_master()
     if not scrip:
         logger.warning(f"{index_name}: No scrip master data")
@@ -936,9 +938,11 @@ def get_current_atm_tokens(index_name):
         opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100.0
         opts = opts.dropna(subset=["strike"])
 
-        # Filter by expiry
-        future = opts[opts["expiry"].str.upper() == expiry]
+        # Filter by expiry – try both 4-digit and 2-digit
+        future = opts[(opts["expiry"].str.upper() == expiry_4digit) |
+                      (opts["expiry"].str.upper() == expiry_2digit)]
         if future.empty:
+            # Fallback: nearest future expiry (date comparison)
             opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
             opts = opts.dropna(subset=["expiry_date"])
             today = date.today()
@@ -949,11 +953,11 @@ def get_current_atm_tokens(index_name):
                 logger.warning(f"{index_name}: No future-dated options, using all available")
 
         if future.empty:
-            logger.warning(f"{index_name}: No options found for expiry {expiry}")
+            logger.warning(f"{index_name}: No options found for expiry {expiry_4digit} or {expiry_2digit}")
             INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
             return None, None
 
-        # Get nearest expiry date
+        # Get nearest expiry date – ensure we have one
         if "expiry_date" in future.columns and not future["expiry_date"].isna().all():
             nearest = future["expiry_date"].min()
         else:
@@ -963,6 +967,12 @@ def get_current_atm_tokens(index_name):
                 if exp_date:
                     nearest = exp_date
                     break
+
+        # If still None, return None
+        if nearest is None:
+            logger.warning(f"{index_name}: Could not determine expiry date")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
 
         # Find ATM strike
         atm_opts = future[future["strike"] == atm]
@@ -1001,7 +1011,7 @@ def get_current_atm_tokens(index_name):
             "ce_token": ce_token,
             "pe_token": pe_token,
             "atm_strike": actual_strike,
-            "expiry": expiry,
+            "expiry": expiry_4digit,  # Use 4-digit for consistency
             "expiry_date": nearest,
             "ce_symbol": ce_symbol,
             "pe_symbol": pe_symbol
@@ -1013,7 +1023,24 @@ def get_current_atm_tokens(index_name):
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
 
-# ---------- refresh_all_tokens with rate limiting ----------
+# ---------- Token map for fast WebSocket lookup ----------
+_token_to_index = {}
+def build_token_map():
+    global _token_to_index
+    _token_to_index = {}
+    for idx, cfg in INDEX_CONFIG.items():
+        if cfg.get("token"):
+            _token_to_index[cfg["token"]] = ("spot", idx)
+    for idx, tokens in INDEX_TOKENS.items():
+        if tokens.get("ce_token"):
+            _token_to_index[tokens["ce_token"]] = ("ce", idx)
+        if tokens.get("pe_token"):
+            _token_to_index[tokens["pe_token"]] = ("pe", idx)
+    _token_to_index["99919017"] = ("vix", "VIX")
+
+build_token_map()
+
+# ---------- refresh_all_tokens with re-subscription retries ----------
 def refresh_all_tokens():
     auth_token, feed_token, obj = get_auth_token()
     if not obj:
@@ -1034,14 +1061,23 @@ def refresh_all_tokens():
         if i < len(active_indices) - 1:
             time.sleep(0.5)
 
-    resubscribe_options()
+    # Rebuild token map after loading
+    build_token_map()
 
-# ---------- Re-subscription ----------
+    # Try to re-subscribe multiple times with delays
+    for _ in range(10):
+        resubscribe_options()
+        if ws_running:
+            break
+        time.sleep(2)
+
+# ---------- Re-subscription with small delay ----------
 def resubscribe_options():
     global sws
     if not sws or not ws_running:
         logger.info("WebSocket not ready for re-subscription")
         return
+    time.sleep(2)  # Wait for connection to stabilize
     token_list = []
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active"):
@@ -1316,12 +1352,14 @@ def compute_signal_quality(index_name):
     return min(100, sum(scores))
 
 # ----------------------------------------------------------------------
-# DATA READINESS CHECK
+# DATA READINESS CHECK – uses latest_ticks for live data
 # ----------------------------------------------------------------------
 def has_complete_data(index_name):
-    return (last_known_prices[index_name].get("spot", 0) > 0 and
-            (last_known_prices[index_name].get("ce", 0) > 0 or
-             last_known_prices[index_name].get("pe", 0) > 0))
+    with _latest_ticks_lock:
+        spot = latest_ticks[index_name].get("spot_price", 0)
+        ce = latest_ticks[index_name].get("ce_price", 0)
+        pe = latest_ticks[index_name].get("pe_price", 0)
+    return spot > 0 and (ce > 0 or pe > 0)
 
 # ----------------------------------------------------------------------
 # PERSISTENCE
@@ -1521,6 +1559,11 @@ def get_option_quote(index_name, option_type):
         oi = int(item.get("oi", 0) or item.get("openInterest", 0) or 0)
         bid = float(item.get("bp", 0) or item.get("bid", 0) or 0)
         ask = float(item.get("ap", 0) or item.get("ask", 0) or 0)
+        # Normalize bid/ask as well
+        if bid > 2000:
+            bid = bid / 100.0
+        if ask > 2000:
+            ask = ask / 100.0
         return {
             "ltp": ltp,
             "volume": volume,
@@ -2170,7 +2213,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS – FIXED LTP NORMALISATION
+# WEBSOCKET + WATCHDOGS – FIXED LTP NORMALISATION + TOKEN MAP
 # ============================================================
 ws_running = False
 sws = None
@@ -2217,6 +2260,14 @@ def on_ws_open(wsapp):
                 logger.info(f"Successfully subscribed to {total} tokens")
         except Exception as e:
             logger.error(f"Subscribe error: {e}")
+
+    # Start a background thread to re-subscribe as tokens load
+    def delayed_resubscribe():
+        for _ in range(30):  # Try for 5 minutes
+            time.sleep(10)
+            resubscribe_options()
+
+    threading.Thread(target=delayed_resubscribe, daemon=True).start()
 
 def on_ws_error(wsapp, error):
     global ws_running
@@ -2300,10 +2351,10 @@ def on_ws_data(wsapp, message):
                 if ask > 500000:
                     ask = ask / 100.0
 
-                # ---- Spot matching ----
-                spot_matched = False
-                for idx, cfg in INDEX_CONFIG.items():
-                    if cfg.get("token") == token:
+                # ---- Fast token lookup using token map ----
+                if token in _token_to_index:
+                    tick_type, idx = _token_to_index[token]
+                    if tick_type == "spot":
                         if ltp > 0:
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["spot_price"] = ltp
@@ -2314,17 +2365,7 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["spot"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            spot_matched = True
-                            break
-                if spot_matched:
-                    continue
-
-                # ---- Option matching ----
-                option_matched = False
-                for idx, tokens in INDEX_TOKENS.items():
-                    if not INDEX_CONFIG[idx].get("active"):
-                        continue
-                    if token == tokens.get("ce_token"):
+                    elif tick_type == "ce":
                         if ltp > 0:
                             logger.info(f"🔔 CE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
@@ -2339,9 +2380,7 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            option_matched = True
-                            break
-                    elif token == tokens.get("pe_token"):
+                    elif tick_type == "pe":
                         if ltp > 0:
                             logger.info(f"🔔 PE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
@@ -2356,16 +2395,12 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["pe"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            option_matched = True
-                            break
-                if option_matched:
-                    continue
-
-                # ---- VIX ----
-                if str(token) == "99919017" and ltp > 0:
-                    with _latest_ticks_lock:
-                        latest_ticks["VIX"]["vix"] = ltp
-                    vix_history.append(ltp)
+                    elif tick_type == "vix":
+                        with _latest_ticks_lock:
+                            latest_ticks["VIX"]["vix"] = ltp
+                        vix_history.append(ltp)
+                else:
+                    logger.debug(f"Unknown token: {token}")
 
             except Exception as e:
                 logger.error(f"Error processing tick: {e}\n{traceback.format_exc()}")
@@ -2771,7 +2806,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16.6 – WS Immediate",
+        "engine": "Equity-Only Scalping v16.7 – All Fixes",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2823,7 +2858,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.6-ws-immediate"
+            "version": "16.7-final"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
