@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16.2 – FINAL FIXED (No Telegram, No Commodity) ===
+# === EQUITY-ONLY SCALPING v16.3 – ALL 15 INDICES (Final) ===
 import sys
 import logging
 import os
@@ -103,7 +103,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 # ============================================================
-# MONKEY PATCHES – fix SmartAPI WS bugs (ENHANCED BINARY PARSER)
+# MONKEY PATCHES – fix SmartAPI WS bugs
 # ============================================================
 _original_parse = SmartWebSocketV2._parse_binary_data
 def _patched_parse(self, binary_data):
@@ -114,23 +114,16 @@ def _patched_parse(self, binary_data):
     except Exception:
         result = {}
     try:
-        # Fallback manual byte parsing for SmartWebSocketV2 (Angel One binary format)
         if len(binary_data) >= 10:
             token_int = int.from_bytes(binary_data[2:10], byteorder='little')
             if token_int > 0:
                 result['token'] = str(token_int)
-
-                # Extract LTP (bytes 26-33, int64, divide by 100)
                 if len(binary_data) >= 34:
                     ltp_raw = int.from_bytes(binary_data[26:34], byteorder='little', signed=True)
                     result['last_traded_price'] = ltp_raw / 100.0
-
-                # Extract Volume (bytes 42-49)
                 if len(binary_data) >= 50:
                     vol_raw = int.from_bytes(binary_data[42:50], byteorder='little', signed=True)
                     result['volume'] = vol_raw
-
-                # Extract Bid/Ask Prices (bytes 50-57, 66-73) with sanity checks
                 if len(binary_data) >= 74:
                     bid_raw = int.from_bytes(binary_data[50:58], byteorder='little', signed=True)
                     ask_raw = int.from_bytes(binary_data[66:74], byteorder='little', signed=True)
@@ -138,12 +131,9 @@ def _patched_parse(self, binary_data):
                         result['best_bid_price'] = bid_raw / 100.0
                     if 0 < ask_raw < 100000000:
                         result['best_ask_price'] = ask_raw / 100.0
-
-                # Extract Open Interest (bytes 82-89)
                 if len(binary_data) >= 90:
                     oi_raw = int.from_bytes(binary_data[82:90], byteorder='little', signed=True)
                     result['open_interest'] = oi_raw
-
                 return result
     except Exception as e:
         logger.debug(f"Critical error in custom binary fallback parser: {e}")
@@ -168,116 +158,113 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – Only Equity Indices (Relaxed thresholds for scalping)
+# INDEX CONFIGURATION – ALL 15 EQUITY INDICES (using discovered tokens)
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
-    # ========== 5 CORE WORKING INDICES ==========
     "NIFTY": {
         "token": "99926000", "exchange": "NSE", "symbol": "NIFTY", "lot_size": 50, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "BANKNIFTY": {
         "token": "99926009", "exchange": "NSE", "symbol": "BANKNIFTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "NIFTY", "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "FINNIFTY": {
         "token": "99926037", "exchange": "NSE", "symbol": "FINNIFTY", "lot_size": 40, "expiry_weekday": 1, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "SENSEX": {
         "token": "99919000", "exchange": "BSE", "symbol": "SENSEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "BANKEX": {
         "token": "99919012", "exchange": "BSE", "symbol": "BANKEX", "lot_size": 15, "expiry_weekday": 4, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 100, "option_exchange": "BFO",
         "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": "BANKNIFTY", "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
-
-    # ========== 8 NEW ELIGIBLE INDICES (ACTIVATED) ==========
     "MIDCPNIFTY": {
         "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 75, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "PSUBNIFTY": {
         "token": "99926025", "exchange": "NSE", "symbol": "Nifty PSU Bank", "lot_size": 50, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYIT": {
         "token": "99926008", "exchange": "NSE", "symbol": "Nifty IT", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYPHARMA": {
         "token": "99926023", "exchange": "NSE", "symbol": "Nifty Pharma", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYFMCG": {
         "token": "99926021", "exchange": "NSE", "symbol": "Nifty FMCG", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYAUTO": {
         "token": "99926029", "exchange": "NSE", "symbol": "Nifty Auto", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYREALTY": {
         "token": "99926022", "exchange": "NSE", "symbol": "NIFTYREALTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYMETAL": {
         "token": "99926024", "exchange": "NSE", "symbol": "NIFTYMETAL", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYENERGY": {
         "token": "99926026", "exchange": "NSE", "symbol": "NIFTYENERGY", "lot_size": 25, "expiry_weekday": 3, "active": True,
-        "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
+        "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
 
     # ========== INACTIVE (No F&O or Duplicate) ==========
-    "MIDSELNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
-    "NIFTYNEXT50": { "token": "99926078", "exchange": "NSE", "symbol": "NIFTYNEXT50", "lot_size": 25, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY", "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
-    "SENSEXNEXT": { "token": "99919001", "exchange": "BSE", "symbol": "SENSEXNEXT", "lot_size": 15, "expiry_weekday": 4, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0, "correlation_pair": "SENSEX", "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
-    "PRIVATENIFTY": { "token": "99926056", "exchange": "NSE", "symbol": "PRIVATENIFTY", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
+    "MIDSELNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
+    "NIFTYNEXT50": { "token": "99926078", "exchange": "NSE", "symbol": "NIFTYNEXT50", "lot_size": 25, "expiry_weekday": 3, "active": False, "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": "NIFTY", "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
+    "SENSEXNEXT": { "token": "99919001", "exchange": "BSE", "symbol": "SENSEXNEXT", "lot_size": 15, "expiry_weekday": 4, "active": False, "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "BFO", "ws_exchange_type": 3, "option_ws_exchange_type": 4, "max_daily_drawdown_pct": 3.0, "correlation_pair": "SENSEX", "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
+    "PRIVATENIFTY": { "token": "99926056", "exchange": "NSE", "symbol": "PRIVATENIFTY", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 20, "regime_atr_threshold": 0.4 },
 }
 
 INDEX_TOKEN_SET = {cfg["token"] for cfg in INDEX_CONFIG.values() if cfg.get("token")}
@@ -338,11 +325,10 @@ _signal_run_lock = threading.Lock()
 _historical_iv_ce = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 
-# Regime hysteresis
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# TIMEFRAME DEFINITIONS – Only 1m, 2m, 3m, 5m
+# TIMEFRAME DEFINITIONS – 1m, 2m, 3m, 5m
 # ----------------------------------------------------------------------
 TIMEFRAMES = ["1min", "2min", "3min", "5min"]
 TIMEFRAME_SECONDS = {"1min":60, "2min":120, "3min":180, "5min":300}
@@ -354,7 +340,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# INDICATORS
+# INDICATORS (same as before, unchanged)
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -385,7 +371,6 @@ def calculate_rsi(prices, period=14):
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow:
         return 0.0, 0.0, 0.0
-
     macd_history = []
     for i in range(slow, len(prices) + 1):
         sub_prices = prices[:i]
@@ -395,10 +380,8 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
             macd_history.append(ema_fast - ema_slow)
         else:
             macd_history.append(0.0)
-
     if len(macd_history) < signal:
         return macd_history[-1] if macd_history else 0.0, 0.0, 0.0
-
     sig_line = calculate_ema(macd_history, signal)
     macd_line = macd_history[-1]
     if sig_line is None:
@@ -502,7 +485,6 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
         else:
             delta_est = max(-0.95, min(-0.05, -0.5 - moneyness * 5))
         return iv_est, delta_est
-
     intrinsic = max(0, (S - K) if option_type == "CE" else (K - S))
     if premium <= intrinsic + 0.01:
         iv_est = 0.01
@@ -511,13 +493,11 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
             iv_est = brentq(lambda sig: bsm_price_helper(sig, S, K, T, r, premium, option_type), 0.01, 2.0, maxiter=50)
         except Exception:
             iv_est = 0.2
-
     try:
         d1 = (math.log(S/K) + (r + 0.5*iv_est**2)*T) / (iv_est*math.sqrt(T))
         delta_est = norm.cdf(d1) if option_type == "CE" else -norm.cdf(-d1)
     except Exception:
         delta_est = 0.5 if option_type == "CE" else -0.5
-
     return iv_est, delta_est
 
 greeks_cache_fallback_store = {}
@@ -560,7 +540,6 @@ def _estimate_greeks_fallback(index_name):
         _historical_iv_ce[index_name].append(iv_ce)
     if iv_pe > 0:
         _historical_iv_pe[index_name].append(iv_pe)
-
     def get_rank(hist, current):
         if len(hist) < 20:
             return 50.0
@@ -704,7 +683,6 @@ class CorrelationFilter:
         self.nifty_returns = deque(maxlen=50)
         self.banknifty_returns = deque(maxlen=50)
         self.correlation = 0.0
-
     def update(self, nifty_price, banknifty_price):
         if nifty_price > 0 and banknifty_price > 0:
             if len(self.nifty_prices) > 0:
@@ -725,7 +703,6 @@ class CorrelationFilter:
                 self.banknifty_returns.append(0.0)
             self.nifty_prices.append(nifty_price)
             self.banknifty_prices.append(banknifty_price)
-
             if len(self.nifty_returns) >= 20 and len(self.banknifty_returns) >= 20:
                 n_arr = np.array(list(self.nifty_returns)[-20:])
                 b_arr = np.array(list(self.banknifty_returns)[-20:])
@@ -733,7 +710,6 @@ class CorrelationFilter:
                     self.correlation = np.corrcoef(n_arr, b_arr)[0,1]
                 else:
                     self.correlation = 0.0
-
     def analyze(self, index_name, action):
         if abs(self.correlation) > 0.8:
             return {"beta_adjustment": 1.0, "block_reason": None, "correlation": self.correlation}
@@ -982,10 +958,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
             _prev_volume[idx] = cumulative_volume
         else:
             tick_vol = 0
-
         if tick_vol > 1000000:
             tick_vol = 0
-
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
@@ -1004,7 +978,6 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
                     _current_candle[idx][tf]["close"] = price
                     _current_candle[idx][tf]["volume"] += tick_vol
-
             if tf == "1min" and _current_candle[idx][tf] is not None:
                 current_age = timestamp - _current_candle[idx][tf]["timestamp"]
                 if current_age > 90:
@@ -1027,7 +1000,7 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 30:
+        if len(closes) < 20:   # Reduced from 60 for faster signals
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -1101,7 +1074,7 @@ def detect_regime(index_name):
     atr_threshold = config.get("regime_atr_threshold", 0.4)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
-    if len(candles) < 15:
+    if len(candles) < 10:   # Reduced from 30
         return "NORMAL"
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
@@ -1112,7 +1085,6 @@ def detect_regime(index_name):
     if spot == 0:
         return "NORMAL"
     atr_pct = (atr / spot) * 100.0
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 20:
@@ -1120,7 +1092,6 @@ def detect_regime(index_name):
         vix_sma = sum(vix_slices) / len(vix_slices)
     else:
         vix_sma = vix
-
     if adx > adx_threshold and atr_pct > atr_threshold:
         new_regime = "TRENDING"
     elif adx < adx_threshold * 0.6 and atr_pct < atr_threshold * 0.5:
@@ -1129,7 +1100,6 @@ def detect_regime(index_name):
         new_regime = "VOLATILE"
     else:
         new_regime = "NORMAL"
-
     _regime_history[index_name].append(new_regime)
     if len(_regime_history[index_name]) >= 3:
         counts = Counter(_regime_history[index_name])
@@ -1140,7 +1110,7 @@ def detect_regime(index_name):
 def confirm_signal_with_candles(index_name, side, spot):
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])
-    if len(candles) < 10:
+    if len(candles) < 5:   # Reduced from 10
         return False
     closes = [c["close"] for c in candles[-10:]]
     ema9 = calculate_ema(closes, 9)
@@ -1344,7 +1314,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
             exit_reason = "5min trend turned bullish"
     if exit_reason:
         return True, exit_reason
-
     with _candle_histories_lock:
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
     if len(closes) >= 20:
@@ -1357,7 +1326,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 10:
@@ -1455,7 +1423,7 @@ def run_signal_engine_for_index(index_name):
 
         with _market_signal_lock:
             if candle_len < 5:
-                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/10)"
+                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/5)"
                 market_signal[index_name]["signal"] = "WAITING"
             else:
                 market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
@@ -1482,9 +1450,7 @@ def run_signal_engine_for_index(index_name):
             pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
             pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
-        # =============================================================
         # SAFETY FALLBACK: Normalise premiums if they came in as paise
-        # =============================================================
         if ce_prem > 1000:
             ce_prem = ce_prem / 100.0
             logger.info(f"🔄 run_signal: Normalised CE premium for {index_name} to {ce_prem}")
@@ -1499,7 +1465,6 @@ def run_signal_engine_for_index(index_name):
             pe_bid = pe_bid / 100.0
         if pe_ask > 1000:
             pe_ask = pe_ask / 100.0
-        # =============================================================
 
         if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
             with _market_signal_lock:
@@ -1842,7 +1807,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
-        # ---------- RELAXED VWAP FILTER ----------
+        # RELAXED VWAP FILTER
         spot_vwap = vp_engine.analyze(spot, ce_vol + pe_vol, option_type=None)["vwap"]
         if spot_vwap > 0:
             if side == "CE" and spot > spot_vwap * 1.01:
@@ -2015,12 +1980,10 @@ def run_signal_engine_for_index(index_name):
         
         # ---- FIX: Handle invalid stop distance ----
         if stop_dist <= 0:
-            # If premium is too small, use a percentage-based SL as fallback
-            fallback_sl_pct = 0.15  # 15% SL for very small premiums
+            fallback_sl_pct = 0.15
             sl = prem * (1 - fallback_sl_pct)
             stop_dist = prem - sl
-            
-            if stop_dist <= 0 or prem < 5:
+            if stop_dist <= 0 or prem < 1:   # min_premium now 1
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Premium too small ({prem:.2f}) - cannot set SL"
                     market_signal[index_name]["signal"] = "BLOCKED"
@@ -2087,7 +2050,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS – FIXED LTP NORMALISATION
+# WEBSOCKET + WATCHDOGS
 # ============================================================
 ws_running = False
 sws = None
@@ -2202,7 +2165,7 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # ----- FIX: Normalise LTP (remove double-division) -----
+                # Normalise LTP from paise
                 if ltp > 1000:
                     ltp = ltp / 100.0
                     logger.info(f"🔄 Normalised LTP from paise to rupees: {ltp}")
@@ -2686,7 +2649,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16.2 – Final",
+        "engine": "Equity-Only Scalping v16.3 – All 15 Indices",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2716,7 +2679,7 @@ def live_signals():
             if market_signal[idx].get("alert_message") == "" and market_signal[idx].get("signal") in ("WAITING", ""):
                 with _candle_histories_lock:
                     candle_len = len(candle_histories[idx]["1min"])
-                if candle_len >= 10:
+                if candle_len >= 5:
                     run_signal_engine_for_index(idx)
 
     with _market_signal_lock, _portfolio_state_lock:
@@ -2738,7 +2701,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.2-final"
+            "version": "16.3-all-15"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
