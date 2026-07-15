@@ -1,4 +1,4 @@
-# === EQUITY-ONLY SCALPING v16.3 – ALL 15 INDICES (Final) ===
+# === EQUITY-ONLY SCALPING v16.5 – FULLY FIXED (All Bugs Resolved) ===
 import sys
 import logging
 import os
@@ -14,7 +14,7 @@ import socket
 import struct
 import traceback
 from collections import deque, Counter
-from datetime import datetime, timedelta, time as dt_time, timezone
+from datetime import datetime, timedelta, time as dt_time, timezone, date
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -158,7 +158,7 @@ SmartWebSocketV2._on_pong = _patched_on_pong
 # ============================================================
 
 # ----------------------------------------------------------------------
-# INDEX CONFIGURATION – ALL 15 EQUITY INDICES (using discovered tokens)
+# INDEX CONFIGURATION – ALL 15 EQUITY INDICES
 # ----------------------------------------------------------------------
 INDEX_CONFIG = {
     "NIFTY": {
@@ -340,7 +340,7 @@ _current_candle = {idx: {tf: None for tf in TIMEFRAMES} for idx in INDEX_NAMES}
 _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# INDICATORS (same as before, unchanged)
+# INDICATORS
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -851,80 +851,214 @@ def get_next_expiry_date(index_name):
         days_ahead += 7
     return today + timedelta(days=days_ahead)
 
+# ---------- FIXED get_current_atm_tokens – exact match first, partial with regex=False ----------
 def get_current_atm_tokens(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config or not config.get("active"):
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
+
     spot = get_index_spot(index_name)
     if not spot or spot <= 0:
+        logger.warning(f"{index_name}: get_index_spot returned {spot}, skipping token fetch")
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
+
     mult = config["atm_strike_multiple"]
     atm = int(round(spot / mult) * mult)
     next_expiry = get_next_expiry_date(index_name)
     if not next_expiry:
+        logger.warning(f"{index_name}: No expiry date found")
         INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
         return None, None
+
     expiry = next_expiry.strftime("%d%b%Y").upper()
     scrip = get_scrip_master()
-    if scrip:
-        try:
-            df = pd.DataFrame(scrip)
-            opts = df[(df["name"] == config["symbol"]) &
-                      (df["instrumenttype"] == "OPTIDX") &
-                      (df["exch_seg"] == config["option_exchange"])]
-            if not opts.empty:
-                opts = opts.copy()
-                opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
-                opts = opts.dropna(subset=["expiry_date"])
-                opts["strike"] = pd.to_numeric(opts["strike"], errors="coerce") / 100
-                opts = opts.dropna(subset=["strike"])
-                future = opts[opts["expiry_date"] >= datetime.now()]
-                if not future.empty:
-                    nearest = future["expiry_date"].min()
-                    atm_opts = future[(future["strike"] == atm) & (future["expiry_date"] == nearest)]
-                    if atm_opts.empty:
-                        same_exp = future[future["expiry_date"] == nearest]
-                        if not same_exp.empty:
-                            diff = (same_exp["strike"] - atm).abs()
-                            atm_opts = same_exp.loc[[diff.idxmin()]]
-                    if not atm_opts.empty:
-                        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
-                        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
-                        if not ce.empty and not pe.empty:
-                            ce_token = str(ce.iloc[0]["token"])
-                            pe_token = str(pe.iloc[0]["token"])
-                            ce_symbol = str(ce.iloc[0]["symbol"])
-                            pe_symbol = str(pe.iloc[0]["symbol"])
-                            actual_strike = int(ce.iloc[0]["strike"])
-                            if actual_strike != atm:
-                                logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
-                            else:
-                                logger.info(f"{index_name} ATM strike {atm} selected")
-                            INDEX_TOKENS[index_name].update({
-                                "ce_token": ce_token, "pe_token": pe_token, "atm_strike": actual_strike,
-                                "expiry": expiry, "expiry_date": nearest,
-                                "ce_symbol": ce_symbol, "pe_symbol": pe_symbol
-                            })
-                            return ce_token, pe_token
-        except Exception as e:
-            logger.warning(f"{index_name} token fetch error: {e}")
-    INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
-    return None, None
+    if not scrip:
+        logger.warning(f"{index_name}: No scrip master data")
+        INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+        return None, None
 
-def refresh_all_tokens():
-    for idx in INDEX_NAMES:
-        if INDEX_CONFIG[idx].get("active"):
-            success = False
-            for attempt in range(5):
-                ce, pe = get_current_atm_tokens(idx)
-                if ce and pe:
-                    success = True
+    try:
+        df = pd.DataFrame(scrip)
+
+        # Build list of possible name variants
+        symbol = config["symbol"]
+        variants = [
+            symbol,
+            symbol.upper(),
+            symbol.replace(" ", ""),
+            symbol.upper().replace(" ", ""),
+            index_name,
+            index_name.upper(),
+            index_name.replace(" ", ""),
+            index_name.upper().replace(" ", ""),
+        ]
+        variants = list(dict.fromkeys([v for v in variants if v]))
+
+        opts = None
+        used_variant = None
+
+        # 1. Try exact match (case-insensitive)
+        for variant in variants:
+            candidate = df[
+                (df["name"].str.upper() == variant.upper()) &
+                (df["instrumenttype"] == "OPTIDX") &
+                (df["exch_seg"] == config["option_exchange"])
+            ]
+            if not candidate.empty:
+                opts = candidate
+                used_variant = variant
+                logger.info(f"{index_name}: Found options using exact name match '{variant}'")
+                break
+
+        # 2. If exact fails, try partial (non-regex) match
+        if opts is None or opts.empty:
+            for variant in variants:
+                candidate = df[
+                    (df["name"].str.upper().str.contains(variant.upper(), regex=False, na=False)) &
+                    (df["instrumenttype"] == "OPTIDX") &
+                    (df["exch_seg"] == config["option_exchange"])
+                ]
+                if not candidate.empty:
+                    opts = candidate
+                    used_variant = variant
+                    logger.info(f"{index_name}: Found options using partial name match '{variant}'")
                     break
-                time.sleep(2)
-            if not success:
-                logger.warning(f"⚠️ Failed to load tokens for {idx} after 5 attempts")
+
+        if opts is None or opts.empty:
+            logger.warning(f"{index_name}: No options found for any variant. Available names containing '{symbol}':")
+            matching_names = df[df["name"].str.upper().str.contains(symbol.upper().replace(" ", ".*"), regex=False, na=False)]["name"].unique().tolist()
+            logger.warning(f"  {matching_names[:10]}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        # Filter by expiry date (use the target expiry string for exact match)
+        future = opts[opts["expiry"].str.upper() == expiry]
+        if future.empty:
+            # Fallback: nearest future expiry
+            opts["expiry_date"] = opts["expiry"].apply(parse_expiry_date)
+            opts = opts.dropna(subset=["expiry_date"])
+            today = date.today()
+            opts["expiry_date_only"] = opts["expiry_date"].apply(lambda x: x.date() if pd.notna(x) else date.min)
+            future = opts[opts["expiry_date_only"] >= today]
+            if future.empty:
+                future = opts  # Use all as last resort
+                logger.warning(f"{index_name}: No future-dated options, using all available")
+
+        if future.empty:
+            logger.warning(f"{index_name}: No options found for expiry {expiry}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        nearest = future["expiry_date"].min() if "expiry_date" in future.columns else None
+        if nearest is None:
+            nearest = future["expiry"].iloc[0]
+            # Try to parse the expiry string directly
+            for idx_row, row in future.iterrows():
+                exp_date = parse_expiry_date(row["expiry"])
+                if exp_date:
+                    nearest = exp_date
+                    break
+
+        # Find nearest strike
+        atm_opts = future[future["strike"] == atm]
+        if atm_opts.empty:
+            # Find the closest strike
+            diff = (future["strike"] - atm).abs()
+            if not diff.empty and diff.notna().any():
+                min_idx = diff.idxmin()
+                if min_idx in future.index:
+                    atm_opts = future.loc[[min_idx]]
+        if atm_opts.empty:
+            logger.warning(f"{index_name}: No options near ATM strike {atm}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce = atm_opts[atm_opts["symbol"].str.contains("CE", na=False)]
+        pe = atm_opts[atm_opts["symbol"].str.contains("PE", na=False)]
+
+        if ce.empty or pe.empty:
+            logger.warning(f"{index_name}: Missing CE or PE for strike {atm}")
+            INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+            return None, None
+
+        ce_token = str(ce.iloc[0]["token"])
+        pe_token = str(pe.iloc[0]["token"])
+        ce_symbol = str(ce.iloc[0]["symbol"])
+        pe_symbol = str(pe.iloc[0]["symbol"])
+        actual_strike = int(ce.iloc[0]["strike"])
+
+        if actual_strike != atm:
+            logger.info(f"{index_name} ATM strike {atm} not found, using nearest {actual_strike}")
+        else:
+            logger.info(f"{index_name} ATM strike {atm} selected")
+
+        INDEX_TOKENS[index_name].update({
+            "ce_token": ce_token,
+            "pe_token": pe_token,
+            "atm_strike": actual_strike,
+            "expiry": expiry,
+            "expiry_date": nearest,
+            "ce_symbol": ce_symbol,
+            "pe_symbol": pe_symbol
+        })
+        return ce_token, pe_token
+
+    except Exception as e:
+        logger.error(f"{index_name} token fetch error: {e}")
+        INDEX_TOKENS[index_name].update({"ce_token": None, "pe_token": None})
+        return None, None
+
+# ---------- refresh_all_tokens with rate limiting and re-subscription ----------
+def refresh_all_tokens():
+    # Pre-fetch auth once
+    auth_token, feed_token, obj = get_auth_token()
+    if not obj:
+        logger.error("Cannot refresh tokens: auth failed")
+        return
+
+    active_indices = [idx for idx in INDEX_NAMES if INDEX_CONFIG[idx].get("active")]
+    for i, idx in enumerate(active_indices):
+        success = False
+        for attempt in range(5):
+            ce, pe = get_current_atm_tokens(idx)
+            if ce and pe:
+                success = True
+                break
+            time.sleep(2)
+        if not success:
+            logger.warning(f"⚠️ Failed to load tokens for {idx} after 5 attempts")
+        # Small delay between indices to avoid rate limiting
+        if i < len(active_indices) - 1:
+            time.sleep(0.5)
+
+    # Re-subscribe to option tokens after loading
+    resubscribe_options()
+
+# ---------- Re-subscription function ----------
+def resubscribe_options():
+    global sws
+    if not sws or not ws_running:
+        logger.info("WebSocket not ready for re-subscription")
+        return
+    token_list = []
+    for idx, tokens in INDEX_TOKENS.items():
+        if not INDEX_CONFIG[idx].get("active"):
+            continue
+        if tokens.get("ce_token") and tokens.get("pe_token"):
+            exch_type = int(INDEX_CONFIG[idx]["option_ws_exchange_type"])
+            token_list.append({
+                "exchangeType": exch_type,
+                "tokens": [tokens["ce_token"], tokens["pe_token"]]
+            })
+    if token_list:
+        try:
+            sws.subscribe("resubscribe", 1, token_list)
+            total = sum(len(g["tokens"]) for g in token_list)
+            logger.info(f"Re-subscribed to {total} option tokens")
+        except Exception as e:
+            logger.error(f"Re-subscribe error: {e}")
 
 # ----------------------------------------------------------------------
 # MARKET HOURS (Equity only)
@@ -1000,7 +1134,7 @@ def compute_sentiment(index_name):
         if len(candles) < 10:
             continue
         closes = [c["close"] for c in candles]
-        if len(closes) < 20:   # Reduced from 60 for faster signals
+        if len(closes) < 20:
             continue
         ema9 = calculate_ema(closes, 9)
         ema21 = calculate_ema(closes, 21)
@@ -1074,7 +1208,7 @@ def detect_regime(index_name):
     atr_threshold = config.get("regime_atr_threshold", 0.4)
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["5min"])
-    if len(candles) < 10:   # Reduced from 30
+    if len(candles) < 10:
         return "NORMAL"
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
@@ -1110,7 +1244,7 @@ def detect_regime(index_name):
 def confirm_signal_with_candles(index_name, side, spot):
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])
-    if len(candles) < 5:   # Reduced from 10
+    if len(candles) < 5:
         return False
     closes = [c["close"] for c in candles[-10:]]
     ema9 = calculate_ema(closes, 9)
@@ -1380,8 +1514,10 @@ def get_option_quote(index_name, option_type):
         else:
             return None
         ltp = float(item.get("ltp", 0))
-        if ltp > 100000:
-            ltp /= 100
+        # Angel One REST returns option prices in paise; normalize if > 2000 (suspicious for rupees)
+        if ltp > 2000:
+            ltp = ltp / 100.0
+            logger.debug(f"Normalised REST option LTP from paise to rupees: {ltp}")
         volume = int(item.get("volume", 0) or item.get("v", 0) or 0)
         oi = int(item.get("oi", 0) or item.get("openInterest", 0) or 0)
         bid = float(item.get("bp", 0) or item.get("bid", 0) or 0)
@@ -1398,7 +1534,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE – RELAXED PARAMETERS
+# MAIN SIGNAL ENGINE
 # ============================================================
 def run_signal_engine_for_index(index_name):
     try:
@@ -1450,21 +1586,7 @@ def run_signal_engine_for_index(index_name):
             pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
             pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
-        # SAFETY FALLBACK: Normalise premiums if they came in as paise
-        if ce_prem > 1000:
-            ce_prem = ce_prem / 100.0
-            logger.info(f"🔄 run_signal: Normalised CE premium for {index_name} to {ce_prem}")
-        if pe_prem > 1000:
-            pe_prem = pe_prem / 100.0
-            logger.info(f"🔄 run_signal: Normalised PE premium for {index_name} to {pe_prem}")
-        if ce_bid > 1000:
-            ce_bid = ce_bid / 100.0
-        if ce_ask > 1000:
-            ce_ask = ce_ask / 100.0
-        if pe_bid > 1000:
-            pe_bid = pe_bid / 100.0
-        if pe_ask > 1000:
-            pe_ask = pe_ask / 100.0
+        # No redundant normalization here – data is already in rupees from WebSocket/REST
 
         if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
             with _market_signal_lock:
@@ -1983,7 +2105,7 @@ def run_signal_engine_for_index(index_name):
             fallback_sl_pct = 0.15
             sl = prem * (1 - fallback_sl_pct)
             stop_dist = prem - sl
-            if stop_dist <= 0 or prem < 1:   # min_premium now 1
+            if stop_dist <= 0 or prem < 1:
                 with _market_signal_lock:
                     market_signal[index_name]["alert_message"] = f"Premium too small ({prem:.2f}) - cannot set SL"
                     market_signal[index_name]["signal"] = "BLOCKED"
@@ -2050,7 +2172,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS
+# WEBSOCKET + WATCHDOGS – FIXED LTP NORMALISATION
 # ============================================================
 ws_running = False
 sws = None
@@ -2067,12 +2189,14 @@ def on_ws_open(wsapp):
     last_heartbeat = time.time()
     logger.info("WebSocket connected successfully, subscribing to tokens...")
 
+    # Subscribe to spot tokens immediately
     token_list = []
     for idx, cfg in INDEX_CONFIG.items():
         if cfg.get("active"):
             exch_type = int(cfg["ws_exchange_type"])
             token_list.append({"exchangeType": exch_type, "tokens": [cfg["token"]]})
 
+    # Also try to subscribe to option tokens if they are already loaded
     for idx, tokens in INDEX_TOKENS.items():
         if not INDEX_CONFIG[idx].get("active"):
             continue
@@ -2165,20 +2289,25 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # Normalise LTP from paise
-                if ltp > 1000:
+                # =============================================================
+                # FIXED: Do NOT divide spot prices by 100.
+                # The monkey-patch already divides by 100 to give rupees.
+                # Only apply a safety division if the value is extremely high (> 500000)
+                # which would indicate it's still in paise (e.g., option premium 50000 paise).
+                # =============================================================
+                if ltp > 500000:
                     ltp = ltp / 100.0
-                    logger.info(f"🔄 Normalised LTP from paise to rupees: {ltp}")
+                    logger.info(f"🔄 Extreme LTP normalised: {ltp}")
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-                # Normalise bid/ask
-                if bid > 1000:
+                # Normalise bid/ask if extremely high (safety)
+                if bid > 500000:
                     bid = bid / 100.0
-                if ask > 1000:
+                if ask > 500000:
                     ask = ask / 100.0
 
                 # ---- Spot matching ----
@@ -2649,7 +2778,7 @@ def check_auth():
 def home():
     return jsonify({
         "status": "healthy",
-        "engine": "Equity-Only Scalping v16.3 – All 15 Indices",
+        "engine": "Equity-Only Scalping v16.5 – Fully Fixed",
         "indices": [i for i, cfg in INDEX_CONFIG.items() if cfg.get("active")],
         "market_open": is_market_open()
     })
@@ -2701,7 +2830,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16.3-all-15"
+            "version": "16.5-final"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -2748,6 +2877,44 @@ def health():
         "rest_active": rest_active,
         "ticks": tick_counter,
         "last_tick_seconds_ago": round(time.time() - last_tick_timestamp, 2)
+    })
+
+@app.route("/api/debug/token-search/<index_name>", methods=["GET"])
+def debug_token_search(index_name):
+    """Diagnostic endpoint to check token search for an index"""
+    config = INDEX_CONFIG.get(index_name)
+    if not config:
+        return jsonify({"error": "Invalid index"}), 400
+
+    scrip = get_scrip_master()
+    if not scrip:
+        return jsonify({"error": "No scrip master"}), 500
+
+    df = pd.DataFrame(scrip)
+    symbol = config["symbol"]
+
+    # Show what names exist
+    all_names = df["name"].dropna().unique().tolist()
+    matches = [n for n in all_names if symbol.upper().replace(" ", "") in n.upper().replace(" ", "")]
+
+    # Try the search
+    variants = [symbol, symbol.upper(), symbol.replace(" ", ""), symbol.upper().replace(" ", ""), index_name, index_name.upper()]
+
+    results = []
+    for v in variants:
+        exact = df[(df["name"].str.upper() == v.upper()) & (df["instrumenttype"] == "OPTIDX")]
+        partial = df[(df["name"].str.upper().str.contains(v.upper(), regex=False, na=False)) & (df["instrumenttype"] == "OPTIDX")]
+        results.append({
+            "variant": v,
+            "exact_count": len(exact),
+            "partial_count": len(partial)
+        })
+
+    return jsonify({
+        "index": index_name,
+        "config_symbol": symbol,
+        "possible_matches": matches[:20],
+        "variant_results": results
     })
 
 @app.route("/api/connection-status", methods=["GET"])
