@@ -1620,7 +1620,7 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
 
-        with _latest_ticks_lock:
+                with _latest_ticks_lock:
             spot = latest_ticks[index_name].get("spot_price", 0.0) or 0.0
             ce_prem = latest_ticks[index_name].get("ce_price", 0.0) or 0.0
             pe_prem = latest_ticks[index_name].get("pe_price", 0.0) or 0.0
@@ -1633,15 +1633,7 @@ def run_signal_engine_for_index(index_name):
             pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
             pe_ask = latest_ticks[index_name].get("pe_ask", 0.0) or 0.0
 
-        # No redundant normalization here
-
-        if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "No price data yet"
-                market_signal[index_name]["signal"] = "WAITING"
-            return
-
-        # ---- Normalise bid/ask if they are in paise ----
+        # ---- NORMALISE BID/ASK FIRST (before any checks) ----
         if ce_bid > 1000:
             ce_bid = ce_bid / 100.0
             logger.info(f"🔄 Normalised ce_bid for {index_name} to {ce_bid}")
@@ -1654,6 +1646,12 @@ def run_signal_engine_for_index(index_name):
         if pe_ask > 1000:
             pe_ask = pe_ask / 100.0
             logger.info(f"🔄 Normalised pe_ask for {index_name} to {pe_ask}")
+
+        if spot <= 0 and ce_prem <= 0 and pe_prem <= 0:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = "No price data yet"
+                market_signal[index_name]["signal"] = "WAITING"
+            return
 
         if ce_bid > 0 and ce_ask > 0:
             ce_prem = (ce_bid + ce_ask) / 2
