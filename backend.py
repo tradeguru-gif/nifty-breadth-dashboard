@@ -208,56 +208,56 @@ INDEX_CONFIG = {
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "PSUBNIFTY": {
-        "token": "99926025", "exchange": "NSE", "symbol": "Nifty PSU Bank", "lot_size": 50, "expiry_weekday": 3, "active": True,
+        "token": "99926025", "exchange": "NSE", "symbol": "Nifty PSU Bank", "lot_size": 50, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYIT": {
-        "token": "99926008", "exchange": "NSE", "symbol": "Nifty IT", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926008", "exchange": "NSE", "symbol": "Nifty IT", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYPHARMA": {
-        "token": "99926023", "exchange": "NSE", "symbol": "Nifty Pharma", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926023", "exchange": "NSE", "symbol": "Nifty Pharma", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYFMCG": {
-        "token": "99926021", "exchange": "NSE", "symbol": "Nifty FMCG", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926021", "exchange": "NSE", "symbol": "Nifty FMCG", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYAUTO": {
-        "token": "99926029", "exchange": "NSE", "symbol": "Nifty Auto", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926029", "exchange": "NSE", "symbol": "Nifty Auto", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYREALTY": {
-        "token": "99926022", "exchange": "NSE", "symbol": "NIFTYREALTY", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926022", "exchange": "NSE", "symbol": "NIFTYREALTY", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYMETAL": {
-        "token": "99926024", "exchange": "NSE", "symbol": "NIFTYMETAL", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926024", "exchange": "NSE", "symbol": "NIFTYMETAL", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
         "regime_adx_threshold": 20, "regime_atr_threshold": 0.4
     },
     "NIFTYENERGY": {
-        "token": "99926026", "exchange": "NSE", "symbol": "NIFTYENERGY", "lot_size": 25, "expiry_weekday": 3, "active": True,
+        "token": "99926026", "exchange": "NSE", "symbol": "NIFTYENERGY", "lot_size": 25, "expiry_weekday": 3, "active": False,
         "min_premium": 1, "max_premium": 8000, "atm_strike_multiple": 50, "option_exchange": "NFO",
         "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0,
         "correlation_pair": None, "greeks_enabled": True, "pcr_enabled": True,
@@ -3000,6 +3000,5 @@ if __name__ == "__main__":
     refresh_all_tokens()
     _start_background_threads()
     logger.info("Background workers initiated. Starting Flask API Server...")
-    if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
