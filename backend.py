@@ -1471,7 +1471,7 @@ def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
         return False
     spread = ask - bid
-    if prem > 0 and spread / prem > 0.05:
+    if prem > 0 and spread / prem > 0.10:
         return False
     return True
 
