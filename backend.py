@@ -1620,7 +1620,8 @@ def run_signal_engine_for_index(index_name):
 
         now = time.time()
 
-                with _latest_ticks_lock:
+        # --- FIX: Correct indentation of the with block ---
+        with _latest_ticks_lock:
             spot = latest_ticks[index_name].get("spot_price", 0.0) or 0.0
             ce_prem = latest_ticks[index_name].get("ce_price", 0.0) or 0.0
             pe_prem = latest_ticks[index_name].get("pe_price", 0.0) or 0.0
