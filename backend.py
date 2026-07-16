@@ -1641,6 +1641,21 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
+        # ---- Normalise bid/ask if they are in paise ----
+        # ---- Normalise bid/ask if they are in paise ----
+if ce_bid > 1000:
+    ce_bid = ce_bid / 100.0
+    logger.info(f"🔄 Normalised ce_bid for {index_name} to {ce_bid}")
+if ce_ask > 1000:
+    ce_ask = ce_ask / 100.0
+    logger.info(f"🔄 Normalised ce_ask for {index_name} to {ce_ask}")
+if pe_bid > 1000:
+    pe_bid = pe_bid / 100.0
+    logger.info(f"🔄 Normalised pe_bid for {index_name} to {pe_bid}")
+if pe_ask > 1000:
+    pe_ask = pe_ask / 100.0
+    logger.info(f"🔄 Normalised pe_ask for {index_name} to {pe_ask}")
+
         if ce_bid > 0 and ce_ask > 0:
             ce_prem = (ce_bid + ce_ask) / 2
         if pe_bid > 0 and pe_ask > 0:
@@ -2351,9 +2366,9 @@ def on_ws_data(wsapp, message):
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
-                if bid > 500000:
+                if bid > 1000:
                     bid = bid / 100.0
-                if ask > 500000:
+                if ask > 1000:
                     ask = ask / 100.0
 
                 # ---- Fast token lookup using token map ----
