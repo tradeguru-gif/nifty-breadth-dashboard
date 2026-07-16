@@ -2354,16 +2354,14 @@ def on_ws_data(wsapp, message):
                     except:
                         ltp = 0
 
-                # Normalise only extreme values
-                if ltp > 500000:
-                    ltp = ltp / 100.0
-                    logger.info(f"🔄 Extreme LTP normalised: {ltp}")
+                # --- REMOVED GLOBAL NORMALISATION – now done per token type ---
 
                 vol = tick.get("volume") or tick.get("v") or tick.get("last_traded_quantity") or 0
                 oi = tick.get("open_interest") or tick.get("oi") or tick.get("OpenInterest") or 0
                 bid = tick.get("best_bid_price") or tick.get("bid") or tick.get("bp") or 0
                 ask = tick.get("best_ask_price") or tick.get("ask") or tick.get("ap") or 0
 
+                # Normalise bid/ask (paise → rupees) if > 1000
                 if bid > 1000:
                     bid = bid / 100.0
                 if ask > 1000:
@@ -2374,6 +2372,7 @@ def on_ws_data(wsapp, message):
                     tick_type, idx = _token_to_index[token]
                     if tick_type == "spot":
                         if ltp > 0:
+                            # Spot LTP is already in rupees
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["spot_price"] = ltp
                             with _price_histories_lock:
@@ -2384,8 +2383,11 @@ def on_ws_data(wsapp, message):
                                 last_known_prices[idx]["spot"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
                     elif tick_type == "ce":
+                        # Option premium: convert paise to rupees if > 1000
+                        if ltp > 1000:
+                            ltp = ltp / 100.0
+                            logger.info(f"🔄 CE LTP normalised paise→rupees for {idx}: {ltp}")
                         if ltp > 0:
-                            logger.info(f"🔔 CE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["ce_price"] = ltp
                                 latest_ticks[idx]["ce_volume"] = vol
@@ -2399,8 +2401,11 @@ def on_ws_data(wsapp, message):
                                 last_known_prices[idx]["ce"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
                     elif tick_type == "pe":
+                        # Option premium: convert paise to rupees if > 1000
+                        if ltp > 1000:
+                            ltp = ltp / 100.0
+                            logger.info(f"🔄 PE LTP normalised paise→rupees for {idx}: {ltp}")
                         if ltp > 0:
-                            logger.info(f"🔔 PE tick for {idx}: ltp={ltp}")
                             with _latest_ticks_lock:
                                 latest_ticks[idx]["pe_price"] = ltp
                                 latest_ticks[idx]["pe_volume"] = vol
