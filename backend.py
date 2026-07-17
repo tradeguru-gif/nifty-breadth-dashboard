@@ -207,7 +207,7 @@ INDEX_CONFIG = {
         "regime_adx_threshold": 25, "regime_atr_threshold": 0.8
     },
 
-    # ----- ALL OTHER INDICES INACTIVE (to be re‑enabled later) -----
+    # ----- ALL OTHER INDICES INACTIVE -----
     "MIDCPNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 75, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 25, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": True, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "PSUBNIFTY": { "token": "99926025", "exchange": "NSE", "symbol": "Nifty PSU Bank", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
     "MIDSELNIFTY": { "token": "99926074", "exchange": "NSE", "symbol": "NIFTY MID SELECT", "lot_size": 50, "expiry_weekday": 3, "active": False, "min_premium": 5, "max_premium": 8000, "atm_strike_multiple": 10, "option_exchange": "NFO", "ws_exchange_type": 1, "option_ws_exchange_type": 2, "max_daily_drawdown_pct": 3.0, "correlation_pair": None, "greeks_enabled": False, "pcr_enabled": False, "regime_adx_threshold": 25, "regime_atr_threshold": 0.5 },
@@ -295,8 +295,6 @@ _signal_run_lock = threading.Lock()
 
 _historical_iv_ce = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
 _historical_iv_pe = {idx: deque(maxlen=200) for idx in INDEX_NAMES}
-
-# Regime hysteresis
 _regime_history = {idx: deque(maxlen=5) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
@@ -315,16 +313,13 @@ _prev_volume = {idx: 0 for idx in INDEX_NAMES}
 # HELPER: Update trade PnL
 # ----------------------------------------------------------------------
 def update_trade_pnl(index_name, current_price):
-    """Update trade_state PnL and check auto-exit (optional) – called from WS tick."""
     if not trade_state[index_name]["active"] or current_price <= 0:
         return
     trade_state[index_name]["current_price"] = current_price
     trade_state[index_name]["pnl"] = round(current_price - trade_state[index_name]["entry_price"], 2)
-    # Optional auto-exit check – but we rely on the signal engine to close trades properly.
-    # We'll just update PnL; the background loop will handle exits.
 
 # ----------------------------------------------------------------------
-# INDICATORS (same as before, unchanged)
+# INDICATORS
 # ----------------------------------------------------------------------
 def calculate_ema(prices, period):
     if not prices or period <= 0:
@@ -355,7 +350,6 @@ def calculate_rsi(prices, period=14):
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow:
         return 0.0, 0.0, 0.0
-
     macd_history = []
     for i in range(slow, len(prices) + 1):
         sub_prices = prices[:i]
@@ -365,10 +359,8 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
             macd_history.append(ema_fast - ema_slow)
         else:
             macd_history.append(0.0)
-
     if len(macd_history) < signal:
         return macd_history[-1] if macd_history else 0.0, 0.0, 0.0
-
     sig_line = calculate_ema(macd_history, signal)
     macd_line = macd_history[-1]
     if sig_line is None:
@@ -444,7 +436,7 @@ def calculate_vwap(prices, volumes):
     return sum(p * v for p, v in zip(prices, volumes)) / total_vol
 
 # ----------------------------------------------------------------------
-# BSM & GREEKS – unchanged
+# BSM & GREEKS
 # ----------------------------------------------------------------------
 try:
     from scipy.optimize import brentq
@@ -472,7 +464,6 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
         else:
             delta_est = max(-0.95, min(-0.05, -0.5 - moneyness * 5))
         return iv_est, delta_est
-
     intrinsic = max(0, (S - K) if option_type == "CE" else (K - S))
     if premium <= intrinsic + 0.01:
         iv_est = 0.01
@@ -481,13 +472,11 @@ def bsm_iv_delta(S, K, T, r, premium, option_type):
             iv_est = brentq(lambda sig: bsm_price_helper(sig, S, K, T, r, premium, option_type), 0.01, 2.0, maxiter=50)
         except Exception:
             iv_est = 0.2
-
     try:
         d1 = (math.log(S/K) + (r + 0.5*iv_est**2)*T) / (iv_est*math.sqrt(T))
         delta_est = norm.cdf(d1) if option_type == "CE" else -norm.cdf(-d1)
     except Exception:
         delta_est = 0.5 if option_type == "CE" else -0.5
-
     return iv_est, delta_est
 
 greeks_cache_fallback_store = {}
@@ -530,7 +519,6 @@ def _estimate_greeks_fallback(index_name):
         _historical_iv_ce[index_name].append(iv_ce)
     if iv_pe > 0:
         _historical_iv_pe[index_name].append(iv_pe)
-
     def get_rank(hist, current):
         if len(hist) < 20:
             return 50.0
@@ -631,7 +619,7 @@ def get_option_greeks(index_name):
     return data
 
 # ----------------------------------------------------------------------
-# KELLY, CORRELATION, VOLUME PROFILE (unchanged)
+# KELLY, CORRELATION, VOLUME PROFILE
 # ----------------------------------------------------------------------
 class KellyCriterion:
     def __init__(self, index_name, kelly_fraction=0.25, min_trades=10):
@@ -674,7 +662,6 @@ class CorrelationFilter:
         self.nifty_returns = deque(maxlen=50)
         self.banknifty_returns = deque(maxlen=50)
         self.correlation = 0.0
-
     def update(self, nifty_price, banknifty_price):
         if nifty_price > 0 and banknifty_price > 0:
             if len(self.nifty_prices) > 0:
@@ -695,7 +682,6 @@ class CorrelationFilter:
                 self.banknifty_returns.append(0.0)
             self.nifty_prices.append(nifty_price)
             self.banknifty_prices.append(banknifty_price)
-
             if len(self.nifty_returns) >= 20 and len(self.banknifty_returns) >= 20:
                 n_arr = np.array(list(self.nifty_returns)[-20:])
                 b_arr = np.array(list(self.banknifty_returns)[-20:])
@@ -703,7 +689,6 @@ class CorrelationFilter:
                     self.correlation = np.corrcoef(n_arr, b_arr)[0,1]
                 else:
                     self.correlation = 0.0
-
     def analyze(self, index_name, action):
         if abs(self.correlation) > 0.8:
             return {"beta_adjustment": 1.0, "block_reason": None, "correlation": self.correlation}
@@ -737,7 +722,7 @@ class VolumeProfileEngine:
 volume_profile_engines = {idx: VolumeProfileEngine(idx) for idx in INDEX_NAMES}
 
 # ----------------------------------------------------------------------
-# AUTHENTICATION & TOKEN MANAGEMENT (unchanged)
+# AUTHENTICATION & TOKEN MANAGEMENT
 # ----------------------------------------------------------------------
 auth_cache = {"token": None, "feed_token": None, "timestamp": 0, "obj": None}
 _auth_lock = threading.Lock()
@@ -782,14 +767,11 @@ def safe_ltp(resp):
 def get_index_spot(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config:
-        logger.warning(f"get_index_spot: No config for {index_name}")
         return None
     if not config.get("token"):
-        logger.warning(f"get_index_spot: No token for {index_name}")
         return None
     _, _, obj = get_auth_token()
     if not obj:
-        logger.warning(f"get_index_spot: Auth failed for {index_name}")
         return None
     try:
         resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
@@ -913,25 +895,23 @@ def refresh_all_tokens():
             get_current_atm_tokens(idx)
 
 # ----------------------------------------------------------------------
-# MARKET HOURS (Equity only)
+# MARKET HOURS
 # ----------------------------------------------------------------------
 def is_market_open():
     if os.getenv("FORCE_MARKET_OPEN", "0") == "1":
-        logger.info("Market open forced by FORCE_MARKET_OPEN=1")
         return True
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     current = now_ist.time()
     open_time = dt_time(9, 15)
     close_time = dt_time(15, 15)
-    is_open = now_ist.weekday() < 5 and open_time <= current <= close_time
-    return is_open
+    return now_ist.weekday() < 5 and open_time <= current <= close_time
 
 def is_index_market_open(idx):
     return is_market_open()
 
 # ----------------------------------------------------------------------
-# CANDLE UPDATE (unchanged)
+# CANDLE UPDATE
 # ----------------------------------------------------------------------
 def update_candle(idx, price, cumulative_volume, timestamp):
     with _prev_volume_lock:
@@ -944,10 +924,8 @@ def update_candle(idx, price, cumulative_volume, timestamp):
             _prev_volume[idx] = cumulative_volume
         else:
             tick_vol = 0
-
         if tick_vol > 1000000:
             tick_vol = 0
-
     for tf, interval in TIMEFRAME_SECONDS.items():
         candle_start = int(timestamp / interval) * interval
         with _current_candle_lock:
@@ -966,7 +944,6 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _current_candle[idx][tf]["low"] = min(_current_candle[idx][tf]["low"], price)
                     _current_candle[idx][tf]["close"] = price
                     _current_candle[idx][tf]["volume"] += tick_vol
-
             if tf == "1min" and _current_candle[idx][tf] is not None:
                 current_age = timestamp - _current_candle[idx][tf]["timestamp"]
                 if current_age > 90:
@@ -979,7 +956,7 @@ def update_candle(idx, price, cumulative_volume, timestamp):
                     _last_candle_time[idx][tf] = candle_start
 
 # ----------------------------------------------------------------------
-# SENTIMENT, REGIME, CONFIRMATION (unchanged)
+# SENTIMENT, REGIME, CONFIRMATION
 # ----------------------------------------------------------------------
 def compute_sentiment(index_name):
     sentiment_scores = []
@@ -1074,7 +1051,6 @@ def detect_regime(index_name):
     if spot == 0:
         return "NORMAL"
     atr_pct = (atr / spot) * 100.0
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 20:
@@ -1082,7 +1058,6 @@ def detect_regime(index_name):
         vix_sma = sum(vix_slices) / len(vix_slices)
     else:
         vix_sma = vix
-
     if adx > adx_threshold and atr_pct > atr_threshold:
         new_regime = "TRENDING"
     elif adx < adx_threshold * 0.6 and atr_pct < atr_threshold * 0.5:
@@ -1091,7 +1066,6 @@ def detect_regime(index_name):
         new_regime = "VOLATILE"
     else:
         new_regime = "NORMAL"
-
     _regime_history[index_name].append(new_regime)
     if len(_regime_history[index_name]) >= 3:
         counts = Counter(_regime_history[index_name])
@@ -1148,7 +1122,7 @@ def is_expiry_day(index_name):
     return today == expiry
 
 # ----------------------------------------------------------------------
-# SIGNAL QUALITY SCORE (unchanged)
+# SIGNAL QUALITY SCORE
 # ----------------------------------------------------------------------
 def compute_signal_quality(index_name):
     scores = []
@@ -1182,7 +1156,7 @@ def has_complete_data(index_name):
              last_known_prices[index_name].get("pe", 0) > 0))
 
 # ----------------------------------------------------------------------
-# PERSISTENCE (unchanged)
+# PERSISTENCE
 # ----------------------------------------------------------------------
 def get_db_path():
     return PAPER_DB_PATH if PAPER_MODE else DB_PATH
@@ -1272,7 +1246,6 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
         "exit_time": datetime.now().strftime("%H:%M:%S")
     })
 
-# Remove send_telegram_alert function entirely – we'll just log instead
 def log_alert(msg):
     logger.info(msg)
 
@@ -1294,7 +1267,7 @@ def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status
         conn.close()
 
 # ============================================================
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ============================================================
 def spread_ok(bid, ask, prem):
     if bid <= 0 or ask <= 0:
@@ -1320,7 +1293,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
             exit_reason = "5min trend turned bullish"
     if exit_reason:
         return True, exit_reason
-
     with _candle_histories_lock:
         closes = [c["close"] for c in candle_histories[index_name]["1min"]]
     if len(closes) >= 20:
@@ -1333,7 +1305,6 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
                 return True, "Bearish divergence"
             if "PE" in action and price_trend < 0 and rsi_trend > 0:
                 return True, "Bullish divergence"
-
     with _latest_ticks_lock:
         vix = latest_ticks["VIX"]["vix"]
     if len(vix_history) >= 10:
@@ -1355,7 +1326,7 @@ def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
         return 60
 
 # ============================================================
-# REST HELPER FUNCTIONS (unchanged)
+# REST HELPER FUNCTIONS
 # ============================================================
 def get_vix_ltp():
     return None
@@ -1406,7 +1377,7 @@ def get_option_quote(index_name, option_type):
     return None
 
 # ============================================================
-# MAIN SIGNAL ENGINE (stripped of commodity and telegram)
+# MAIN SIGNAL ENGINE
 # ============================================================
 def run_signal_engine_for_index(index_name):
     try:
@@ -1464,7 +1435,6 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
-        # Use mid if available
         if ce_bid > 0 and ce_ask > 0:
             ce_prem = (ce_bid + ce_ask) / 2
         if pe_bid > 0 and pe_ask > 0:
@@ -1506,7 +1476,7 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
             return
 
-        # Drawdown & lock protected
+        # Drawdown & safety
         with _portfolio_state_lock:
             current_equity = portfolio_state[index_name]["equity"]
             peak = daily_drawdown[index_name]["peak_equity"]
@@ -1568,7 +1538,6 @@ def run_signal_engine_for_index(index_name):
                     with _portfolio_state_lock:
                         portfolio_state[index_name]["live_pnl"] = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
 
-                    # Trailing stop using 5min ATR
                     if prem > signal_state[index_name].get("highest", 0):
                         signal_state[index_name]["highest"] = prem
                         with _candle_histories_lock:
@@ -2026,7 +1995,7 @@ def run_signal_engine_for_index(index_name):
                 "status": "ENTRY"
             })
 
-        # ----- Setup trade_state for PnL tracking -----
+        # Setup trade_state for PnL tracking
         trade_state[index_name]["active"] = True
         trade_state[index_name]["side"] = action
         trade_state[index_name]["entry_price"] = prem
@@ -2049,7 +2018,7 @@ def run_all_signals():
                 logger.error(f"Signal error {idx}: {e}\n{traceback.format_exc()}")
 
 # ============================================================
-# WEBSOCKET + WATCHDOGS (with trade_state PnL updates)
+# WEBSOCKET + WATCHDOGS
 # ============================================================
 ws_running = False
 sws = None
@@ -2082,7 +2051,7 @@ def on_ws_open(wsapp):
                 "tokens": [tokens["ce_token"], tokens["pe_token"]]
             })
 
-    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})  # VIX
+    token_list.append({"exchangeType": 1, "tokens": ["99919017"]})
 
     if token_list and sws:
         try:
@@ -2210,7 +2179,7 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["ce"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            # Update trade_state PnL if this index has an active CE trade
+                            # Update PnL
                             if trade_state[idx]["active"] and "CE" in trade_state[idx]["side"]:
                                 update_trade_pnl(idx, ltp)
                             option_matched = True
@@ -2229,7 +2198,7 @@ def on_ws_data(wsapp, message):
                             with _latest_ticks_lock:
                                 last_known_prices[idx]["pe"] = ltp
                                 last_known_prices[idx]["timestamp"] = time.time()
-                            # Update trade_state PnL if this index has an active PE trade
+                            # Update PnL
                             if trade_state[idx]["active"] and "PE" in trade_state[idx]["side"]:
                                 update_trade_pnl(idx, ltp)
                             option_matched = True
@@ -2399,7 +2368,7 @@ def start_angel_websocket_improved():
             time.sleep(10)
 
 # ----------------------------------------------------------------------
-# PRE-MARKET TOKEN REFRESH SCHEDULER
+# PRE-MARKET TOKEN REFRESH
 # ----------------------------------------------------------------------
 def schedule_token_refresh():
     while True:
@@ -2416,7 +2385,7 @@ def schedule_token_refresh():
         time.sleep(60)
 
 # ----------------------------------------------------------------------
-# ENHANCED REST FALLBACK (unchanged, but commodity removed)
+# REST FALLBACK
 # ----------------------------------------------------------------------
 def fetch_asset_data(idx):
     results = {"index": idx, "spot": None, "ce": None, "pe": None}
@@ -2493,7 +2462,6 @@ def start_rest_only_mode():
                                 last_known_prices[idx]["ce"] = ce["ltp"]
                             with _ce_price_histories_lock:
                                 ce_price_histories[idx].append(ce["ltp"])
-                            # Update trade_state PnL if active
                             if trade_state[idx]["active"] and "CE" in trade_state[idx]["side"]:
                                 update_trade_pnl(idx, ce["ltp"])
                             last_tick_timestamp = time.time()
@@ -2564,16 +2532,16 @@ class ConnectionManager:
             threading.Thread(target=ws_watchdog, daemon=True).start()
             threading.Thread(target=tick_watchdog, daemon=True).start()
         else:
-            logger.info("REST-only mode forced (FORCE_REST_MODE=1). No WebSocket thread.")
+            logger.info("REST-only mode forced.")
         self._rest_thread = threading.Thread(target=start_rest_only_mode, daemon=True)
         self._rest_thread.start()
-        logger.info("REST fallback thread started (will take over if WS disconnects).")
+        logger.info("REST fallback thread started.")
         self._refresh_thread = threading.Thread(target=schedule_token_refresh, daemon=True)
         self._refresh_thread.start()
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS
+# BACKGROUND THREADS – FIXED: NON‑BLOCKING STARTUP
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2582,29 +2550,46 @@ def _start_background_threads():
     global _init_completed
     with _init_lock:
         if not _init_completed:
-            logger.info("Pre-fetching option tokens...")
-            max_retries = 5
-            for attempt in range(max_retries):
-                refresh_all_tokens()
-                ready = 0
-                for idx, cfg in INDEX_CONFIG.items():
-                    if not cfg.get("active"):
-                        continue
-                    tokens = INDEX_TOKENS.get(idx, {})
-                    if tokens.get("ce_token") and tokens.get("pe_token"):
-                        ready += 1
-                total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
-                logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
-                if ready == total_active:
-                    break
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-            conn_manager = ConnectionManager()
-            conn_manager.start()
-            _init_completed = True
-            logger.info("Background threads started with connection manager")
+            logger.info("Starting background threads...")
+            
+            # Start connection manager immediately (non-blocking)
+            try:
+                conn_manager = ConnectionManager()
+                conn_manager.start()
+                logger.info("Connection manager started.")
+            except Exception as e:
+                logger.error(f"Failed to start connection manager: {e}")
+
+            # Token prefetch in background
+            def prefetch_loop():
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        refresh_all_tokens()
+                        ready = 0
+                        total_active = sum(1 for cfg in INDEX_CONFIG.values() if cfg.get("active"))
+                        for idx, cfg in INDEX_CONFIG.items():
+                            if not cfg.get("active"):
+                                continue
+                            tokens = INDEX_TOKENS.get(idx, {})
+                            if tokens.get("ce_token") and tokens.get("pe_token"):
+                                ready += 1
+                        logger.info(f"Token prefetch attempt {attempt + 1}: {ready}/{total_active} indices ready")
+                        if ready == total_active:
+                            break
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2
+                            logger.warning(f"Waiting {wait_time} seconds before retry...")
+                            time.sleep(wait_time)
+                    except Exception as e:
+                        logger.error(f"Token prefetch error: {e}")
+
+                global _init_completed
+                _init_completed = True
+                logger.info("Background threads initialized.")
+
+            threading.Thread(target=prefetch_loop, daemon=True).start()
+            logger.info("✅ Non-blocking token prefetch started. API is LIVE.")
 
 _background_started = False
 _background_start_lock = threading.Lock()
@@ -2622,7 +2607,7 @@ def auto_start_background():
 auto_start_background()
 
 # ----------------------------------------------------------------------
-# FLASK ROUTES (updated with trade_state fields)
+# FLASK ROUTES
 # ----------------------------------------------------------------------
 @app.before_request
 def check_auth():
@@ -2674,13 +2659,11 @@ def live_signals():
             portfolio_with_trades[idx] = port.copy()
             portfolio_with_trades[idx]["daily_trades"] = daily_trade_count.get(idx, 0)
 
-        # Build response with trade_state fields
         signals_with_trade = {}
         for idx in INDEX_NAMES:
             if not INDEX_CONFIG[idx].get("active"):
                 continue
             base_signal = market_signal[idx].copy()
-            # Add trade_state fields
             base_signal.update({
                 "entry_price": trade_state[idx]["entry_price"],
                 "ltp": trade_state[idx]["current_price"],
@@ -2706,7 +2689,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16-Equity-Scalping-Bot"
+            "version": "16-equity-scalping-with-trade-state"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
