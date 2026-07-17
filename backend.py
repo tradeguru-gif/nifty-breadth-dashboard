@@ -2689,7 +2689,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16-equity-scalping-with-trade-state"
+            "version": "16.1-Equity-Scalping"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
