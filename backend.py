@@ -2541,7 +2541,7 @@ class ConnectionManager:
         logger.info("Pre-market token refresh scheduler started.")
 
 # ----------------------------------------------------------------------
-# BACKGROUND THREADS – FIXED: NON‑BLOCKING STARTUP
+# BACKGROUND THREADS – NON-BLOCKING STARTUP
 # ----------------------------------------------------------------------
 _init_completed = False
 _init_lock = threading.Lock()
@@ -2689,7 +2689,7 @@ def live_signals():
                 "ticks": tick_counter,
                 "last_tick_ago": round(time.time() - last_tick_timestamp, 1)
             },
-            "version": "16-Equity-Scalping"
+            "version": "16-equity-scalping-with-trade-state"
         })
 
 @app.route("/api/signal-audio", methods=["GET"])
@@ -2795,4 +2795,4 @@ if __name__ == "__main__":
     refresh_all_tokens()
     _start_background_threads()
     logger.info("Background workers initiated. Starting Flask API Server...")
-    app.run(host="0.0.0.0", port=5000, debug=False)s
+    app.run(host="0.0.0.0", port=5000, debug=False)  # <--- fixed syntax (removed extra 's')
