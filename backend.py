@@ -291,6 +291,14 @@ signal_buffer = {idx: {"ce_count": 0, "pe_count": 0} for idx in INDEX_NAMES}
 daily_trade_count = {idx: 0 for idx in INDEX_NAMES}
 last_trade_date = {idx: "" for idx in INDEX_NAMES}
 
+# ---------- PORTFOLIO-LEVEL (ALL-INDEX) KILL SWITCH ----------
+# Per-index max_daily_drawdown_pct doesn't stop correlated indices (e.g. NIFTY,
+# BANKNIFTY, BANKEX) from all hitting drawdown in the same bad session. This is
+# a global cap on aggregate daily loss across every active index combined.
+GLOBAL_MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("GLOBAL_MAX_DAILY_DRAWDOWN_PCT", "5.0"))
+global_kill_switch = {"triggered": False, "date": "", "peak_total_equity": 0.0}
+_global_kill_switch_lock = threading.Lock()
+
 _last_signal_run = 0
 _signal_run_lock = threading.Lock()
 
@@ -1093,6 +1101,135 @@ def confirm_signal_with_candles(index_name, side, spot):
     else:
         return all(c < ema9 for c in last_3_closes)
 
+# ----------------------------------------------------------------------
+# 1-MIN CANDLE-PATTERN ENTRY (primary trigger)
+# ----------------------------------------------------------------------
+# Entry rule (as specified): on 1-minute candles, the first two candles of the
+# pattern must form a higher-high sequence (candle 2's high > candle 1's high)
+# for a CE setup, or a lower-low sequence for a PE setup. The 3rd candle (the
+# most recently CLOSED 1min candle) confirms the entry only if it makes a new
+# high above both prior candles (CE) / new low below both (PE) AND closes in
+# the direction of the move (real body, not just a wick), AND is backed by
+# rising option volume, supportive OI, and non-decaying ADX/ATR momentum.
+def check_hh_ll_pattern_entry(index_name, side, ce_vol, pe_vol, ce_oi, pe_oi):
+    with _candle_histories_lock:
+        candles = list(candle_histories[index_name]["1min"])
+    if len(candles) < 9:
+        return False, "Not enough 1min candles for pattern (need 9+)"
+
+    c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+
+    if side == "CE":
+        higher_high_seq = c2["high"] > c1["high"]
+        confirm_candle = c3["high"] > c2["high"] and c3["high"] > c1["high"]
+        bullish_body = c3["close"] > c3["open"]
+        if not (higher_high_seq and confirm_candle and bullish_body):
+            return False, "No 2-candle higher-high + 3rd candle confirmation"
+    else:
+        lower_low_seq = c2["low"] < c1["low"]
+        confirm_candle = c3["low"] < c2["low"] and c3["low"] < c1["low"]
+        bearish_body = c3["close"] < c3["open"]
+        if not (lower_low_seq and confirm_candle and bearish_body):
+            return False, "No 2-candle lower-low + 3rd candle confirmation"
+
+    # Volume confirmation: latest option tick volume vs recent average
+    vol = ce_vol if side == "CE" else pe_vol
+    vol_hist_dict = ce_volume_histories if side == "CE" else pe_volume_histories
+    hist = list(vol_hist_dict[index_name])
+    if len(hist) >= 10:
+        avg_vol = sum(hist[-10:]) / 10
+        if avg_vol > 0 and vol < avg_vol * 1.05:
+            return False, f"Volume not confirming breakout ({vol} vs avg {avg_vol:.0f})"
+
+    # OI confirmation: OI should be building in the traded option (fresh buying),
+    # not unwinding, using the recent OI history for that leg.
+    oi = ce_oi if side == "CE" else pe_oi
+    oi_hist_dict = ce_oi_histories if side == "CE" else pe_oi_histories
+    oi_hist = list(oi_hist_dict[index_name])
+    if len(oi_hist) >= 4 and oi > 0:
+        recent_oi_avg = sum(oi_hist[-4:-1]) / 3  # prior readings, excludes current
+        if recent_oi_avg > 0 and oi < recent_oi_avg * 0.98:
+            return False, "OI unwinding, not supporting fresh entry"
+
+    # ADX/ATR momentum confirmation on 1min candles: trend strength must not be
+    # decaying into the confirmation candle.
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    closes = [c["close"] for c in candles]
+    if len(closes) >= 30:
+        adx_now = calculate_adx(highs, lows, closes, 14)
+        adx_prev = calculate_adx(highs[:-1], lows[:-1], closes[:-1], 14)
+        atr_now = calculate_atr(highs, lows, closes, 14)
+        atr_prev = calculate_atr(highs[:-1], lows[:-1], closes[:-1], 14)
+        if adx_now < adx_prev * 0.95 and atr_now < atr_prev * 0.9:
+            return False, f"ADX/ATR momentum decaying (ADX {adx_prev:.1f}->{adx_now:.1f})"
+
+    return True, "1min 2-candle HH/LL + 3rd candle confirmation passed"
+
+def higher_tf_trend_ok(index_name, side):
+    """Require the 5min EMA9/EMA21 trend to agree with the 1min pattern side,
+    so a 1min pattern firing against the higher-timeframe trend is blocked."""
+    with _candle_histories_lock:
+        candles = list(candle_histories[index_name]["5min"])
+    if len(candles) < 25:
+        return True  # not enough data yet - don't block, other filters cover it
+    closes = [c["close"] for c in candles]
+    ema9 = calculate_ema(closes, 9)
+    ema21 = calculate_ema(closes, 21)
+    if side == "CE":
+        return ema9 >= ema21
+    else:
+        return ema9 <= ema21
+
+def check_immediate_reversal_exit(index_name, side, entry_time):
+    """
+    Immediate-exit rule (as specified): after entry, watch the 1-min candles
+    that close AFTER entry. If a candle closes against the position relative to
+    the previous closed candle (i.e. the 3rd candle after entry closes lower
+    than the 2nd candle after entry, for a CE position - or higher, for a PE
+    position) the exit fires immediately, ahead of and independent from
+    SL/target/time/VWAP exits.
+    """
+    with _candle_histories_lock:
+        candles = list(candle_histories[index_name]["1min"])
+    post_entry = [c for c in candles if c["timestamp"] >= entry_time]
+    if len(post_entry) < 2:
+        return False, ""
+    prev_c, last_c = post_entry[-2], post_entry[-1]
+    if side == "CE":
+        if last_c["close"] < prev_c["close"]:
+            return True, "IMMEDIATE_REVERSAL (candle closed lower than prior candle)"
+    else:
+        if last_c["close"] > prev_c["close"]:
+            return True, "IMMEDIATE_REVERSAL (candle closed higher than prior candle)"
+    return False, ""
+
+def check_global_kill_switch():
+    """
+    Aggregate daily-loss circuit breaker across ALL active indices combined.
+    Correlated indices (NIFTY/BANKNIFTY/BANKEX etc.) can all draw down together
+    even though each has its own per-index cap, so this caps total portfolio
+    daily loss independently of any single index's drawdown state.
+    """
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    today = now_ist.strftime("%Y-%m-%d")
+    with _portfolio_state_lock:
+        total_equity = sum(portfolio_state[idx]["equity"] for idx in INDEX_NAMES)
+        total_daily_pnl = sum(portfolio_state[idx]["daily_pnl"] for idx in INDEX_NAMES)
+    with _global_kill_switch_lock:
+        if global_kill_switch["date"] != today:
+            global_kill_switch["date"] = today
+            global_kill_switch["peak_total_equity"] = total_equity
+            global_kill_switch["triggered"] = False
+        peak = global_kill_switch["peak_total_equity"]
+        if total_equity > peak:
+            global_kill_switch["peak_total_equity"] = total_equity
+            peak = total_equity
+        drawdown_pct = ((peak - total_equity) / peak * 100.0) if peak > 0 else 0.0
+        if drawdown_pct >= GLOBAL_MAX_DAILY_DRAWDOWN_PCT:
+            global_kill_switch["triggered"] = True
+        return global_kill_switch["triggered"], drawdown_pct
+
 def compute_ml_score(index_name, side, prem, spot, rsi, adx, vix, sentiment):
     score = 0.5
     if side == "CE":
@@ -1261,9 +1398,28 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
 def log_alert(msg):
     logger.info(msg)
 
-def apply_transaction_cost(pnl, lots, lot_size):
-    cost_per_lot = 50
-    return pnl - cost_per_lot * lots
+def apply_transaction_cost(pnl, lots, lot_size, exit_price=0.0, entry_price=0.0):
+    """
+    Approximate India options round-trip transaction cost, scaled by premium
+    turnover instead of a flat per-lot number (STT/exchange fees/GST/stamp duty
+    all scale with premium value, not lot count). Rates below are approximate
+    and should be reconciled against your broker's contract note periodically -
+    treat this as directionally correct for cost-aware sizing/exits, not exact
+    to the rupee.
+    """
+    qty = max(1, int(lots)) * max(1, int(lot_size))
+    entry_val = max(entry_price, 0.0) * qty
+    exit_val = max(exit_price, 0.0) * qty
+    # STT on options is charged on sell-side premium turnover. This bot only
+    # buys options and sells to close, so the exit leg is the sell side.
+    stt = exit_val * 0.001
+    exchange_txn_charge = (entry_val + exit_val) * 0.00053
+    gst = exchange_txn_charge * 0.18
+    sebi_fee = (entry_val + exit_val) * 0.0000010
+    stamp_duty = entry_val * 0.00003
+    brokerage = 40.0  # ~Rs 20/order x 2 orders (discount broker flat fee assumption)
+    total_cost = stt + exchange_txn_charge + gst + sebi_fee + stamp_duty + brokerage
+    return pnl - total_cost
 
 def log_trade(index_name, action, entry_price, exit_price, pnl, size_pct, status, grade, atr, vix, exit_reason):
     db_path = get_db_path()
@@ -1436,6 +1592,10 @@ def run_signal_engine_for_index(index_name):
             pe_vol = latest_ticks[index_name].get("pe_volume", 0) or 0
             ce_oi = latest_ticks[index_name].get("ce_oi", 0) or 0
             pe_oi = latest_ticks[index_name].get("pe_oi", 0) or 0
+            if ce_oi > 0:
+                ce_oi_histories[index_name].append(ce_oi)
+            if pe_oi > 0:
+                pe_oi_histories[index_name].append(pe_oi)
             ce_bid = latest_ticks[index_name].get("ce_bid", 0.0) or 0.0
             ce_ask = latest_ticks[index_name].get("ce_ask", 0.0) or 0.0
             pe_bid = latest_ticks[index_name].get("pe_bid", 0.0) or 0.0
@@ -1476,16 +1636,59 @@ def run_signal_engine_for_index(index_name):
             greeks_data = get_option_greeks(index_name)
 
         sentiment = compute_sentiment(index_name)
-        action = get_signal_from_sentiment(sentiment)
         sentiment_label = get_sentiment_label(sentiment)
         with _market_signal_lock:
             market_signal[index_name]["sentiment_score"] = sentiment
+
+        # Primary entry trigger: 1-min 2-candle higher-high/lower-low + 3rd
+        # confirmation candle, backed by volume/OI/ADX-ATR (see
+        # check_hh_ll_pattern_entry). Sentiment no longer decides direction on
+        # its own - it only grades conviction (STRONG/plain/LOW) once a pattern
+        # has actually fired, for position sizing and SL/target width.
+        pattern_ce_ok, pattern_ce_reason = check_hh_ll_pattern_entry(index_name, "CE", ce_vol, pe_vol, ce_oi, pe_oi)
+        pattern_pe_ok, pattern_pe_reason = check_hh_ll_pattern_entry(index_name, "PE", ce_vol, pe_vol, ce_oi, pe_oi)
+        pattern_side = "CE" if pattern_ce_ok else "PE" if pattern_pe_ok else None
+        pattern_reason = pattern_ce_reason if pattern_side == "CE" else pattern_pe_reason if pattern_side == "PE" else (pattern_ce_reason or pattern_pe_reason)
+
+        if pattern_side == "CE":
+            action = "STRONG_BUY_CE" if sentiment >= 75 else "BUY_CE" if sentiment >= 50 else "LOW_BUY_CE"
+        elif pattern_side == "PE":
+            action = "STRONG_BUY_PE" if sentiment <= 25 else "BUY_PE" if sentiment <= 50 else "LOW_BUY_PE"
+        else:
+            action = "NO_TRADE"
 
         regime = detect_regime(index_name)
         if regime == "RANGING":
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "Ranging market - no new entries"
                 market_signal[index_name]["signal"] = "BLOCKED"
+            return
+
+        # ---- Global (all-index) kill switch: checked before the per-index one ----
+        global_triggered, global_dd_pct = check_global_kill_switch()
+        if global_triggered:
+            with _signal_state_lock:
+                if signal_state[index_name]["action"] != "HOLD":
+                    active = signal_state[index_name]["action"]
+                    exit_bid_gk = ce_bid if "CE" in active else pe_bid
+                    exit_prem_gk = exit_bid_gk if exit_bid_gk > 0 else (ce_prem if "CE" in active else pe_prem)
+                    if exit_prem_gk > 0:
+                        pnl = exit_prem_gk - signal_state[index_name]["entry_price"]
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=exit_prem_gk, entry_price=signal_state[index_name]["entry_price"])
+                        with _portfolio_state_lock:
+                            portfolio_state[index_name]["equity"] += pnl_total
+                            portfolio_state[index_name]["daily_pnl"] += pnl_total
+                            portfolio_state[index_name]["total_pnl"] += pnl_total
+                            portfolio_state[index_name]["live_pnl"] = 0.0
+                        save_portfolio_state(index_name)
+                        log_trade(index_name, active, signal_state[index_name]["entry_price"], exit_prem_gk, pnl_total,
+                                  pnl_total / portfolio_state[index_name]["equity"] * 100, "GLOBAL_KILL_SWITCH",
+                                  active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], "GLOBAL_KILL_SWITCH")
+                        reset_signal_state(index_name, now, "GLOBAL_KILL_SWITCH")
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"GLOBAL KILL SWITCH: portfolio drawdown {global_dd_pct:.1f}% >= {GLOBAL_MAX_DAILY_DRAWDOWN_PCT:.1f}%"
+                market_signal[index_name]["signal"] = "KILL_SWITCH"
             return
 
         # Drawdown & safety
@@ -1512,7 +1715,7 @@ def run_signal_engine_for_index(index_name):
                         if exit_prem > 0:
                             pnl = exit_prem - signal_state[index_name]["entry_price"]
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=exit_prem, entry_price=signal_state[index_name]["entry_price"])
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
                             portfolio_state[index_name]["total_pnl"] += pnl_total
@@ -1541,10 +1744,41 @@ def run_signal_engine_for_index(index_name):
             current_action = signal_state[index_name]["action"]
         if current_action != "HOLD":
             active = current_action
-            prem = ce_prem if "CE" in active else pe_prem
+            exit_side = "CE" if "CE" in active else "PE"
+            # Exit fills happen at the bid (you're selling to close), not the
+            # mid-price - use bid when available, fall back to mid otherwise.
+            exit_bid = ce_bid if exit_side == "CE" else pe_bid
+            prem = exit_bid if exit_bid > 0 else (ce_prem if exit_side == "CE" else pe_prem)
             if prem <= 0:
-                prem = last_known_prices[index_name].get("ce" if "CE" in active else "pe", 0) or 0.0
+                prem = last_known_prices[index_name].get("ce" if exit_side == "CE" else "pe", 0) or 0.0
             if prem > 0:
+                # Immediate-reversal exit takes priority over everything else:
+                # if the candle since entry has already turned against the
+                # position, exit now rather than waiting on SL/target/time/VWAP.
+                with _signal_state_lock:
+                    entry_time_val = signal_state[index_name].get("entry_time", 0)
+                immediate_exit, immediate_reason = check_immediate_reversal_exit(index_name, exit_side, entry_time_val)
+                if immediate_exit:
+                    with _signal_state_lock:
+                        pnl = prem - signal_state[index_name]["entry_price"]
+                        pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
+                        with _portfolio_state_lock:
+                            portfolio_state[index_name]["equity"] += pnl_total
+                            portfolio_state[index_name]["daily_pnl"] += pnl_total
+                            portfolio_state[index_name]["total_pnl"] += pnl_total
+                            portfolio_state[index_name]["live_pnl"] = 0.0
+                        save_portfolio_state(index_name)
+                        entry_price_val = signal_state[index_name]["entry_price"]
+                        if entry_price_val > 0:
+                            kelly_trackers[index_name].update(pnl / entry_price_val)
+                        log_trade(index_name, active, entry_price_val, prem, pnl_total,
+                                  pnl_total / portfolio_state[index_name]["equity"] * 100, "IMMEDIATE_REVERSAL",
+                                  active, calculate_atr([],[],[],14), latest_ticks["VIX"]["vix"], immediate_reason)
+                    log_alert(f"EXIT {index_name} | {immediate_reason} | PnL: {pnl:.2f} pts | Cost adj: {pnl_total:.2f}")
+                    reset_signal_state(index_name, now, immediate_reason)
+                    return
+
                 with _signal_state_lock:
                     pnl = prem - signal_state[index_name]["entry_price"]
                     with _portfolio_state_lock:
@@ -1568,7 +1802,7 @@ def run_signal_engine_for_index(index_name):
 
                     if stop_loss_val is not None and prem <= stop_loss_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1593,7 +1827,7 @@ def run_signal_engine_for_index(index_name):
 
                     if target_val is not None and prem >= target_val:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1621,7 +1855,7 @@ def run_signal_engine_for_index(index_name):
                         time_limit = get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data)
                         if elapsed_min >= time_limit:
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                             with _portfolio_state_lock:
                                 portfolio_state[index_name]["equity"] += pnl_total
                                 portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1644,7 +1878,7 @@ def run_signal_engine_for_index(index_name):
                     should_exit, exit_reason = should_exit_market_analysis(index_name, active, prices_spot, ce_prem, pe_prem, greeks_data)
                     if should_exit:
                         pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                        pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                         with _portfolio_state_lock:
                             portfolio_state[index_name]["equity"] += pnl_total
                             portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1670,7 +1904,7 @@ def run_signal_engine_for_index(index_name):
                     if option_vwap > 0:
                         if "CE" in active and prem < option_vwap * 0.997:
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                             with _portfolio_state_lock:
                                 portfolio_state[index_name]["equity"] += pnl_total
                                 portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1688,7 +1922,7 @@ def run_signal_engine_for_index(index_name):
                             return
                         elif "PE" in active and prem < option_vwap * 0.997:
                             pnl_total = pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"]
-                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"])
+                            pnl_total = apply_transaction_cost(pnl_total, signal_state[index_name]["lots"], INDEX_CONFIG[index_name]["lot_size"], exit_price=prem, entry_price=signal_state[index_name]["entry_price"])
                             with _portfolio_state_lock:
                                 portfolio_state[index_name]["equity"] += pnl_total
                                 portfolio_state[index_name]["daily_pnl"] += pnl_total
@@ -1766,20 +2000,23 @@ def run_signal_engine_for_index(index_name):
                 market_signal[index_name]["signal"] = "BLOCKED"
             return
 
-        if action == "NO_TRADE":
+        if action == "NO_TRADE" or pattern_side is None:
             with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Sentiment {sentiment:.0f} - {sentiment_label}"
-                market_signal[index_name]["signal"] = "NO_TRADE"
+                market_signal[index_name]["alert_message"] = f"WAITING pattern: {pattern_reason}"
+                market_signal[index_name]["signal"] = "WAITING"
             return
 
-        side = "CE" if "CE" in action else "PE" if "PE" in action else None
-        if side is None:
+        side = pattern_side
+
+        if not higher_tf_trend_ok(index_name, side):
             with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Invalid action {action}"
-                market_signal[index_name]["signal"] = "NO_TRADE"
+                market_signal[index_name]["alert_message"] = "5min trend disagrees with 1min pattern"
+                market_signal[index_name]["signal"] = "BLOCKED"
             return
 
-        prem = ce_prem if side == "CE" else pe_prem
+        # Entry fills at the ask (you're buying), not the mid-price.
+        entry_ask = ce_ask if side == "CE" else pe_ask
+        prem = entry_ask if entry_ask > 0 else (ce_prem if side == "CE" else pe_prem)
         min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
         max_prem = INDEX_CONFIG[index_name].get("max_premium", 8000)
         if prem <= 0 or prem < min_prem or prem > max_prem:
@@ -1803,12 +2040,6 @@ def run_signal_engine_for_index(index_name):
                         market_signal[index_name]["alert_message"] = "Spot below VWAP, extended"
                         market_signal[index_name]["signal"] = "BLOCKED"
                     return
-
-        if not confirm_signal_with_candles(index_name, side, spot):
-            with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Candle confirmation failed (last 3 closes not aligned with EMA9)"
-                market_signal[index_name]["signal"] = "BLOCKED"
-            return
 
         vol = ce_vol if side == "CE" else pe_vol
         if vol > 0:
@@ -2788,25 +3019,108 @@ def get_candles(index_name, timeframe):
 
 @app.route("/api/backtest-signal/<index_name>", methods=["POST"])
 def backtest_signal(index_name):
+    """
+    Replays the actual entry/exit RULE ENGINE (2-candle HH/LL + 3rd-candle
+    confirmation, immediate-reversal exit, ATR-based SL/target, time exit)
+    against the stored 1min SPOT candle history for this index.
+
+    LIMITATION (read before trusting the numbers): only spot OHLC candles are
+    retained historically - option premium, volume, and OI are only kept as
+    their current live values, not as an aligned historical series. So this
+    replays the geometric/timing rules faithfully, but it (a) cannot replay
+    the live volume/OI/ADX-decay confirmation gates exactly as they applied
+    tick-by-tick, and (b) approximates option premium as entry_spot * 0.3%
+    plus a delta-proxy move rather than real option pricing. Use this as a
+    sanity check on the RULES, not as a PnL projection - PAPER_MODE against
+    live premiums is what actually answers "is this profitable".
+    """
     if index_name not in INDEX_CONFIG or not INDEX_CONFIG[index_name].get("active"):
         return jsonify({"error": "Invalid index"}), 400
     data = request.get_json() or {}
-    lookback = min(data.get("lookback", 100), 200)
+    lookback = min(data.get("lookback", 300), 500)
+    delta_proxy = float(data.get("delta_proxy", 0.5))
+    sl_pct = float(data.get("sl_pct", 0.35))
+    target_mult = float(data.get("target_mult", 3.0))
+    time_exit_bars = int(data.get("time_exit_bars", 45))
+
     with _candle_histories_lock:
         candles = list(candle_histories[index_name]["1min"])[-lookback:]
-    if len(candles) < 20:
-        return jsonify({"error": "Not enough candles"}), 400
-    signals = []
-    for i in range(20, len(candles)):
-        closes = [c["close"] for c in candles[:i]]
-        sentiment = compute_sentiment(index_name)
-        action = get_signal_from_sentiment(sentiment)
-        signals.append({
-            "timestamp": candles[i]["timestamp"],
-            "sentiment": sentiment,
-            "action": action
-        })
-    return jsonify({"signals": signals, "count": len(signals)})
+    if len(candles) < 30:
+        return jsonify({"error": "Not enough candles (need 30+)"}), 400
+
+    trades = []
+    position = None
+
+    for i in range(9, len(candles)):
+        window = candles[:i + 1]
+        highs = [c["high"] for c in window]
+        lows = [c["low"] for c in window]
+        closes = [c["close"] for c in window]
+        c1, c2, c3 = window[-3], window[-2], window[-1]
+
+        if position is not None:
+            side = position["side"]
+            prev_close = window[-2]["close"]
+            last_close = window[-1]["close"]
+            reversed_now = (side == "CE" and last_close < prev_close) or (side == "PE" and last_close > prev_close)
+            spot_now = last_close
+            direction = 1 if side == "CE" else -1
+            prem_now = position["entry_prem_proxy"] + (spot_now - position["entry_spot"]) * delta_proxy * direction
+            exit_reason = None
+            if reversed_now:
+                exit_reason = "IMMEDIATE_REVERSAL"
+            elif prem_now <= position["sl"]:
+                exit_reason = "STOP_LOSS"
+            elif prem_now >= position["target"]:
+                exit_reason = "TARGET_HIT"
+            elif i - position["entry_idx"] >= time_exit_bars:
+                exit_reason = "TIME_EXIT"
+            if exit_reason:
+                trades.append({
+                    "side": side,
+                    "entry_timestamp": position["entry_timestamp"],
+                    "exit_timestamp": window[-1]["timestamp"],
+                    "entry_premium_proxy": round(position["entry_prem_proxy"], 2),
+                    "exit_premium_proxy": round(prem_now, 2),
+                    "pnl_points_proxy": round(prem_now - position["entry_prem_proxy"], 2),
+                    "exit_reason": exit_reason
+                })
+                position = None
+            continue
+
+        ce_pattern = c2["high"] > c1["high"] and c3["high"] > c2["high"] and c3["high"] > c1["high"] and c3["close"] > c3["open"]
+        pe_pattern = c2["low"] < c1["low"] and c3["low"] < c2["low"] and c3["low"] < c1["low"] and c3["close"] < c3["open"]
+        side = "CE" if ce_pattern else "PE" if pe_pattern else None
+        if side is None:
+            continue
+        if len(closes) >= 25:
+            ema9 = calculate_ema(closes, 9)
+            ema21 = calculate_ema(closes, 21)
+            if (side == "CE" and ema9 < ema21) or (side == "PE" and ema9 > ema21):
+                continue
+        atr = calculate_atr(highs, lows, closes, 14) if len(closes) >= 15 else 0.0
+        entry_spot = c3["close"]
+        entry_prem_proxy = max(entry_spot * 0.003, 5.0)
+        sl_dist = max(entry_prem_proxy * sl_pct, atr * delta_proxy * 1.5)
+        position = {
+            "side": side, "entry_idx": i, "entry_spot": entry_spot,
+            "entry_prem_proxy": entry_prem_proxy,
+            "sl": entry_prem_proxy - sl_dist,
+            "target": entry_prem_proxy + sl_dist * target_mult,
+            "entry_timestamp": c3["timestamp"]
+        }
+
+    total = len(trades)
+    wins = sum(1 for t in trades if t["pnl_points_proxy"] > 0)
+    return jsonify({
+        "index": index_name,
+        "candles_used": len(candles),
+        "trades": trades,
+        "trade_count": total,
+        "win_count": wins,
+        "win_rate_pct": round(wins / total * 100, 1) if total else 0.0,
+        "note": "Rule-replay only (see docstring): premium is a delta-proxy off spot, and live volume/OI/ADX-decay gates aren't replayed since only current values persist, not history."
+    })
 
 # ----------------------------------------------------------------------
 # RUN FLASK
