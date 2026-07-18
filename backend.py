@@ -259,6 +259,7 @@ trade_state = {
         "stop_loss": 0.0,
         "target": 0.0,
         "pnl": 0.0,
+        "pnl_points": 0.0,
         "entry_time": "",
         "exit_time": ""
     } for idx in INDEX_NAMES
@@ -316,7 +317,11 @@ def update_trade_pnl(index_name, current_price):
     if not trade_state[index_name]["active"] or current_price <= 0:
         return
     trade_state[index_name]["current_price"] = current_price
-    trade_state[index_name]["pnl"] = round(current_price - trade_state[index_name]["entry_price"], 2)
+    pts = current_price - trade_state[index_name]["entry_price"]
+    lot_size = INDEX_CONFIG[index_name]["lot_size"]
+    lots = signal_state[index_name].get("lots", 1) or 1
+    trade_state[index_name]["pnl_points"] = round(pts, 2)
+    trade_state[index_name]["pnl"] = round(pts * lot_size * lots, 2)
 
 # ----------------------------------------------------------------------
 # INDICATORS
@@ -1231,7 +1236,13 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
             "signal": "EXIT",
             "alert_message": f"EXIT {exit_reason}",
             "exit_reason": exit_reason,
-            "status": exit_reason
+            "status": exit_reason,
+            "entry_price": 0,
+            "stop_loss": 0,
+            "target": 0,
+            "current_pnl": 0.0,
+            "pnl": 0.0,
+            "lots": 0
         })
     # Reset trade_state on exit
     trade_state[index_name].update({
@@ -1242,6 +1253,7 @@ def reset_signal_state(index_name, current_time, exit_reason=""):
         "stop_loss": 0.0,
         "target": 0.0,
         "pnl": 0.0,
+        "pnl_points": 0.0,
         "entry_time": "",
         "exit_time": datetime.now().strftime("%H:%M:%S")
     })
@@ -1700,6 +1712,7 @@ def run_signal_engine_for_index(index_name):
                     trading_symbol = token_info.get("ce_symbol", "")
                 else:
                     trading_symbol = token_info.get("pe_symbol", "")
+                pnl_money = round(pnl * INDEX_CONFIG[index_name]["lot_size"] * signal_state[index_name]["lots"], 2)
                 with _market_signal_lock:
                     market_signal[index_name].update({
                         "alert_message": f"ACTIVE {active}",
@@ -1708,6 +1721,8 @@ def run_signal_engine_for_index(index_name):
                         "stop_loss": signal_state[index_name]["stop_loss"],
                         "target": signal_state[index_name]["target"],
                         "current_pnl": round(pnl, 2),
+                        "pnl": pnl_money,
+                        "lots": signal_state[index_name]["lots"],
                         "strike_price": atm_strike,
                         "trading_symbol": trading_symbol,
                         "status": "ACTIVE"
@@ -1987,6 +2002,9 @@ def run_signal_engine_for_index(index_name):
                 "entry_price": prem,
                 "stop_loss": sl,
                 "target": target,
+                "current_pnl": 0.0,
+                "pnl": 0.0,
+                "lots": lots,
                 "sentiment_score": sentiment,
                 "exit_reason": "",
                 "quality_score": compute_signal_quality(index_name),
@@ -2663,13 +2681,17 @@ def live_signals():
         for idx in INDEX_NAMES:
             if not INDEX_CONFIG[idx].get("active"):
                 continue
+            # IMPORTANT: entry_price / stop_loss / target / pnl already come from
+            # market_signal[idx], which is refreshed every engine cycle from
+            # signal_state (the authoritative tracker with proper ATR-trailing SL
+            # and rupee PnL). Do NOT overwrite them with trade_state's values here -
+            # trade_state only updates on tick events, freezes SL/target at their
+            # entry-time value (no trailing), and previously stored raw point PnL
+            # instead of rupee PnL. Only pull the fields trade_state legitimately
+            # owns: tick-driven LTP and the active/entry/exit timestamps.
             base_signal = market_signal[idx].copy()
             base_signal.update({
-                "entry_price": trade_state[idx]["entry_price"],
                 "ltp": trade_state[idx]["current_price"],
-                "stop_loss": trade_state[idx]["stop_loss"],
-                "target": trade_state[idx]["target"],
-                "pnl": trade_state[idx]["pnl"],
                 "trade_active": trade_state[idx]["active"],
                 "entry_time": trade_state[idx]["entry_time"],
                 "exit_time": trade_state[idx]["exit_time"],
