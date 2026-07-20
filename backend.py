@@ -777,6 +777,50 @@ def safe_ltp(resp):
         return float(data[0].get("ltp", 0))
     return None
 
+# ----------------------------------------------------------------------
+# ANGEL ONE API RATE LIMITER
+# ----------------------------------------------------------------------
+# Angel One's SmartAPI enforces a combined ~9 req/sec cap across all
+# LTP/quote-type endpoints per client (per their published rate limits +
+# forum confirmation). Firing ltpData() calls concurrently from a
+# ThreadPoolExecutor (as start_rest_only_mode does, up to 3 indices x up
+# to 3 calls each = up to 9 near-simultaneous requests) can burst right
+# past that ceiling, which comes back as a 403 the SDK can't parse:
+#   "Access denied because of exceeding access rate"
+# This serializes every Angel API call through one gate, paces them
+# under the limit, and backs off harder for a cooldown window the moment
+# a real rate-limit response is seen, instead of immediately re-bursting
+# on the next cycle.
+class AngelRateLimiter:
+    def __init__(self, base_interval=0.15, backoff_interval=1.0, cooldown_sec=8.0):
+        self._lock = threading.Lock()
+        self._last_call = 0.0
+        self.base_interval = base_interval        # ~6-7 req/sec steady state, under the 9/sec combined cap
+        self.backoff_interval = backoff_interval   # paced hard after a rate-limit hit
+        self.cooldown_sec = cooldown_sec
+        self._backoff_until = 0.0
+
+    def _current_interval(self):
+        return self.backoff_interval if time.time() < self._backoff_until else self.base_interval
+
+    def call(self, fn, *args, **kwargs):
+        with self._lock:
+            wait = self._current_interval() - (time.time() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                result = fn(*args, **kwargs)
+                self._last_call = time.time()
+                return result
+            except Exception as e:
+                self._last_call = time.time()
+                if "exceeding access rate" in str(e).lower():
+                    self._backoff_until = time.time() + self.cooldown_sec
+                    logger.warning(f"Angel API rate limit hit, backing off {self.cooldown_sec}s")
+                raise
+
+angel_rate_limiter = AngelRateLimiter()
+
 def get_index_spot(index_name):
     config = INDEX_CONFIG.get(index_name)
     if not config:
@@ -787,7 +831,7 @@ def get_index_spot(index_name):
     if not obj:
         return None
     try:
-        resp = obj.ltpData(config["exchange"], config["symbol"], config["token"])
+        resp = angel_rate_limiter.call(obj.ltpData, config["exchange"], config["symbol"], config["token"])
         ltp = safe_ltp(resp)
         if ltp and ltp > 0:
             if config["exchange"] in ["NSE","BSE"] and ltp > 100000:
@@ -1514,7 +1558,7 @@ def get_option_quote(index_name, option_type):
     if not obj:
         return None
     try:
-        resp = obj.ltpData(config["option_exchange"], symbol, token)
+        resp = angel_rate_limiter.call(obj.ltpData, config["option_exchange"], symbol, token)
         if not resp or not resp.get("status"):
             return None
         data = resp.get("data", {})
@@ -2680,7 +2724,7 @@ def start_rest_only_mode():
                     logger.warning(f"Tokens missing for {idx}, retrying...")
                     get_current_atm_tokens(idx)
 
-            with ThreadPoolExecutor(max_workers=3) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {executor.submit(fetch_asset_data, idx): idx for idx in assets_to_fetch}
                 for future in as_completed(futures):
                     result = future.result()
