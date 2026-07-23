@@ -1529,15 +1529,15 @@ def should_exit_market_analysis(index_name, action, prices_spot, ce_prem, pe_pre
 
 def get_dynamic_time_exit_minutes(index_name, side, prem, greeks_data):
     if not greeks_data:
-        return 45
+        return 15
     theta = greeks_data.get("ce_theta") if side == "CE" else greeks_data.get("pe_theta")
     if theta is None or theta == 0:
-        return 45
+        return 15
     theta_abs = abs(theta)
     if theta_abs > prem * 0.05:
-        return 30
+        return 8
     else:
-        return 60
+        return 15
 
 # ============================================================
 # REST HELPER FUNCTIONS
@@ -1839,7 +1839,7 @@ def run_signal_engine_for_index(index_name):
                             closes = [c["close"] for c in candles]
                         if len(closes) >= 15:
                             atr = calculate_atr(highs, lows, closes, 14)
-                            new_sl = prem - atr * 1.8
+                            new_sl = prem - atr * 0.8
                             if new_sl > signal_state[index_name]["stop_loss"]:
                                 signal_state[index_name]["stop_loss"] = new_sl
 
@@ -2223,19 +2223,22 @@ def run_signal_engine_for_index(index_name):
             lows = [c["low"] for c in candles]
             closes = [c["close"] for c in candles]
         atr = calculate_atr(highs, lows, closes, 14)
+        # Scalp-mode sizing: tight % floor + tight ATR multiple on both sides, so a
+        # trade resolves (win or lose) on a small move instead of waiting for a
+        # swing-sized one. Grade still controls relative aggressiveness.
         if "STRONG" in action:
-            sl_pct = 0.45
-            target_mult = 3.5
+            sl_pct = 0.20
+            target_mult = 1.2
         elif "LOW" in action:
-            sl_pct = 0.3
-            target_mult = 2.5
+            sl_pct = 0.12
+            target_mult = 0.8
         else:
-            sl_pct = 0.4
-            target_mult = 3.0
+            sl_pct = 0.15
+            target_mult = 1.0
         if is_expiry_day(index_name):
             sl_pct *= 0.7
             target_mult *= 0.8
-        sl = max(prem * (1 - sl_pct), prem - atr * 1.5)
+        sl = max(prem * (1 - sl_pct), prem - atr * 0.8)
         target = prem + atr * target_mult
 
         stop_dist = prem - sl
