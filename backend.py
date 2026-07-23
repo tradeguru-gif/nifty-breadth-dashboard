@@ -1176,27 +1176,26 @@ def check_hh_ll_pattern_entry(index_name, side, ce_vol, pe_vol, ce_oi, pe_oi):
         if not (lower_low_seq and confirm_candle and bearish_body):
             return False, "No 2-candle lower-low + 3rd candle confirmation"
 
-    # Volume confirmation: latest option tick volume vs recent average
+    # Momentum confirmation: require at least 2 of these 3 to hold, not all 3 -
+    # on noisy 1min data a strict AND of volume+OI+ADX/ATR rarely fires together
+    # even on genuine moves, which kills entry frequency without adding real edge.
     vol = ce_vol if side == "CE" else pe_vol
     vol_hist_dict = ce_volume_histories if side == "CE" else pe_volume_histories
     hist = list(vol_hist_dict[index_name])
+    vol_ok = True
     if len(hist) >= 10:
         avg_vol = sum(hist[-10:]) / 10
-        if avg_vol > 0 and vol < avg_vol * 1.05:
-            return False, f"Volume not confirming breakout ({vol} vs avg {avg_vol:.0f})"
+        vol_ok = avg_vol == 0 or vol >= avg_vol * 0.9
 
-    # OI confirmation: OI should be building in the traded option (fresh buying),
-    # not unwinding, using the recent OI history for that leg.
     oi = ce_oi if side == "CE" else pe_oi
     oi_hist_dict = ce_oi_histories if side == "CE" else pe_oi_histories
     oi_hist = list(oi_hist_dict[index_name])
+    oi_ok = True
     if len(oi_hist) >= 4 and oi > 0:
-        recent_oi_avg = sum(oi_hist[-4:-1]) / 3  # prior readings, excludes current
-        if recent_oi_avg > 0 and oi < recent_oi_avg * 0.98:
-            return False, "OI unwinding, not supporting fresh entry"
+        recent_oi_avg = sum(oi_hist[-4:-1]) / 3
+        oi_ok = recent_oi_avg == 0 or oi >= recent_oi_avg * 0.98
 
-    # ADX/ATR momentum confirmation on 1min candles: trend strength must not be
-    # decaying into the confirmation candle.
+    momentum_ok = True
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     closes = [c["close"] for c in candles]
@@ -1205,8 +1204,11 @@ def check_hh_ll_pattern_entry(index_name, side, ce_vol, pe_vol, ce_oi, pe_oi):
         adx_prev = calculate_adx(highs[:-1], lows[:-1], closes[:-1], 14)
         atr_now = calculate_atr(highs, lows, closes, 14)
         atr_prev = calculate_atr(highs[:-1], lows[:-1], closes[:-1], 14)
-        if adx_now < adx_prev * 0.95 and atr_now < atr_prev * 0.9:
-            return False, f"ADX/ATR momentum decaying (ADX {adx_prev:.1f}->{adx_now:.1f})"
+        momentum_ok = not (adx_now < adx_prev * 0.95 and atr_now < atr_prev * 0.9)
+
+    confirmations = sum([vol_ok, oi_ok, momentum_ok])
+    if confirmations < 2:
+        return False, f"Only {confirmations}/3 momentum confirmations (vol={vol_ok}, oi={oi_ok}, adx/atr={momentum_ok})"
 
     return True, "1min 2-candle HH/LL + 3rd candle confirmation passed"
 
@@ -2052,7 +2054,7 @@ def run_signal_engine_for_index(index_name):
 
         side = pattern_side
 
-        if not higher_tf_trend_ok(index_name, side):
+        if not higher_tf_trend_ok(index_name, side) and "STRONG" not in action:
             with _market_signal_lock:
                 market_signal[index_name]["alert_message"] = "5min trend disagrees with 1min pattern"
                 market_signal[index_name]["signal"] = "BLOCKED"
@@ -2063,9 +2065,14 @@ def run_signal_engine_for_index(index_name):
         prem = entry_ask if entry_ask > 0 else (ce_prem if side == "CE" else pe_prem)
         min_prem = INDEX_CONFIG[index_name].get("min_premium", 0)
         max_prem = INDEX_CONFIG[index_name].get("max_premium", 8000)
-        if prem <= 0 or prem < min_prem or prem > max_prem:
+        if prem <= 0:
             with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = f"Premium invalid: {prem:.2f}"
+                market_signal[index_name]["alert_message"] = "No live price/quote for this contract (feed or liquidity issue)"
+                market_signal[index_name]["signal"] = "WAITING"
+            return
+        if prem < min_prem or prem > max_prem:
+            with _market_signal_lock:
+                market_signal[index_name]["alert_message"] = f"Premium {prem:.2f} outside configured range [{min_prem}-{max_prem}]"
                 market_signal[index_name]["signal"] = "WAITING"
             return
 
