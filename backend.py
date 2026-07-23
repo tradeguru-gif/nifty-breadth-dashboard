@@ -1616,8 +1616,17 @@ def run_signal_engine_for_index(index_name):
 
         with _market_signal_lock:
             if candle_len < 10:
-                market_signal[index_name]["alert_message"] = f"Building candles ({candle_len}/10)"
-                market_signal[index_name]["signal"] = "WAITING"
+                market_signal[index_name].update({
+                    "alert_message": f"Building candles ({candle_len}/10)",
+                    "signal": "WAITING",
+                    "entry_price": 0,
+                    "stop_loss": 0,
+                    "target": 0,
+                    "current_pnl": 0.0,
+                    "pnl": 0.0,
+                    "strike_price": 0,
+                    "trading_symbol": "",
+                })
             else:
                 market_signal[index_name]["alert_message"] = "Ready – scanning for signals"
 
@@ -1704,9 +1713,9 @@ def run_signal_engine_for_index(index_name):
             action = "NO_TRADE"
 
         regime = detect_regime(index_name)
-        if regime == "RANGING":
+        if regime == "RANGING" and "STRONG" not in action:
             with _market_signal_lock:
-                market_signal[index_name]["alert_message"] = "Ranging market - no new entries"
+                market_signal[index_name]["alert_message"] = "Ranging market - no new entries (non-STRONG)"
                 market_signal[index_name]["signal"] = "BLOCKED"
             return
 
